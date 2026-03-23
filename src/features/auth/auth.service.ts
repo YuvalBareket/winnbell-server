@@ -10,14 +10,15 @@ export const registerUser = async (
   email: string,
   password: string,
   role: string,
-  inviteToken?: string, // Added optional token
+  inviteToken?: string,
 ) => {
   const pool = getPool();
   const transaction = new sql.Transaction(pool);
+  let locationId: number | null = null; // Track the location ID
+
   try {
     await transaction.begin();
 
-    // 1. Check if email exists (Standard logic)
     const checkUser = await transaction
       .request()
       .input('Email', sql.NVarChar, email)
@@ -25,11 +26,9 @@ export const registerUser = async (
 
     if (checkUser.recordset.length > 0) throw new Error('User already exists');
 
-    // 2. Hash Password (Standard logic)
     const salt = await bcrypt.genSalt(10);
     const passwordHash = await bcrypt.hash(password, salt);
 
-    // 3. Insert User
     const result = await transaction
       .request()
       .input('FullName', sql.NVarChar, fullName)
@@ -43,20 +42,21 @@ export const registerUser = async (
 
     const newUser = result.recordset[0];
 
-    // --- NEW: INVITATION LOGIC ---
+    // --- INVITATION LOGIC ---
     if (inviteToken) {
       try {
         const decoded: any = jwt.verify(
           inviteToken,
-          process.env.JWT_SECRET || 'secret_key',
+          process.env.JWT_SECRET || 'secret_key'
         );
 
         if (decoded.type === 'MANAGER_INVITE' && decoded.locationId) {
-          // Link the new user to the specific branch
+          locationId = decoded.locationId; // Store for the token
+          
           await transaction
             .request()
             .input('userId', sql.Int, newUser.id)
-            .input('locationId', sql.Int, decoded.locationId).query(`
+            .input('locationId', sql.Int, locationId).query(`
               UPDATE business_location 
               SET user_id = @userId 
               WHERE id = @locationId
@@ -66,15 +66,18 @@ export const registerUser = async (
         throw new Error('Invalid or expired invitation link');
       }
     }
-    // ----------------------------
 
     await transaction.commit();
 
-    // 4. Generate Token (Standard logic)
+    // Generate Token including location_id
     const token = jwt.sign(
-      { id: newUser.id, role: newUser.role },
+      { 
+        id: newUser.id, 
+        role: newUser.role,
+        location_id: locationId // Now included in registration token
+      },
       process.env.JWT_SECRET || 'secret_key',
-      { expiresIn: '30d' },
+      { expiresIn: '30d' }
     );
 
     return {
@@ -85,7 +88,8 @@ export const registerUser = async (
         email: newUser.email,
         fullName: newUser.full_name,
         role: newUser.role,
-        requiresBusinessSetup: newUser.role === 'Business' && !inviteToken, // No setup needed if they were invited!
+        location_id: locationId, // Return to frontend
+        requiresBusinessSetup: newUser.role === 'Business' && !inviteToken,
       },
     };
   } catch (error) {
@@ -138,9 +142,15 @@ export const loginUser = async (
             .query(
               'UPDATE business_location SET user_id = @userId WHERE id = @locationId',
             );
-
+await transaction
+        .request()
+        .input('userId', sql.Int, user.id)
+        .query(
+          "UPDATE [user] SET role = 'Business' WHERE id = @userId"
+        );
           await transaction.commit();
-          locationId = decoded.locationId;
+         user.role = 'Business'; 
+    locationId = decoded.locationId;
         }
       } catch (tokenErr) {
         if (transaction) await transaction.rollback();

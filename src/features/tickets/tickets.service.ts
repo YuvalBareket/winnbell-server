@@ -91,6 +91,40 @@ export const getBusinessTicketsService = async (
 
   return result.recordset;
 };
+export const getLocationTicketsService = async (
+  userId: number,
+  drawId: number,
+) => {
+  const pool = await getPool();
+
+  const query = `
+    SELECT 
+      t.id, 
+      t.code, 
+      t.status, 
+      t.activated_at,
+      bl.name as location_name,
+      u_act.full_name as activated_by_user,
+      u_act.email as activated_by_email
+    FROM ticket t
+    -- 1. We MUST join business_location to check if THIS user is the manager
+    INNER JOIN business_location bl ON t.location_id = bl.id
+    -- 2. Join the user who activated it (if any)
+    LEFT JOIN [user] u_act ON t.activated_by_user_id = u_act.id
+    -- 3. Filter by the manager's ID and the specific Draw
+    WHERE bl.user_id = @userId 
+    AND t.draw_id = @drawId
+    ORDER BY t.created_at DESC
+  `;
+
+  const result = await pool
+    .request()
+    .input('userId', sql.Int, userId)
+    .input('drawId', sql.Int, drawId)
+    .query(query);
+
+  return result.recordset;
+};
 export const checkFreeTicketEligibility = async (
   userId: number,
 ): Promise<FreeTicketStatus> => {

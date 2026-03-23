@@ -37,14 +37,14 @@ export const register = async (
 };
 export const login = async (req: Request, res: Response) => {
   try {
-    const { email, password } = req.body;
+    const { email, password,inviteToken } = req.body;
 
     if (!email || !password) {
       res.status(400).json({ message: 'Email and password are required' });
       return;
     }
 
-    const result = await authService.loginUser(email, password);
+    const result = await authService.loginUser(email, password,inviteToken);
     res.status(200).json(result);
   } catch (error: any) {
     console.error('Login Error:', error);

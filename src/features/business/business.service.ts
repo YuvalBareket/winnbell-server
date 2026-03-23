@@ -260,3 +260,17 @@ export const createManagerInviteLink = async (
   const baseUrl = process.env.CLIENT_URL || 'http://localhost:8081';
   return `${baseUrl}/register/Location?token=${token}`;
 };
+export const getBusinessLocationsByUserId = async (userId: number) => {
+  const pool = await getPool();
+  const result = await pool.request()
+    .input('userId', userId)
+    .query(`
+      SELECT bl.id 
+      FROM business_location bl
+      JOIN business b ON bl.business_id = b.id
+      WHERE b.user_id = @userId 
+      ORDER BY bl.created_at ASC
+    `);
+
+  return result.recordset; // Returns array of locations
+};
