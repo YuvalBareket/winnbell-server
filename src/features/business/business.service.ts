@@ -3,13 +3,18 @@ import {
   AddressSuggestion,
   BusinessSetupInput,
   GeoapifyResponse,
+  GeoapifyResult,
+  MyBusinessData,
+  NearbyBusiness,
+  UpdateBusinessInput,
+  UpdateLocationInput,
 } from './business.types.js';
 import jwt from 'jsonwebtoken';
 export const getNearbyBusinessesService = async (
   lat: number,
   lon: number,
   radius: number = 10,
-): Promise<any[]> => {
+): Promise<NearbyBusiness[]> => {
   const pool = getPool();
 
   // Haversine formula for MSSQL
@@ -84,7 +89,7 @@ export const getAddress = async (
 
   const data = (await res.json()) as GeoapifyResponse;
 
-  const toLabel = (r: any) =>
+  const toLabel = (r: GeoapifyResult): string =>
     (
       r.formatted ||
       [r.address_line1, r.address_line2].filter(Boolean).join(', ') ||
@@ -93,9 +98,9 @@ export const getAddress = async (
     ).trim();
 
   const results = (data.results || [])
-    .filter((r: any) => typeof r.lat === 'number' && typeof r.lon === 'number')
+    .filter((r: GeoapifyResult) => typeof r.lat === 'number' && typeof r.lon === 'number')
     // Prefer higher confidence/importance when provided
-    .sort((a: any, b: any) => {
+    .sort((a: GeoapifyResult, b: GeoapifyResult) => {
       const ac = a.rank?.confidence ?? a.rank?.importance ?? 0;
       const bc = b.rank?.confidence ?? b.rank?.importance ?? 0;
       return bc - ac;
@@ -177,7 +182,7 @@ export const createFullBusinessProfile = async (
 };
 // server/src/features/business/business.service.ts
 
-export const getMyBusinessData = async (userId: number) => {
+export const getMyBusinessData = async (userId: number): Promise<MyBusinessData | undefined> => {
   const pool = getPool(); // Following your standard DB pattern
 
   const result = await pool.request().input('userId', sql.Int, userId).query(`
@@ -260,6 +265,62 @@ export const createManagerInviteLink = async (
   const baseUrl = process.env.CLIENT_URL || 'http://localhost:8081';
   return `${baseUrl}/register/Location?token=${token}`;
 };
+export const updateBusinessProfile = async (
+  ownerUserId: number,
+  data: UpdateBusinessInput,
+): Promise<void> => {
+  const pool = getPool();
+
+  const result = await pool
+    .request()
+    .input('ownerId', sql.Int, ownerUserId)
+    .input('sector', sql.NVarChar, data.businessSector)
+    .input('description', sql.NVarChar, data.description)
+    .input('terms_text', sql.NVarChar, data.terms_text)
+    .query(`
+      UPDATE business
+      SET sector      = @sector,
+          description = @description,
+          terms_text  = @terms_text
+      WHERE user_id = @ownerId
+    `);
+
+  if (result.rowsAffected[0] === 0) {
+    throw new Error('BUSINESS_NOT_FOUND');
+  }
+};
+
+export const updateBusinessLocation = async (
+  locationId: number,
+  ownerUserId: number,
+  data: UpdateLocationInput,
+): Promise<void> => {
+  const pool = getPool();
+
+  const result = await pool
+    .request()
+    .input('locId', sql.Int, locationId)
+    .input('ownerId', sql.Int, ownerUserId)
+    .input('name', sql.NVarChar, data.name)
+    .input('address', sql.NVarChar, data.address)
+    .input('lat', sql.Decimal(10, 8), data.lat)
+    .input('lon', sql.Decimal(11, 8), data.lon)
+    .query(`
+      UPDATE bl
+      SET bl.name      = @name,
+          bl.address   = @address,
+          bl.latitude  = @lat,
+          bl.longitude = @lon
+      FROM business_location bl
+      JOIN business b ON bl.business_id = b.id
+      WHERE bl.id = @locId AND b.user_id = @ownerId
+    `);
+
+  if (result.rowsAffected[0] === 0) {
+    throw new Error('UNAUTHORIZED_OR_INVALID_LOCATION');
+  }
+};
+
 export const getBusinessLocationsByUserId = async (userId: number) => {
   const pool = await getPool();
   const result = await pool.request()

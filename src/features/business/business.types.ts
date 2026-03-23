@@ -6,6 +6,45 @@ export interface INearbyQuery {
   radius?: string; // in Kilometers
 }
 
+/** Shape returned by the nearby search query */
+export interface NearbyBusiness {
+  location_id: number;
+  address: string;
+  latitude: number;
+  longitude: number;
+  id: number;
+  description: string;
+  terms_text: string;
+  name: string;
+  sector: string;
+  logo_url: string | null;
+  distance_km: number;
+}
+
+/** Shape of each location in the FOR JSON subquery inside getMyBusinessData */
+export interface MyBusinessLocation {
+  id: number;
+  name: string;
+  address: string;
+  manager_id: number | null;
+  manager_name: string | null;
+  is_active: boolean;
+}
+
+/** Shape returned by getMyBusinessData */
+export interface MyBusinessData {
+  id: number;
+  name: string;
+  sector: string;
+  description: string;
+  terms_text: string;
+  subscription_status: string | null;
+  monthly_fee: number | null;
+  next_billing_date: string | null;
+  locations: MyBusinessLocation[];
+}
+
+/** @deprecated Use NearbyBusiness instead */
 export interface IBusinessLocation {
   id: number;
   name: string;
@@ -22,11 +61,15 @@ export type AddressSuggestion = {
   lat: number;
   lon: number;
 };
-type GeoapifyResult = {
-  formatted: string;
+export type GeoapifyResult = {
+  formatted?: string;
+  address_line1?: string;
+  address_line2?: string;
+  name?: string;
   lat: number;
-  long: number;
-  [key: string]: any;
+  lon: number;
+  rank?: { confidence?: number; importance?: number };
+  [key: string]: unknown;
 };
 
 export type GeoapifyResponse = {
@@ -45,5 +88,18 @@ export interface BusinessSetupInput {
   businessSector: string;
   description: string;
   locations: LocationInput[];
+  terms_text: string;
+}
+
+export interface UpdateLocationInput {
+  name: string;
+  address: string;
+  lat: number;
+  lon: number;
+}
+
+export interface UpdateBusinessInput {
+  businessSector: string;
+  description: string;
   terms_text: string;
 }

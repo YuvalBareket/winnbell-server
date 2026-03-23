@@ -1,5 +1,6 @@
 // src/features/business/business.controller.ts
 import { Request, Response } from 'express';
+import { AuthRequest } from '../../shared/middleware/auth.middleware.js';
 import { INearbyQuery } from './business.types.js';
 import {
   createFullBusinessProfile,
@@ -7,6 +8,8 @@ import {
   getAddress,
   getMyBusinessData,
   getNearbyBusinessesService,
+  updateBusinessLocation,
+  updateBusinessProfile,
 } from './business.service.js';
 
 export const getNearby = async (
@@ -39,55 +42,101 @@ export const getAddressController = async (req: Request, res: Response) => {
     const text = String(req.query.q || '').trim();
     const data = await getAddress(text);
     res.json(data);
-  } catch (err: any) {
-    res.status(400).json({ message: err.message });
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Bad request';
+    res.status(400).json({ message });
   }
 };
-export const setupBusiness = async (req: Request, res: Response) => {
+export const setupBusiness = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    // req.user is populated by your protect/auth middleware
-    const userId = (req as any).user.id;
-    const result = await createFullBusinessProfile(
-      userId,
-
-      req.body,
-    );
+    const userId = req.user!.id;
+    const result = await createFullBusinessProfile(userId, req.body);
 
     res.status(201).json({
       success: true,
       message: 'Business profile and locations created successfully',
       businessId: result.businessId,
     });
-  } catch (error: any) {
-    res.status(500).json({ message: error.message || 'Internal Server Error' });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : 'Internal Server Error';
+    res.status(500).json({ message });
   }
 };
-export const getMyBusiness = async (req: Request, res: Response) => {
+
+export const getMyBusiness = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const userId = (req as any).user.id; // Populated by authenticateToken
+    const userId = req.user!.id;
     const business = await getMyBusinessData(userId);
 
     if (!business) {
-      return res.status(404).json({ message: 'Business profile not found' });
+      res.status(404).json({ message: 'Business profile not found' });
+      return;
     }
 
     res.json(business);
-  } catch (error: any) {
-    res.status(500).json({ message: error.message || 'Internal Server Error' });
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : 'Internal Server Error';
+    res.status(500).json({ message });
   }
 };
-export const createInviteLink = async (req: Request, res: Response) => {
+
+export const updateBusiness = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { businessSector, description, terms_text } = req.body as {
+      businessSector: string;
+      description: string;
+      terms_text: string;
+    };
+
+    await updateBusinessProfile(req.user!.id, { businessSector, description, terms_text });
+    res.status(204).send();
+  } catch (error: unknown) {
+    if (error instanceof Error && error.message === 'BUSINESS_NOT_FOUND') {
+      res.status(404).json({ message: 'Business not found' });
+      return;
+    }
+    res.status(500).json({ message: 'Failed to update business' });
+  }
+};
+
+export const updateLocation = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { locationId } = req.params;
+    const { name, address, lat, lon } = req.body as {
+      name: string;
+      address: string;
+      lat: number;
+      lon: number;
+    };
+
+    await updateBusinessLocation(Number(locationId), req.user!.id, {
+      name,
+      address,
+      lat,
+      lon,
+    });
+
+    res.status(204).send();
+  } catch (error: unknown) {
+    if (error instanceof Error && error.message === 'UNAUTHORIZED_OR_INVALID_LOCATION') {
+      res.status(403).json({ message: 'Forbidden' });
+      return;
+    }
+    res.status(500).json({ message: 'Failed to update location' });
+  }
+};
+
+export const createInviteLink = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { locationId } = req.params;
 
-    // 1. Generate the secure token
     const inviteLink = await createManagerInviteLink(
       Number(locationId),
-      req.user?.id,
+      req.user!.id,
     );
 
     res.json({ inviteLink });
-  } catch (error: any) {
+  } catch (error: unknown) {
     res.status(500).json({ message: 'Failed to generate invite link' });
   }
 };
