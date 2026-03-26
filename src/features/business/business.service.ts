@@ -131,23 +131,11 @@ export const createFullBusinessProfile = async (
   try {
     await transaction.begin();
 
-    // 1. Fetch the User's Name to use as the Business Name
-    const userResult = await transaction
-      .request()
-      .input('userId', sql.Int, userId)
-      .query('SELECT full_name FROM [user] WHERE id = @userId');
-
-    if (userResult.recordset.length === 0) {
-      throw new Error('User not found');
-    }
-
-    const businessName = userResult.recordset[0].full_name;
-
-    // 2. Create the Business Record using the fetched name
+    // 1. Create the Business Record using the provided name
     const businessResult = await transaction
       .request()
       .input('userId', sql.Int, userId)
-      .input('Name', sql.NVarChar, businessName)
+      .input('Name', sql.NVarChar, data.businessName)
       .input('Sector', sql.NVarChar, data.businessSector)
       .input('Description', sql.NVarChar, data.description)
       .input('Terms', sql.NVarChar, data.terms_text).query(`

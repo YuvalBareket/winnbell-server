@@ -85,6 +85,7 @@ export interface LocationInput {
 }
 
 export interface BusinessSetupInput {
+  businessName: string;
   businessSector: string;
   description: string;
   locations: LocationInput[];
