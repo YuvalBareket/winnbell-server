@@ -20,8 +20,8 @@ export const register = async (
 
     const result = await authService.registerUser(fullName, email, password, role, inviteToken);
     res.status(201).json(result);
-  } catch (error: any) {
-    if (error.message === 'User already exists') {
+  } catch (error: unknown) {
+    if (error instanceof Error && error.message === 'User already exists') {
       res.status(409).json({ message: 'User already exists' });
       return;
     }
@@ -40,7 +40,7 @@ export const login = async (req: Request, res: Response) => {
 
     const result = await authService.loginUser(email, password, inviteToken);
     res.status(200).json(result);
-  } catch (error: any) {
+  } catch {
     res.status(401).json({ message: 'Invalid email or password' });
   }
 };
@@ -71,8 +71,8 @@ export const syncUser = async (req: Request, res: Response): Promise<void> => {
     });
 
     res.json(result);
-  } catch (err: any) {
-    console.error('Sync error:', err.message);
+  } catch (err: unknown) {
+    console.error('Sync error:', err instanceof Error ? err.message : err);
     res.status(401).json({ message: 'Invalid or expired token' });
   }
 };
@@ -97,30 +97,36 @@ export const handleClerkWebhook = async (req: Request, res: Response): Promise<v
   const payload = (req.body as Buffer).toString();
   const wh = new Webhook(CLERK_WEBHOOK_SECRET);
 
-  let evt: any;
+  let evt: { type: string; data: Record<string, unknown> };
   try {
     evt = wh.verify(payload, {
       'svix-id': svix_id,
       'svix-timestamp': svix_timestamp,
       'svix-signature': svix_signature,
-    });
-  } catch (err: any) {
+    }) as { type: string; data: Record<string, unknown> };
+  } catch {
     res.status(400).json({ error: 'Invalid signature' });
     return;
   }
 
   if (evt.type === 'user.created') {
-    const { id, email_addresses, first_name, last_name, unsafe_metadata } = evt.data;
+    const { id, email_addresses, first_name, last_name, unsafe_metadata } = evt.data as {
+      id: string;
+      email_addresses: Array<{ email_address: string }>;
+      first_name: string | null;
+      last_name: string | null;
+      unsafe_metadata: Record<string, unknown>;
+    };
     const email = email_addresses[0]?.email_address;
     const fullName = `${first_name || ''} ${last_name || ''}`.trim();
 
     try {
       await authService.syncExternalUser(id, email, fullName, {
-        role: unsafe_metadata?.role,
-        inviteToken: unsafe_metadata?.inviteToken,
+        role: typeof unsafe_metadata?.role === 'string' ? unsafe_metadata.role : undefined,
+        inviteToken: typeof unsafe_metadata?.inviteToken === 'string' ? unsafe_metadata.inviteToken : null,
       });
-    } catch (dbErr: any) {
-      console.error('Webhook DB sync failed:', dbErr.message);
+    } catch (dbErr: unknown) {
+      console.error('Webhook DB sync failed:', dbErr instanceof Error ? dbErr.message : dbErr);
       res.status(500).json({ error: 'Internal database sync failed' });
       return;
     }

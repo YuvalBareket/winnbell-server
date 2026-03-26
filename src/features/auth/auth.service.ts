@@ -3,6 +3,12 @@ import bcrypt from 'bcryptjs';
 import { getPool } from '../../shared/db/db.js';
 import jwt from 'jsonwebtoken';
 
+interface ManagerInvitePayload {
+  type: 'MANAGER_INVITE';
+  locationId: number;
+  businessId: number;
+}
+
 // server/src/features/auth/auth.service.ts
 
 export const registerUser = async (
@@ -45,10 +51,10 @@ export const registerUser = async (
     // --- INVITATION LOGIC ---
     if (inviteToken) {
       try {
-        const decoded: any = jwt.verify(
+        const decoded = jwt.verify(
           inviteToken,
           process.env.JWT_SECRET || 'secret_key'
-        );
+        ) as ManagerInvitePayload;
 
         if (decoded.type === 'MANAGER_INVITE' && decoded.locationId) {
           locationId = decoded.locationId; // Store for the token
@@ -128,10 +134,10 @@ export const loginUser = async (
     // 3. Handle Invitation Token on Login
     if (inviteToken) {
       try {
-        const decoded: any = jwt.verify(
+        const decoded = jwt.verify(
           inviteToken,
           process.env.JWT_SECRET || 'secret_key',
-        );
+        ) as ManagerInvitePayload;
         if (decoded.type === 'MANAGER_INVITE' && decoded.locationId) {
           await transaction.begin();
           // Link existing user to the new location
@@ -168,6 +174,16 @@ await transaction
       }
     }
 
+    // Check if a Business owner has already completed business setup
+    let hasBusiness = false;
+    if (user.role === 'Business' && !locationId) {
+      const bizResult = await pool
+        .request()
+        .input('userId', sql.Int, user.id)
+        .query('SELECT id FROM business WHERE user_id = @userId');
+      hasBusiness = bizResult.recordset.length > 0;
+    }
+
     // 4. Generate Token (JWT) - Now including locationId
     const token = jwt.sign(
       {
@@ -188,6 +204,7 @@ await transaction
         fullName: user.full_name,
         role: user.role,
         location_id: locationId,
+        requiresBusinessSetup: user.role === 'Business' && !locationId && !hasBusiness,
       },
     };
   } catch (error) {
@@ -241,14 +258,14 @@ export const syncExternalUser = async (
     // 2. HANDLE INVITATION LOGIC (Unified from Register/Login)
     if (inviteToken) {
       try {
-        const decoded: any = jwt.verify(
+        const decoded = jwt.verify(
           inviteToken,
           process.env.JWT_SECRET || 'secret_key'
-        );
+        ) as ManagerInvitePayload;
 
         if (decoded.type === 'MANAGER_INVITE' && decoded.locationId) {
           locationId = decoded.locationId;
-          
+
           // Link user to the location
           await transaction
             .request()
@@ -268,9 +285,9 @@ export const syncExternalUser = async (
           
           dbUser.role = 'Business';
         }
-      } catch (tokenErr) {
+      } catch (tokenErr: unknown) {
         // If token is expired, we don't crash the sync, just log it
-        console.error('Invite token processing failed during sync:', tokenErr.message);
+        console.error('Invite token processing failed during sync:', tokenErr instanceof Error ? tokenErr.message : tokenErr);
       }
     } else {
       // 3. IF NO INVITE: Check if they are already a manager (Existing user login flow)

@@ -1,4 +1,4 @@
-import { UserPayload } from './auth'; // Or wherever your User interface is defined
+import { UserPayload } from '../shared/middleware/auth.middleware';
 
 declare global {
   namespace Express {

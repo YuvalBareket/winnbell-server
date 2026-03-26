@@ -5,6 +5,7 @@ import jwt from 'jsonwebtoken';
 export interface UserPayload {
   id: number;
   role: string;
+  location_id?: number | null;
 }
 
 // 2. Extend the standard Request to include 'user'
