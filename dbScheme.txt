@@ -1,0 +1,105 @@
+Table user {
+  id int [pk, increment]
+  
+  // The "Universal Bridge" ID
+  // This will store Clerk IDs today and Firebase IDs tomorrow
+  external_auth_id varchar(255) [null, unique] 
+
+  full_name varchar(255)
+  email varchar(255) [unique, not null]
+  
+  // Logic & Business
+  role varchar(50) [not null, default: 'User', note: 'User, Business, or Admin']
+  is_active bit [not null, default: 1]
+  is_email_verified bit [not null, default: 0]
+  
+  // Tracking
+  created_at datetime2 [not null, default: `getdate()`]
+  updated_at datetime2 [null]
+}
+Table business {
+  id int [pk, increment]
+  user_id int [unique, not null, ref: > user.id]
+  name varchar(255) [not null]
+  description varchar(max)
+  sector varchar(50) [not null, note: 'Food, Retail, Service']
+  logo_url varchar(500)
+  terms_text text [note: 'Global terms for the business']
+  created_at datetime2 [not null, default: `CURRENT_TIMESTAMP`]
+}
+
+Table business_location {
+  id int [pk, increment]
+  business_id int [not null, ref: > business.id]
+    name varchar(255) 
+  user_id int [ ref: > user.id]
+
+  address varchar(500)
+  latitude decimal(10,8)
+  longitude decimal(11,8)
+  is_active bit [default: 1]
+  created_at datetime2 [default: `CURRENT_TIMESTAMP`]
+}
+
+Table subscription {
+  id int [pk, increment]
+  business_id int [unique, not null, ref: > business.id]
+  monthly_fee decimal(10,2) [not null, note: 'Contributed to the draw prize']
+  status varchar(20) [default: 'Active', note: 'Active, Cancelled, Past_Due']
+  next_billing_date datetime2
+  auto_renew bit [default: 1]
+  created_at datetime2 [default: `CURRENT_TIMESTAMP`]
+}
+
+Table draw {
+  id int [pk, increment]
+  name varchar(255) [not null]
+  prize_name varchar(255) [not null]
+  total_pool_amount decimal(12,2) [default: 0, note: 'Sum of all participant fees']
+  draw_date datetime2 [not null]
+  status varchar(50) [not null, default: 'Open', note: 'Open, Closed']
+}
+
+// Links businesses to specific draws based on their active subscription
+Table draw_participant {
+  id int [pk, increment]
+  draw_id int [not null, ref: > draw.id]
+  business_id int [not null, ref: > business.id]
+  fee_at_entry decimal(10,2) [note: 'Snapshot of subscription fee when draw started']
+  joined_at datetime2 [default: `CURRENT_TIMESTAMP`]
+}
+
+Table ticket {
+  id int [pk, increment]
+  code varchar(8) [unique, not null, note: '8-char alphanumeric']
+  status varchar(20) [not null, default: 'Issued', note: 'Issued or Activated']
+  
+  // Relations
+  business_id int [ref: > business.id, note: 'NULL for Free Tickets']
+  location_id int [ref: > business_location.id, note: 'Which branch issued it']
+  activated_by_user_id int [ref: > user.id]
+  draw_id int [not null, ref: > draw.id]
+  
+  batch_id varchar(100)
+  created_at datetime2 [not null, default: `CURRENT_TIMESTAMP`]
+  activated_at datetime2
+}
+
+Table free_ticket_usage {
+  id int [pk, increment]
+  user_id int [not null, ref: > user.id]
+  activated_at datetime2 [not null, default: `CURRENT_TIMESTAMP`]
+  
+  indexes {
+    (user_id, activated_at) [name: "IX_user_ticket_usage"]
+  }
+}
+
+Table security_log {
+  id int [pk, increment]
+  user_id int [ref: > user.id]
+  ip_address varchar(45) [not null]
+  failed_attempts int [not null, default: 0]
+  blocked_until datetime2
+  created_at datetime2 [not null, default: `CURRENT_TIMESTAMP`]
+}

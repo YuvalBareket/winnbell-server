@@ -195,3 +195,129 @@ await transaction
     throw error;
   }
 };
+
+export const syncExternalUser = async (
+  externalId: string,
+  email: string,
+  fullName: string,
+  metadata?: { role?: string; inviteToken?: string | null }
+) => {
+  const pool = await getPool();
+  const transaction = new sql.Transaction(pool);
+  let locationId: number | null = null;
+  const rawRole = metadata?.role || 'User';
+  const validRoles = ['User', 'Business', 'Admin'];
+  const role = validRoles.find(r => r.toLowerCase() === rawRole.toLowerCase()) || 'User';
+  const inviteToken = metadata?.inviteToken;
+
+  try {
+    await transaction.begin();
+
+    // 1. UPSERT USER: Create if not exists, or update external_auth_id if email matches
+    const userUpsert = await transaction
+      .request()
+      .input('externalId', sql.NVarChar, externalId)
+      .input('email', sql.NVarChar, email)
+      .input('fullName', sql.NVarChar, fullName)
+      .input('role', sql.NVarChar, role)
+      .query(`
+        IF NOT EXISTS (SELECT 1 FROM [user] WHERE email = @email)
+        BEGIN
+          INSERT INTO [user] (external_auth_id, email, full_name, role, is_active)
+          OUTPUT INSERTED.id, INSERTED.role, INSERTED.full_name as fullName, INSERTED.email
+          VALUES (@externalId, @email, @fullName, @role, 1)
+        END
+        ELSE
+        BEGIN
+          UPDATE [user] 
+          SET external_auth_id = @externalId, updated_at = GETDATE()
+          OUTPUT INSERTED.id, INSERTED.role, INSERTED.full_name as fullName, INSERTED.email
+          WHERE email = @email
+        END
+      `);
+
+    const dbUser = userUpsert.recordset[0];
+
+    // 2. HANDLE INVITATION LOGIC (Unified from Register/Login)
+    if (inviteToken) {
+      try {
+        const decoded: any = jwt.verify(
+          inviteToken,
+          process.env.JWT_SECRET || 'secret_key'
+        );
+
+        if (decoded.type === 'MANAGER_INVITE' && decoded.locationId) {
+          locationId = decoded.locationId;
+          
+          // Link user to the location
+          await transaction
+            .request()
+            .input('userId', sql.Int, dbUser.id)
+            .input('locationId', sql.Int, locationId)
+            .query(`
+              UPDATE business_location 
+              SET user_id = @userId 
+              WHERE id = @locationId
+            `);
+
+          // Force role to Business as per your original logic
+          await transaction
+            .request()
+            .input('userId', sql.Int, dbUser.id)
+            .query("UPDATE [user] SET role = 'Business' WHERE id = @userId");
+          
+          dbUser.role = 'Business';
+        }
+      } catch (tokenErr) {
+        // If token is expired, we don't crash the sync, just log it
+        console.error('Invite token processing failed during sync:', tokenErr.message);
+      }
+    } else {
+      // 3. IF NO INVITE: Check if they are already a manager (Existing user login flow)
+      const locResult = await transaction
+        .request()
+        .input('userId', sql.Int, dbUser.id)
+        .query('SELECT id FROM business_location WHERE user_id = @userId');
+
+      if (locResult.recordset.length > 0) {
+        locationId = locResult.recordset[0].id;
+      }
+    }
+
+    // Check if a Business owner has already completed business setup
+    let hasBusiness = false;
+    if (dbUser.role === 'Business' && !locationId) {
+      const bizResult = await transaction
+        .request()
+        .input('userId', sql.Int, dbUser.id)
+        .query('SELECT id FROM business WHERE user_id = @userId');
+      hasBusiness = bizResult.recordset.length > 0;
+    }
+
+    await transaction.commit();
+
+    // 4. GENERATE INTERNAL JWT (Provider-Agnostic)
+    const internalToken = jwt.sign(
+      {
+        id: dbUser.id,
+        role: dbUser.role,
+        location_id: locationId
+      },
+      process.env.JWT_SECRET || 'secret_key',
+      { expiresIn: '30d' }
+    );
+
+    return {
+      message: 'Sync successful',
+      token: internalToken,
+      user: {
+        ...dbUser,
+        location_id: locationId,
+        requiresBusinessSetup: dbUser.role === 'Business' && !locationId && !hasBusiness,
+      },
+    };
+  } catch (error) {
+    if (transaction) await transaction.rollback();
+    throw error;
+  }
+};
