@@ -119,7 +119,7 @@ export const getLocationTicketsService = async (
     -- 2. Join the user who activated it (if any)
     LEFT JOIN [user] u_act ON t.activated_by_user_id = u_act.id
     -- 3. Filter by the manager's ID and the specific Draw
-    WHERE bl.user_id = @userId 
+    WHERE bl.manager_user_id = @userId
     AND t.draw_id = @drawId
     ORDER BY t.created_at DESC
   `;
@@ -274,9 +274,10 @@ export const generateTicketService = async (
         SELECT bl.business_id, bl.id as location_id
         FROM business_location bl
         JOIN business b ON bl.business_id = b.id
-        WHERE bl.id = @l_id 
-        AND (b.user_id = @u_id OR bl.user_id = @u_id) 
+        WHERE bl.id = @l_id
+        AND (b.user_id = @u_id OR bl.manager_user_id = @u_id)
         AND bl.is_active = 1
+        AND b.is_active = 1
       `);
 
     if (authInfo.recordset.length === 0) {

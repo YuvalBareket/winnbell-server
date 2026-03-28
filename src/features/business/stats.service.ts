@@ -154,7 +154,7 @@ export const getBusinessStats = async (
     SELECT
       d.id AS draw_id,
       d.name AS draw_name,
-      d.prize_amount,
+      d.prize_pool AS prize_amount,
       CONVERT(varchar(10), d.draw_date, 23) AS draw_date,
       d.status AS draw_status,
       COUNT(t.id) AS issued,
@@ -163,7 +163,7 @@ export const getBusinessStats = async (
     LEFT JOIN ticket t ON t.draw_id = d.id
       AND t.business_id = @businessId
       ${scopedLocationId ? 'AND t.location_id = @locationId' : ''}
-    GROUP BY d.id, d.name, d.prize_amount, d.draw_date, d.status
+    GROUP BY d.id, d.name, d.prize_pool, d.draw_date, d.status
     ORDER BY d.draw_date DESC
   `);
 

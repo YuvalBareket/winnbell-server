@@ -39,7 +39,7 @@ export const getNearbyBusinessesService = async (
       )) AS distance_km
     FROM business_location loc
     INNER JOIN business b ON loc.business_id = b.id
-    WHERE loc.is_active = 1 AND (6371 * acos(
+    WHERE loc.is_active = 1 AND b.is_active = 1 AND (6371 * acos(
         LEAST(1.0, GREATEST(-1.0, 
           cos(@lat * 0.0174532925) * cos(loc.latitude * 0.0174532925) * cos((loc.longitude * 0.0174532925) - (@lon * 0.0174532925)) + 
           sin(@lat * 0.0174532925) * sin(loc.latitude * 0.0174532925)
@@ -174,25 +174,26 @@ export const getMyBusinessData = async (userId: number): Promise<MyBusinessData 
   const pool = getPool(); // Following your standard DB pattern
 
   const result = await pool.request().input('userId', sql.Int, userId).query(`
-      SELECT 
-        b.id, 
-        b.name, 
-        b.sector, 
-        b.description, 
+      SELECT
+        b.id,
+        b.name,
+        b.sector,
+        b.description,
         b.terms_text,
+        b.is_active,
         s.status as subscription_status,
-        s.monthly_fee,
-        s.next_billing_date,
+        s.current_period_end,
+        s.cancel_at_period_end,
         (
           SELECT 
             bl.id, 
             bl.name, 
             bl.address, 
-            bl.user_id as manager_id, 
+            bl.manager_user_id as manager_id,
             u.full_name as manager_name,
             bl.is_active
           FROM business_location bl
-          LEFT JOIN [user] u ON bl.user_id = u.id
+          LEFT JOIN [user] u ON bl.manager_user_id = u.id
           WHERE bl.business_id = b.id
           FOR JSON PATH
         ) as locations

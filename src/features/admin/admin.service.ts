@@ -21,8 +21,8 @@ export const getBusinessesWithStats = async () => {
 export const getActiveDraws = async () => {
   const pool = getPool();
   const result = await pool.query(`
-    SELECT id, name, prize_name, status 
-    FROM dbo.draw 
+    SELECT id, name, status
+    FROM dbo.draw
     WHERE status = 'Open'
   `);
   return result.recordset;
@@ -107,8 +107,8 @@ export const createBusinessService = async (data: {
 export const getAllDrawsService = async () => {
   const pool = getPool();
   const result = await pool.query(`
-    SELECT id, name, prize_name, prize_amount, draw_date, status 
-    FROM dbo.draw 
+    SELECT id, name, prize_pool AS prize_amount, prize_percentage, draw_date, status
+    FROM dbo.draw
     ORDER BY draw_date DESC
   `);
   return result.recordset;
@@ -116,21 +116,20 @@ export const getAllDrawsService = async () => {
 
 export const createDrawService = async (data: {
   name: string;
-  prize_name: string;
-  prize_amount: number;
+  prize_percentage?: number;
   draw_date: string;
 }) => {
   const pool = getPool();
+  const prizePct = data.prize_percentage ?? 80.00;
   const result = await pool
     .request()
     .input('name', sql.NVarChar(100), data.name)
-    .input('prizeName', sql.NVarChar(100), data.prize_name)
-    .input('prizeAmount', sql.Decimal(12, 2), data.prize_amount)
+    .input('prizePct', sql.Decimal(5, 2), prizePct)
     .input('drawDate', sql.DateTime, new Date(data.draw_date))
     .query(`
-      INSERT INTO dbo.draw (name, prize_name, prize_amount, draw_date, status)
+      INSERT INTO dbo.draw (name, prize_pool, prize_percentage, draw_date, status)
       OUTPUT inserted.*
-      VALUES (@name, @prizeName, @prizeAmount, @drawDate, 'Open')
+      VALUES (@name, 0, @prizePct, @drawDate, 'Upcoming')
     `);
   return result.recordset[0];
 };

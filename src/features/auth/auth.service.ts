@@ -145,7 +145,7 @@ export const loginUser = async (
             .input('userId', sql.Int, user.id)
             .input('locationId', sql.Int, decoded.locationId)
             .query(
-              'UPDATE business_location SET user_id = @userId WHERE id = @locationId',
+              'UPDATE business_location SET manager_user_id = @userId WHERE id = @locationId',
             );
           await transaction
             .request()
@@ -164,7 +164,7 @@ export const loginUser = async (
       const locResult = await pool
         .request()
         .input('userId', sql.Int, user.id)
-        .query('SELECT id FROM business_location WHERE user_id = @userId');
+        .query('SELECT id FROM business_location WHERE manager_user_id = @userId');
 
       if (locResult.recordset.length > 0) {
         locationId = locResult.recordset[0].id;
@@ -173,12 +173,14 @@ export const loginUser = async (
 
     // Check if a Business owner has already completed business setup
     let hasBusiness = false;
+    let businessIsActive = false;
     if (user.role === 'Business' && !locationId) {
       const bizResult = await pool
         .request()
         .input('userId', sql.Int, user.id)
-        .query('SELECT id FROM business WHERE user_id = @userId');
+        .query('SELECT id, is_active FROM business WHERE user_id = @userId');
       hasBusiness = bizResult.recordset.length > 0;
+      businessIsActive = !!bizResult.recordset[0]?.is_active;
     }
 
     // 4. Generate Token (JWT) - Now including locationId
@@ -186,7 +188,7 @@ export const loginUser = async (
       {
         id: user.id,
         role: user.role,
-        location_id: locationId, // Embedded for immediate frontend access
+        location_id: locationId,
       },
       process.env.JWT_SECRET as string,
       { expiresIn: '30d' },
@@ -202,6 +204,7 @@ export const loginUser = async (
         role: user.role,
         location_id: locationId,
         requiresBusinessSetup: user.role === 'Business' && !locationId && !hasBusiness,
+        businessIsActive,
       },
     };
   } catch (error) {
@@ -290,7 +293,7 @@ export const syncExternalUser = async (
       const locResult = await transaction
         .request()
         .input('userId', sql.Int, dbUser.id)
-        .query('SELECT id FROM business_location WHERE user_id = @userId');
+        .query('SELECT id FROM business_location WHERE manager_user_id = @userId');
 
       if (locResult.recordset.length > 0) {
         locationId = locResult.recordset[0].id;
@@ -299,12 +302,14 @@ export const syncExternalUser = async (
 
     // Check if a Business owner has already completed business setup
     let hasBusiness = false;
+    let businessIsActive = false;
     if (dbUser.role === 'Business' && !locationId) {
       const bizResult = await transaction
         .request()
         .input('userId', sql.Int, dbUser.id)
-        .query('SELECT id FROM business WHERE user_id = @userId');
+        .query('SELECT id, is_active FROM business WHERE user_id = @userId');
       hasBusiness = bizResult.recordset.length > 0;
+      businessIsActive = !!bizResult.recordset[0]?.is_active;
     }
 
     await transaction.commit();
@@ -327,6 +332,7 @@ export const syncExternalUser = async (
         ...dbUser,
         location_id: locationId,
         requiresBusinessSetup: dbUser.role === 'Business' && !locationId && !hasBusiness,
+        businessIsActive,
       },
     };
   } catch (error) {

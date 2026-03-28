@@ -1,105 +1,157 @@
+// ─── Users ───────────────────────────────────────────────────────────────────
+
 Table user {
   id int [pk, increment]
-  
-  // The "Universal Bridge" ID
-  // This will store Clerk IDs today and Firebase IDs tomorrow
-  external_auth_id varchar(255) [null, unique] 
-
+  external_auth_id varchar(255) [null, unique, note: 'Clerk ID — provider-agnostic bridge']
   full_name varchar(255)
   email varchar(255) [unique, not null]
-  
-  // Logic & Business
   role varchar(50) [not null, default: 'User', note: 'User, Business, or Admin']
   is_active bit [not null, default: 1]
   is_email_verified bit [not null, default: 0]
-  
-  // Tracking
-  created_at datetime2 [not null, default: `getdate()`]
+  created_at datetime2 [not null, default: `GETDATE()`]
   updated_at datetime2 [null]
 }
+
+// ─── Businesses ───────────────────────────────────────────────────────────────
+
 Table business {
   id int [pk, increment]
   user_id int [unique, not null, ref: > user.id]
   name varchar(255) [not null]
-  description varchar(max)
-  sector varchar(50) [not null, note: 'Food, Retail, Service']
-  logo_url varchar(500)
-  terms_text text [note: 'Global terms for the business']
-  created_at datetime2 [not null, default: `CURRENT_TIMESTAMP`]
+  description varchar(max) [null]
+  sector varchar(50) [not null, note: 'Food, Coffee, Gym, Retail, Service']
+  logo_url varchar(500) [null]
+  terms_text varchar(max) [null, note: 'Ticket earning terms shown to customers']
+  ticket_balance int [not null, default: 0, note: 'Running count of issued tickets']
+  is_active bit [not null, default: 0, note: 'Set 1 after first successful subscription payment; 0 on cancellation']
+  created_at datetime2 [not null, default: `GETDATE()`]
 }
 
 Table business_location {
   id int [pk, increment]
   business_id int [not null, ref: > business.id]
-    name varchar(255) 
-  user_id int [ ref: > user.id]
-
-  address varchar(500)
-  latitude decimal(10,8)
-  longitude decimal(11,8)
-  is_active bit [default: 1]
-  created_at datetime2 [default: `CURRENT_TIMESTAMP`]
+  name varchar(255) [not null]
+  manager_user_id int [null, ref: > user.id, note: 'Branch manager — separate from business owner']
+  address varchar(500) [null]
+  latitude decimal(10,8) [null]
+  longitude decimal(11,8) [null]
+  is_active bit [not null, default: 1]
+  created_at datetime2 [not null, default: `GETDATE()`]
+  updated_at datetime2 [null]
 }
+
+// ─── Subscriptions ────────────────────────────────────────────────────────────
+// One row per business. Mutable current-state billing record driven by Stripe webhooks.
+// Separate from draw_entry: this answers "does this business currently pay?"
+// draw_entry answers "which specific draws has this business been enrolled in?"
 
 Table subscription {
   id int [pk, increment]
   business_id int [unique, not null, ref: > business.id]
-  monthly_fee decimal(10,2) [not null, note: 'Contributed to the draw prize']
-  status varchar(20) [default: 'Active', note: 'Active, Cancelled, Past_Due']
-  next_billing_date datetime2
-  auto_renew bit [default: 1]
-  created_at datetime2 [default: `CURRENT_TIMESTAMP`]
+
+  stripe_customer_id varchar(255) [not null]
+  stripe_subscription_id varchar(255) [unique, not null]
+  stripe_price_id varchar(255) [not null]
+
+  status varchar(20) [not null, default: 'Active', note: 'Active, Trialing, Past_Due, Cancelled, Incomplete']
+  current_period_end datetime2 [not null]
+  cancel_at_period_end bit [not null, default: 0, note: '1 = cancels at period end; drives draw lock logic']
+
+  created_at datetime2 [not null, default: `GETDATE()`]
+  updated_at datetime2 [null]
 }
+
+// ─── Draws ────────────────────────────────────────────────────────────────────
 
 Table draw {
   id int [pk, increment]
-  name varchar(255) [not null]
-  prize_name varchar(255) [not null]
-  prize_amount decimal(12,2) [default: 0, note: 'Sum of all participant fees']
-  draw_date datetime2 [not null]
-  status varchar(50) [not null, default: 'Open', note: 'Open, Closed']
+  name varchar(255) [not null, note: 'e.g. "April 2026 Monthly Draw"']
+
+  prize_percentage decimal(5,2) [not null, default: 80.00,
+    note: 'Winnbell revenue split — percentage of each subscription fee added to prize_pool (e.g. 80 = 80%)']
+
+  prize_pool decimal(12,2) [not null, default: 0,
+    note: 'Running total of SUM(draw_entry.contribution_amount). Decremented on cancellation, recomputed on close.']
+
+  draw_date datetime2 [not null, note: 'Last day of the month — scheduled draw execution date']
+  closed_at datetime2 [null, note: 'Actual datetime the draw was run by admin']
+
+  status varchar(50) [not null, default: 'Upcoming', note: 'Upcoming, Open, Closed']
+
+  winner_user_id int [null, ref: > user.id, note: 'Populated when draw is closed and winner selected']
+
+  indexes {
+    (status, draw_date) [name: 'IX_draw_status_date']
+  }
 }
 
-// Links businesses to specific draws based on their active subscription
-Table draw_participant {
+// ─── Draw Entries ─────────────────────────────────────────────────────────────
+// Append-only enrollment records. One row per business per draw.
+// Businesses are enrolled automatically on each successful subscription payment.
+// Separate from subscription because these are immutable historical events,
+// not mutable billing state.
+
+Table draw_entry {
   id int [pk, increment]
   draw_id int [not null, ref: > draw.id]
   business_id int [not null, ref: > business.id]
-  fee_at_entry decimal(10,2) [note: 'Snapshot of subscription fee when draw started']
-  joined_at datetime2 [default: `CURRENT_TIMESTAMP`]
+
+  fee_at_entry decimal(10,2) [not null, note: 'Full subscription fee snapshot — for audit and reconciliation']
+  contribution_amount decimal(10,2) [not null,
+    note: 'Actual amount added to prize_pool = fee_at_entry * prize_percentage / 100. '
+        + 'Computed and stored at insert time so historical entries survive future percentage changes.']
+
+  joined_at datetime2 [not null, default: `GETDATE()`]
+
+  indexes {
+    (draw_id, business_id) [unique, name: 'UQ_draw_entry_draw_business',
+      note: 'One entry per business per draw — enforced at DB level']
+  }
 }
+
+// ─── Tickets ──────────────────────────────────────────────────────────────────
 
 Table ticket {
   id int [pk, increment]
-  code varchar(8) [unique, not null, note: '8-char alphanumeric']
-  status varchar(20) [not null, default: 'Issued', note: 'Issued or Activated']
-  
-  // Relations
-  business_id int [ref: > business.id, note: 'NULL for Free Tickets']
-  location_id int [ref: > business_location.id, note: 'Which branch issued it']
-  activated_by_user_id int [ref: > user.id]
+  code varchar(8) [unique, not null, note: '8-char alphanumeric, globally unique']
+  status varchar(20) [not null, default: 'Issued', note: 'Issued, Activated']
+
+  business_id int [null, ref: > business.id, note: 'NULL for free tickets']
+  location_id int [null, ref: > business_location.id, note: 'NULL for free tickets']
+  activated_by_user_id int [null, ref: > user.id]
   draw_id int [not null, ref: > draw.id]
-  
-  batch_id varchar(100)
-  created_at datetime2 [not null, default: `CURRENT_TIMESTAMP`]
-  activated_at datetime2
+
+  batch_id varchar(100) [null, note: 'Groups tickets from the same admin bulk generation']
+  created_at datetime2 [not null, default: `GETDATE()`]
+  activated_at datetime2 [null]
+
+  indexes {
+    draw_id [name: 'IX_ticket_draw_id']
+    activated_by_user_id [name: 'IX_ticket_activated_by_user_id']
+    business_id [name: 'IX_ticket_business_id']
+  }
 }
+
+// ─── Free Ticket Usage ────────────────────────────────────────────────────────
 
 Table free_ticket_usage {
   id int [pk, increment]
   user_id int [not null, ref: > user.id]
-  activated_at datetime2 [not null, default: `CURRENT_TIMESTAMP`]
-  
+  ticket_id int [null, ref: > ticket.id, note: 'Links usage log to the created ticket for audit']
+  activated_at datetime2 [not null, default: `GETDATE()`]
+
   indexes {
-    (user_id, activated_at) [name: "IX_user_ticket_usage"]
+    (user_id, activated_at) [name: 'IX_free_ticket_usage_user_date']
   }
 }
 
+// ─── Security Log ─────────────────────────────────────────────────────────────
+
 Table security_log {
   id int [pk, increment]
-  user_id int [ref: > user.id]
+  user_id int [null, ref: > user.id, note: 'NULL for pre-authentication attempts']
   ip_address varchar(45) [not null]
   failed_attempts int [not null, default: 0]
-  blocked_until datetime2
-  created_at datetime2 [not null, default: `CURRENT_TIMESTAMP`]
+  blocked_until datetime2 [null]
+  created_at datetime2 [not null, default: `GETDATE()`]
 }

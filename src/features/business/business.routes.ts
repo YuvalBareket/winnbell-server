@@ -11,6 +11,7 @@ import {
   updateLocation,
 } from './business.controller.js';
 import { getStats } from './stats.controller.js';
+import { createCheckout, verifySession, getSubscription, cancelSub, resumeSub } from '../stripe/stripe.controller.js';
 
 const router = Router();
 
@@ -26,5 +27,10 @@ router.post(
   createInviteLink,
 );
 router.get('/stats', authenticateToken, requireRole('Business', 'Admin'), getStats);
+router.post('/subscription/checkout', authenticateToken, createCheckout);
+router.post('/subscription/verify-session', authenticateToken, verifySession);
+router.get('/subscription', authenticateToken, getSubscription);
+router.post('/subscription/cancel', authenticateToken, cancelSub);
+router.post('/subscription/resume', authenticateToken, resumeSub);
 
 export default router;
