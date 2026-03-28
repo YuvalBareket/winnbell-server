@@ -28,11 +28,10 @@ export const authenticateToken = (
   }
 
   try {
+    const jwtSecret = process.env.JWT_SECRET;
+    if (!jwtSecret) throw new Error('JWT_SECRET is not configured');
     // Verify the token
-    const decoded = jwt.verify(
-      token,
-      process.env.JWT_SECRET || 'secret_key',
-    ) as UserPayload;
+    const decoded = jwt.verify(token, jwtSecret) as UserPayload;
 
     // Attach user info to the request object so controllers can use it
     req.user = decoded;

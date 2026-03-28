@@ -4,6 +4,15 @@ import app from './app.js';
 
 const PORT = process.env.PORT || 3000;
 
+// Fail fast — these must be set before the server starts
+const REQUIRED_ENV = ['JWT_SECRET', 'CLERK_SECRET_KEY', 'CLERK_WEBHOOK_SECRET'];
+for (const key of REQUIRED_ENV) {
+  if (!process.env[key]) {
+    console.error(`FATAL: Missing required environment variable: ${key}`);
+    process.exit(1);
+  }
+}
+
 const startServer = async () => {
   try {
     // 2. Connect to Database

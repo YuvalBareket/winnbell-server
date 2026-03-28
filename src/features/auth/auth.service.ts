@@ -53,7 +53,7 @@ export const registerUser = async (
       try {
         const decoded = jwt.verify(
           inviteToken,
-          process.env.JWT_SECRET || 'secret_key'
+          process.env.JWT_SECRET as string
         ) as ManagerInvitePayload;
 
         if (decoded.type === 'MANAGER_INVITE' && decoded.locationId) {
@@ -82,7 +82,7 @@ export const registerUser = async (
         role: newUser.role,
         location_id: locationId // Now included in registration token
       },
-      process.env.JWT_SECRET || 'secret_key',
+      process.env.JWT_SECRET as string,
       { expiresIn: '30d' }
     );
 
@@ -136,7 +136,7 @@ export const loginUser = async (
       try {
         const decoded = jwt.verify(
           inviteToken,
-          process.env.JWT_SECRET || 'secret_key',
+          process.env.JWT_SECRET as string,
         ) as ManagerInvitePayload;
         if (decoded.type === 'MANAGER_INVITE' && decoded.locationId) {
           await transaction.begin();
@@ -191,7 +191,7 @@ await transaction
         role: user.role,
         location_id: locationId, // Embedded for immediate frontend access
       },
-      process.env.JWT_SECRET || 'secret_key',
+      process.env.JWT_SECRET as string,
       { expiresIn: '30d' },
     );
 
@@ -219,7 +219,7 @@ export const syncExternalUser = async (
   fullName: string,
   metadata?: { role?: string; inviteToken?: string | null }
 ) => {
-  const pool = await getPool();
+  const pool = getPool();
   const transaction = new sql.Transaction(pool);
   let locationId: number | null = null;
   const rawRole = metadata?.role || 'User';
@@ -260,7 +260,7 @@ export const syncExternalUser = async (
       try {
         const decoded = jwt.verify(
           inviteToken,
-          process.env.JWT_SECRET || 'secret_key'
+          process.env.JWT_SECRET as string
         ) as ManagerInvitePayload;
 
         if (decoded.type === 'MANAGER_INVITE' && decoded.locationId) {
@@ -320,7 +320,7 @@ export const syncExternalUser = async (
         role: dbUser.role,
         location_id: locationId
       },
-      process.env.JWT_SECRET || 'secret_key',
+      process.env.JWT_SECRET as string,
       { expiresIn: '30d' }
     );
 

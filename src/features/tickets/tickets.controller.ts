@@ -6,6 +6,10 @@ import { AuthRequest } from '../../shared/middleware/auth.middleware.js';
 export const redeemCode = async (req: AuthRequest, res: Response) => {
   try {
     const { code } = req.body;
+    if (!code || typeof code !== 'string' || !/^[A-Z0-9]{6,8}$/.test(code)) {
+      res.status(400).json({ message: 'Invalid ticket code format' });
+      return;
+    }
     const userId = req.user!.id;
 
     const result = await ticketService.activateTicket(code, userId);
@@ -18,19 +22,23 @@ export const redeemCode = async (req: AuthRequest, res: Response) => {
 export const getMyTickets = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
-    const drawId = req.query.draw_id;
+    const drawId = Number(req.query.draw_id);
+    if (!drawId || isNaN(drawId)) {
+      res.status(400).json({ message: 'Valid draw_id is required' });
+      return;
+    }
     const role = req.user!.role;
     const locationId = req.user!.location_id;
 
     let result;
     if (role === 'Business') {
       if (locationId) {
-        result = await ticketService.getLocationTicketsService(userId, Number(drawId));
+        result = await ticketService.getLocationTicketsService(userId, drawId);
       } else {
-        result = await ticketService.getBusinessTicketsService(userId, Number(drawId));
+        result = await ticketService.getBusinessTicketsService(userId, drawId);
       }
     } else {
-      result = await ticketService.getUserTicketsService(userId, Number(drawId));
+      result = await ticketService.getUserTicketsService(userId, drawId);
     }
     res.status(200).json(result);
   } catch (error: unknown) {

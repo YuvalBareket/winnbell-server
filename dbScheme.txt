@@ -55,7 +55,7 @@ Table draw {
   id int [pk, increment]
   name varchar(255) [not null]
   prize_name varchar(255) [not null]
-  total_pool_amount decimal(12,2) [default: 0, note: 'Sum of all participant fees']
+  prize_amount decimal(12,2) [default: 0, note: 'Sum of all participant fees']
   draw_date datetime2 [not null]
   status varchar(50) [not null, default: 'Open', note: 'Open, Closed']
 }

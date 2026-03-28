@@ -8,30 +8,37 @@ import {
 export const activateTicket = async (code: string, userId: number) => {
   const pool = getPool();
 
-  // 1. Check if ticket exists and is available
-  const ticketResult = await pool.request().input('code', code).query(`
-      SELECT t.id, t.status, d.status as draw_status 
+  // Validate ticket exists and draw is open in one query
+  const checkResult = await pool
+    .request()
+    .input('code', sql.VarChar(8), code)
+    .query(`
+      SELECT t.id, t.status, d.status as draw_status
       FROM dbo.ticket t
       JOIN dbo.draw d ON t.draw_id = d.id
       WHERE t.code = @code
     `);
 
-  const ticket = ticketResult.recordset[0];
-
+  const ticket = checkResult.recordset[0];
   if (!ticket) throw new Error('Invalid ticket code.');
-  if (ticket.status === 'Activated')
-    throw new Error('This ticket has already been used.');
-  if (!(ticket.draw_status !== 'Open'))
-    throw new Error('The draw for this ticket is already closed.');
+  if (ticket.draw_status !== 'Open') throw new Error('The draw for this ticket is already closed.');
 
-  // 2. Update the ticket status
-  await pool.request().input('code', code).input('userId', userId).query(`
-      UPDATE dbo.ticket 
-      SET status = 'Activated', 
-          activated_by_user_id = @userId, 
+  // Atomic UPDATE — only succeeds if status is still 'Issued', eliminates race condition
+  const updateResult = await pool
+    .request()
+    .input('code', sql.VarChar(8), code)
+    .input('userId', sql.Int, userId)
+    .query(`
+      UPDATE dbo.ticket
+      SET status = 'Activated',
+          activated_by_user_id = @userId,
           activated_at = GETDATE()
-      WHERE code = @code
+      WHERE code = @code AND status = 'Issued'
     `);
+
+  if (updateResult.rowsAffected[0] === 0) {
+    throw new Error('This ticket has already been used.');
+  }
 
   return { message: 'Ticket activated successfully!' };
 };
@@ -159,14 +166,9 @@ export const generateGlobalUniqueCode = async (
   // Use the transaction's request if provided, otherwise use the pool's request
   const connection = transaction || getPool();
 
-  let isUnique = false;
-  let code = '';
-
-  while (!isUnique) {
-    // Generate 8-char alphanumeric
-    code = Math.random().toString(36).substring(2, 10).toUpperCase();
-
-    // Ensure we got exactly 8 (handles edge cases where Math.random is small)
+  const MAX_ATTEMPTS = 10;
+  for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+    const code = Math.random().toString(36).substring(2, 10).toUpperCase();
     if (code.length !== 8) continue;
 
     const result = await connection
@@ -174,12 +176,10 @@ export const generateGlobalUniqueCode = async (
       .input('code', sql.VarChar(8), code)
       .query(`SELECT COUNT(*) as count FROM ticket WHERE code = @code`);
 
-    if (result.recordset[0].count === 0) {
-      isUnique = true;
-    }
+    if (result.recordset[0].count === 0) return code;
   }
 
-  return code;
+  throw new Error('Failed to generate a unique ticket code. Please try again.');
 };
 export const activateFreeTicket = async (
   userId: number,
@@ -188,29 +188,39 @@ export const activateFreeTicket = async (
   const transaction = new sql.Transaction(pool);
 
   try {
-    // 1. Check Eligibility
-    const eligibility = await checkFreeTicketEligibility(userId);
-    if (!eligibility.canActivate) {
-      throw new Error(
-        'Weekly limit reached. Please wait until your next available date.',
-      );
+    await transaction.begin();
+
+    // 1. Check eligibility INSIDE the transaction with UPDLOCK to prevent concurrent activations
+    const eligibilityResult = await transaction
+      .request()
+      .input('userId', sql.Int, userId)
+      .query(`
+        SELECT TOP 1 activated_at
+        FROM free_ticket_usage WITH (UPDLOCK, ROWLOCK)
+        WHERE user_id = @userId
+        ORDER BY activated_at DESC
+      `);
+
+    const lastUsage = eligibilityResult.recordset[0];
+    if (lastUsage) {
+      const nextAvailable = new Date(new Date(lastUsage.activated_at).getTime() + 7 * 24 * 60 * 60 * 1000);
+      if (new Date() < nextAvailable) {
+        throw new Error('Weekly limit reached. Please wait until your next available date.');
+      }
     }
 
-    // 2. Fetch the latest Active Draw
-    const drawResult = await pool.request().query(`
-        SELECT TOP 1 id 
-        FROM draw 
-        WHERE status = 'Open' AND draw_date > GETDATE() 
+    // 2. Fetch the latest Active Draw inside transaction
+    const drawResult = await transaction.request().query(`
+        SELECT TOP 1 id
+        FROM draw
+        WHERE status = 'Open' AND draw_date > GETDATE()
         ORDER BY draw_date ASC
       `);
 
     const activeDrawId = drawResult.recordset[0]?.id;
-
     if (!activeDrawId) {
       throw new Error('No active draw found. Please try again later.');
     }
-
-    await transaction.begin();
 
     // 3. Log the free ticket usage
     await transaction

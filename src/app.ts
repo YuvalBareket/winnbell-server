@@ -9,9 +9,14 @@ import drawsRoutes from './features/draws/draws.routes.js';
 import { authenticateToken } from './shared/middleware/auth.middleware.js';
 const app = express();
 
+const allowedOrigins = (process.env.CLIENT_URL || 'http://localhost:8081').split(',');
 app.use(
   cors({
-    origin: 'http://localhost:8081',
+    origin: (origin, callback) => {
+      // Allow requests with no origin (e.g., mobile apps, curl)
+      if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
+      callback(new Error('Not allowed by CORS'));
+    },
     credentials: true,
   }),
 );

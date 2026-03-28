@@ -310,9 +310,9 @@ export const updateBusinessLocation = async (
 };
 
 export const getBusinessLocationsByUserId = async (userId: number) => {
-  const pool = await getPool();
+  const pool = getPool();
   const result = await pool.request()
-    .input('userId', userId)
+    .input('userId', sql.Int, userId)
     .query(`
       SELECT bl.id 
       FROM business_location bl

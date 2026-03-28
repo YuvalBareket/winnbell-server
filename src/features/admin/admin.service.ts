@@ -53,10 +53,10 @@ export const generateBatchTickets = async (
     for (const code of tickets) {
       await transaction
         .request()
-        .input('code', code)
-        .input('bid', businessId)
-        .input('did', drawId)
-        .input('batchId', batchId).query(`
+        .input('code', sql.VarChar(6), code)
+        .input('bid', sql.Int, businessId)
+        .input('did', sql.Int, drawId)
+        .input('batchId', sql.NVarChar(50), batchId).query(`
             INSERT INTO dbo.ticket (code, business_id, draw_id, batch_id, status)
             VALUES (@code, @bid, @did, @batchId, 'Issued')
         `);
@@ -64,8 +64,8 @@ export const generateBatchTickets = async (
 
     await transaction
       .request()
-      .input('bid', businessId)
-      .input('qty', quantity)
+      .input('bid', sql.Int, businessId)
+      .input('qty', sql.Int, quantity)
       .query(
         'UPDATE dbo.business SET ticket_balance = ticket_balance + @qty WHERE id = @bid',
       );
@@ -90,13 +90,13 @@ export const createBusinessService = async (data: {
   const pool = getPool();
   const result = await pool
     .request()
-    .input('ownerId', data.owner_user_id)
-    .input('name', data.name)
-    .input('sector', data.sector)
-    .input('location', data.location)
-    .input('lat', data.latitude || null)
-    .input('lng', data.longitude || null)
-    .input('terms', data.terms_text || 'Spend to get a ticket').query(`
+    .input('ownerId', sql.Int, data.owner_user_id)
+    .input('name', sql.NVarChar, data.name)
+    .input('sector', sql.NVarChar, data.sector)
+    .input('location', sql.NVarChar, data.location)
+    .input('lat', sql.Decimal(10, 8), data.latitude ?? null)
+    .input('lng', sql.Decimal(11, 8), data.longitude ?? null)
+    .input('terms', sql.NVarChar, data.terms_text || 'Spend to get a ticket').query(`
       INSERT INTO dbo.business (owner_user_id, name, sector, location, latitude, longitude, terms_text)
       OUTPUT inserted.*
       VALUES (@ownerId, @name, @sector, @location, @lat, @lng, @terms)
