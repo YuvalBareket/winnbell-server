@@ -1,6 +1,6 @@
 // src/features/business/business.routes.ts
 import { Router } from 'express';
-import { authenticateToken } from '../../shared/middleware/auth.middleware.js';
+import { authenticateToken, requireRole } from '../../shared/middleware/auth.middleware.js';
 import {
   createInviteLink,
   getAddressController,
@@ -10,6 +10,7 @@ import {
   updateBusiness,
   updateLocation,
 } from './business.controller.js';
+import { getStats } from './stats.controller.js';
 
 const router = Router();
 
@@ -24,4 +25,6 @@ router.post(
   authenticateToken,
   createInviteLink,
 );
+router.get('/stats', authenticateToken, requireRole('Business', 'Admin'), getStats);
+
 export default router;
