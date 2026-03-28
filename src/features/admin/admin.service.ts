@@ -123,10 +123,10 @@ export const createDrawService = async (data: {
   const pool = getPool();
   const result = await pool
     .request()
-    .input('name', data.name)
-    .input('prizeName', data.prize_name)
-    .input('prizeAmount', data.prize_amount)
-    .input('drawDate', data.draw_date) // Pass the string, SQL Server handles ISO format
+    .input('name', sql.NVarChar(100), data.name)
+    .input('prizeName', sql.NVarChar(100), data.prize_name)
+    .input('prizeAmount', sql.Decimal(12, 2), data.prize_amount)
+    .input('drawDate', sql.DateTime, new Date(data.draw_date))
     .query(`
       INSERT INTO dbo.draw (name, prize_name, prize_amount, draw_date, status)
       OUTPUT inserted.*

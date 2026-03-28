@@ -111,7 +111,6 @@ export const loginUser = async (
   inviteToken?: string,
 ) => {
   const pool = getPool();
-  const transaction = new sql.Transaction(pool);
 
   try {
     // 1. Find user by Email
@@ -133,6 +132,7 @@ export const loginUser = async (
 
     // 3. Handle Invitation Token on Login
     if (inviteToken) {
+      const transaction = new sql.Transaction(pool);
       try {
         const decoded = jwt.verify(
           inviteToken,
@@ -140,7 +140,6 @@ export const loginUser = async (
         ) as ManagerInvitePayload;
         if (decoded.type === 'MANAGER_INVITE' && decoded.locationId) {
           await transaction.begin();
-          // Link existing user to the new location
           await transaction
             .request()
             .input('userId', sql.Int, user.id)
@@ -148,19 +147,17 @@ export const loginUser = async (
             .query(
               'UPDATE business_location SET user_id = @userId WHERE id = @locationId',
             );
-await transaction
-        .request()
-        .input('userId', sql.Int, user.id)
-        .query(
-          "UPDATE [user] SET role = 'Business' WHERE id = @userId"
-        );
+          await transaction
+            .request()
+            .input('userId', sql.Int, user.id)
+            .query("UPDATE [user] SET role = 'Business' WHERE id = @userId");
           await transaction.commit();
-         user.role = 'Business'; 
-    locationId = decoded.locationId;
+          user.role = 'Business';
+          locationId = decoded.locationId;
         }
       } catch (tokenErr) {
-        if (transaction) await transaction.rollback();
-        // We don't necessarily block login if the invite is bad, but you could throw here
+        try { await transaction.rollback(); } catch (_) { /* already rolled back or never begun */ }
+        // Invalid/expired invite — proceed with normal login, don't block
       }
     } else {
       // If no inviteToken, check if they are already a manager of a location
@@ -208,7 +205,6 @@ await transaction
       },
     };
   } catch (error) {
-    if (transaction) await transaction.rollback();
     throw error;
   }
 };

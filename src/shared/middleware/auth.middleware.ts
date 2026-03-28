@@ -13,6 +13,15 @@ export interface AuthRequest extends Request {
   user?: UserPayload;
 }
 
+export const requireRole = (...roles: string[]) =>
+  (req: AuthRequest, res: Response, next: NextFunction): void => {
+    if (!req.user || !roles.includes(req.user.role)) {
+      res.status(403).json({ message: 'Forbidden: insufficient permissions' });
+      return;
+    }
+    next();
+  };
+
 export const authenticateToken = (
   req: AuthRequest,
   res: Response,

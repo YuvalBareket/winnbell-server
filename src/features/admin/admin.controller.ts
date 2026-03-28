@@ -26,8 +26,14 @@ export const getDraws = async (req: Request, res: Response) => {
   }
 };
 
+const MAX_BATCH_QUANTITY = 500;
+
 export const createTickets = async (req: Request, res: Response) => {
   const { businessId, drawId, quantity } = req.body;
+  if (!businessId || !drawId || !quantity || typeof quantity !== 'number' || quantity < 1 || quantity > MAX_BATCH_QUANTITY) {
+    res.status(400).json({ message: `quantity must be a number between 1 and ${MAX_BATCH_QUANTITY}` });
+    return;
+  }
   try {
     const result = await generateBatchTickets(businessId, drawId, quantity);
     res
