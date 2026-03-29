@@ -63,8 +63,8 @@ export const registerUser = async (
             .request()
             .input('userId', sql.Int, newUser.id)
             .input('locationId', sql.Int, locationId).query(`
-              UPDATE business_location 
-              SET user_id = @userId 
+              UPDATE business_location
+              SET manager_user_id = @userId
               WHERE id = @locationId
             `);
         }
@@ -271,8 +271,8 @@ export const syncExternalUser = async (
             .input('userId', sql.Int, dbUser.id)
             .input('locationId', sql.Int, locationId)
             .query(`
-              UPDATE business_location 
-              SET user_id = @userId 
+              UPDATE business_location
+              SET manager_user_id = @userId
               WHERE id = @locationId
             `);
 

@@ -163,6 +163,7 @@ export const getBusinessStats = async (
     LEFT JOIN ticket t ON t.draw_id = d.id
       AND t.business_id = @businessId
       ${scopedLocationId ? 'AND t.location_id = @locationId' : ''}
+    WHERE UPPER(d.status) IN ('OPEN', 'CLOSED')
     GROUP BY d.id, d.name, d.prize_pool, d.draw_date, d.status
     ORDER BY d.draw_date DESC
   `);

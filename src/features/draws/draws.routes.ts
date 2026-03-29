@@ -4,4 +4,6 @@ import * as drawsController from './draws.controller.js';
 const router = Router();
 
 router.get('/active', authenticateToken, drawsController.getActiveDraws);
+router.get('/history', authenticateToken, drawsController.getDrawHistory);
+router.get('/:drawId/result', authenticateToken, drawsController.getDrawResult);
 export default router;

@@ -1,11 +1,14 @@
 import { Request, Response } from 'express';
 import {
+  closeDrawService,
+  openDrawService,
   createBusinessService,
   createDrawService,
   generateBatchTickets,
   getActiveDraws,
   getAllDrawsService,
   getBusinessesWithStats,
+  pickDrawWinnerService,
 } from './admin.service.js';
 
 export const getDashboardData = async (req: Request, res: Response) => {
@@ -66,5 +69,35 @@ export const createDraw = async (req: Request, res: Response) => {
     res.status(201).json(draw);
   } catch (error) {
     res.status(500).json({ message: 'Failed to create draw', error });
+  }
+};
+
+export const openDraw = async (req: Request, res: Response) => {
+  const drawId = parseInt(req.params.drawId, 10);
+  try {
+    await openDrawService(drawId);
+    res.status(200).json({ message: 'Draw opened successfully' });
+  } catch (error) {
+    res.status(500).json({ message: error instanceof Error ? error.message : 'Failed to open draw' });
+  }
+};
+
+export const closeDraw = async (req: Request, res: Response) => {
+  const drawId = parseInt(req.params.drawId, 10);
+  try {
+    await closeDrawService(drawId);
+    res.status(200).json({ message: 'Draw closed successfully' });
+  } catch (error) {
+    res.status(500).json({ message: error instanceof Error ? error.message : 'Failed to close draw' });
+  }
+};
+
+export const pickWinner = async (req: Request, res: Response) => {
+  const drawId = parseInt(req.params.drawId, 10);
+  try {
+    const winner = await pickDrawWinnerService(drawId);
+    res.status(200).json(winner);
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to pick winner', error });
   }
 };

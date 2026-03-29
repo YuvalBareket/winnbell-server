@@ -21,7 +21,7 @@ export const activateTicket = async (code: string, userId: number) => {
 
   const ticket = checkResult.recordset[0];
   if (!ticket) throw new Error('Invalid ticket code.');
-  if (ticket.draw_status !== 'Open') throw new Error('The draw for this ticket is already closed.');
+  if (ticket.draw_status?.toUpperCase() !== 'OPEN') throw new Error('The draw for this ticket is already closed.');
 
   // Atomic UPDATE — only succeeds if status is still 'Issued', eliminates race condition
   const updateResult = await pool
@@ -213,7 +213,7 @@ export const activateFreeTicket = async (
     const drawResult = await transaction.request().query(`
         SELECT TOP 1 id
         FROM draw
-        WHERE status = 'Open' AND draw_date > GETDATE()
+        WHERE status = 'Open'
         ORDER BY draw_date ASC
       `);
 

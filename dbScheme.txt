@@ -51,7 +51,7 @@ Table subscription {
 
   stripe_customer_id varchar(255) [not null]
   stripe_subscription_id varchar(255) [unique, not null]
-  stripe_price_id varchar(255) [not null]
+  stripe_price_id varacchar(255) [not null]
 
   status varchar(20) [not null, default: 'Active', note: 'Active, Trialing, Past_Due, Cancelled, Incomplete']
   current_period_end datetime2 [not null]
@@ -79,7 +79,7 @@ Table draw {
   status varchar(50) [not null, default: 'Upcoming', note: 'Upcoming, Open, Closed']
 
   winner_user_id int [null, ref: > user.id, note: 'Populated when draw is closed and winner selected']
-
+  winner_ticket_id int [null, ref: > ticket.id, note: 'Populated when draw is closed and winner selected']
   indexes {
     (status, draw_date) [name: 'IX_draw_status_date']
   }
@@ -97,9 +97,9 @@ Table draw_entry {
   business_id int [not null, ref: > business.id]
 
   fee_at_entry decimal(10,2) [not null, note: 'Full subscription fee snapshot — for audit and reconciliation']
-  contribution_amount decimal(10,2) [not null,
-    note: 'Actual amount added to prize_pool = fee_at_entry * prize_percentage / 100. '
-        + 'Computed and stored at insert time so historical entries survive future percentage changes.']
+  contribution_amount decimal(10,2) [not null]
+    // note: 'Actual amount added to prize_pool = fee_at_entry * prize_percentage / 100. '
+    //     + 'Computed and stored at insert time so historical entries survive future percentage changes.']
 
   joined_at datetime2 [not null, default: `GETDATE()`]
 

@@ -1,5 +1,6 @@
 import { getPool, sql } from '../../shared/db/db.js';
 import {
+  AddLocationInput,
   AddressSuggestion,
   BusinessSetupInput,
   GeoapifyResponse,
@@ -307,6 +308,75 @@ export const updateBusinessLocation = async (
 
   if (result.rowsAffected[0] === 0) {
     throw new Error('UNAUTHORIZED_OR_INVALID_LOCATION');
+  }
+};
+
+export const addBusinessLocation = async (
+  ownerUserId: number,
+  data: AddLocationInput,
+): Promise<{ locationId: number }> => {
+  const pool = getPool();
+
+  const ownerCheck = await pool
+    .request()
+    .input('ownerId', sql.Int, ownerUserId)
+    .query(`SELECT id FROM business WHERE user_id = @ownerId`);
+
+  if (ownerCheck.recordset.length === 0) {
+    throw new Error('BUSINESS_NOT_FOUND');
+  }
+
+  const businessId = ownerCheck.recordset[0].id;
+
+  const result = await pool
+    .request()
+    .input('businessId', sql.Int, businessId)
+    .input('name', sql.NVarChar, data.name)
+    .input('address', sql.NVarChar, data.address)
+    .input('lat', sql.Decimal(10, 8), data.lat)
+    .input('lon', sql.Decimal(11, 8), data.lon)
+    .query(`
+      INSERT INTO business_location (business_id, name, address, latitude, longitude, is_active)
+      OUTPUT INSERTED.id
+      VALUES (@businessId, @name, @address, @lat, @lon, 1)
+    `);
+
+  return { locationId: result.recordset[0].id };
+};
+
+export const deleteBusinessLocation = async (
+  locationId: number,
+  ownerUserId: number,
+): Promise<void> => {
+  const pool = getPool();
+
+  const ownerCheck = await pool
+    .request()
+    .input('locId', sql.Int, locationId)
+    .input('ownerId', sql.Int, ownerUserId)
+    .query(`
+      SELECT bl.id, bl.manager_user_id
+      FROM business_location bl
+      JOIN business b ON bl.business_id = b.id
+      WHERE bl.id = @locId AND b.user_id = @ownerId
+    `);
+
+  if (ownerCheck.recordset.length === 0) {
+    throw new Error('UNAUTHORIZED_OR_INVALID_LOCATION');
+  }
+
+  const hasManager = ownerCheck.recordset[0].manager_user_id !== null;
+
+  if (hasManager) {
+    await pool
+      .request()
+      .input('locId', sql.Int, locationId)
+      .query(`UPDATE business_location SET is_active = 0 WHERE id = @locId`);
+  } else {
+    await pool
+      .request()
+      .input('locId', sql.Int, locationId)
+      .query(`DELETE FROM business_location WHERE id = @locId`);
   }
 };
 

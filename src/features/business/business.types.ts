@@ -104,3 +104,10 @@ export interface UpdateBusinessInput {
   description: string;
   terms_text: string;
 }
+
+export interface AddLocationInput {
+  name: string;
+  address: string;
+  lat: number;
+  lon: number;
+}

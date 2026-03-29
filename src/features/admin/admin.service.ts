@@ -97,7 +97,7 @@ export const createBusinessService = async (data: {
     .input('lat', sql.Decimal(10, 8), data.latitude ?? null)
     .input('lng', sql.Decimal(11, 8), data.longitude ?? null)
     .input('terms', sql.NVarChar, data.terms_text || 'Spend to get a ticket').query(`
-      INSERT INTO dbo.business (owner_user_id, name, sector, location, latitude, longitude, terms_text)
+      INSERT INTO dbo.business (user_id, name, sector, location, latitude, longitude, terms_text)
       OUTPUT inserted.*
       VALUES (@ownerId, @name, @sector, @location, @lat, @lng, @terms)
     `);
@@ -132,4 +132,114 @@ export const createDrawService = async (data: {
       VALUES (@name, 0, @prizePct, @drawDate, 'Upcoming')
     `);
   return result.recordset[0];
+};
+
+export const openDrawService = async (drawId: number): Promise<void> => {
+  const pool = getPool();
+  const check = await pool
+    .request()
+    .input('drawId', sql.Int, drawId)
+    .query(`SELECT id, status FROM dbo.draw WHERE id = @drawId`);
+
+  if (check.recordset.length === 0) {
+    throw new Error('Draw not found');
+  }
+  if (check.recordset[0].status.toUpperCase() !== 'UPCOMING') {
+    throw new Error('Only Upcoming draws can be opened');
+  }
+
+  await pool
+    .request()
+    .input('drawId', sql.Int, drawId)
+    .query(`UPDATE dbo.draw SET status = 'Open' WHERE id = @drawId`);
+};
+
+export const closeDrawService = async (drawId: number): Promise<void> => {
+  const pool = getPool();
+  const check = await pool
+    .request()
+    .input('drawId', sql.Int, drawId)
+    .query(`SELECT id, status FROM dbo.draw WHERE id = @drawId`);
+
+  if (check.recordset.length === 0) {
+    throw new Error('Draw not found');
+  }
+  if (check.recordset[0].status.toUpperCase() !== 'OPEN') {
+    throw new Error('Draw is not Open');
+  }
+
+  await pool
+    .request()
+    .input('drawId', sql.Int, drawId)
+    .query(`UPDATE dbo.draw SET status = 'Closed', closed_at = GETDATE() WHERE id = @drawId`);
+};
+
+export const pickDrawWinnerService = async (drawId: number): Promise<{
+  winnerId: number;
+  winnerName: string;
+  winnerEmail: string;
+  ticketCode: string;
+  businessName: string | null;
+  locationName: string | null;
+  prizePool: number;
+}> => {
+  const pool = getPool();
+  const check = await pool
+    .request()
+    .input('drawId', sql.Int, drawId)
+    .query(`SELECT id, status, prize_pool FROM dbo.draw WHERE id = @drawId`);
+
+  if (check.recordset.length === 0) {
+    throw new Error('Draw not found');
+  }
+  if (check.recordset[0].status.toUpperCase() !== 'CLOSED') {
+    throw new Error('Draw is not Closed');
+  }
+
+  const prizePool: number = check.recordset[0].prize_pool;
+
+  const ticketResult = await pool
+    .request()
+    .input('drawId', sql.Int, drawId)
+    .query(`
+      SELECT TOP 1
+        t.id AS ticket_id,
+        t.code,
+        t.activated_by_user_id,
+        u.full_name,
+        u.email,
+        b.name AS business_name,
+        bl.name AS location_name
+      FROM ticket t
+      JOIN [user] u ON t.activated_by_user_id = u.id
+      LEFT JOIN business b ON t.business_id = b.id
+      LEFT JOIN business_location bl ON t.location_id = bl.id
+      WHERE t.draw_id = @drawId AND t.status = 'Activated'
+      ORDER BY NEWID()
+    `);
+
+  if (ticketResult.recordset.length === 0) {
+    throw new Error('No activated tickets in this draw');
+  }
+
+  const winner = ticketResult.recordset[0];
+  const winnerId: number = winner.activated_by_user_id;
+  const winnerTicketId: number = winner.ticket_id;
+
+  await pool
+    .request()
+    .input('winnerId', sql.Int, winnerId)
+    .input('winnerTicketId', sql.Int, winnerTicketId)
+    .input('drawId', sql.Int, drawId)
+    .query(`UPDATE dbo.draw SET winner_user_id = @winnerId, winner_ticket_id = @winnerTicketId WHERE id = @drawId`);
+
+  return {
+    winnerId,
+    winnerName: winner.full_name,
+    winnerEmail: winner.email,
+    ticketCode: winner.code,
+    businessName: winner.business_name,
+    locationName: winner.location_name,
+    prizePool,
+  };
 };

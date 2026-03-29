@@ -3,8 +3,10 @@ import { Request, Response } from 'express';
 import { AuthRequest } from '../../shared/middleware/auth.middleware.js';
 import { INearbyQuery } from './business.types.js';
 import {
+  addBusinessLocation,
   createFullBusinessProfile,
   createManagerInviteLink,
+  deleteBusinessLocation,
   getAddress,
   getMyBusinessData,
   getNearbyBusinessesService,
@@ -123,6 +125,41 @@ export const updateLocation = async (req: AuthRequest, res: Response): Promise<v
       return;
     }
     res.status(500).json({ message: 'Failed to update location' });
+  }
+};
+
+export const addLocation = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.id;
+    const { name, address, lat, lon } = req.body as {
+      name: string;
+      address: string;
+      lat: number;
+      lon: number;
+    };
+
+    const result = await addBusinessLocation(userId, { name, address, lat, lon });
+    res.status(201).json({ locationId: result.locationId });
+  } catch (error: unknown) {
+    if (error instanceof Error && error.message === 'BUSINESS_NOT_FOUND') {
+      res.status(404).json({ message: 'Business not found' });
+      return;
+    }
+    res.status(500).json({ message: 'Failed to add location' });
+  }
+};
+
+export const deleteLocation = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { locationId } = req.params;
+    await deleteBusinessLocation(Number(locationId), req.user!.id);
+    res.status(200).json({ success: true });
+  } catch (error: unknown) {
+    if (error instanceof Error && error.message === 'UNAUTHORIZED_OR_INVALID_LOCATION') {
+      res.status(403).json({ message: 'Forbidden' });
+      return;
+    }
+    res.status(500).json({ message: 'Failed to delete location' });
   }
 };
 
