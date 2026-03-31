@@ -47,7 +47,7 @@ export const getUserTicketsService = async (userId: number, drawId: number) => {
   const query = `
     SELECT
       t.id, t.code, t.status, t.activated_at,
-      b.name as business_name, b.sector as business_sector,
+      b.name as business_name, b.sector as business_sector, b.logo_url,
       bl.name as location_name,
       d.name as draw_name
     FROM ticket t

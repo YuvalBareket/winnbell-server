@@ -6,6 +6,7 @@ import ticketsRoutes from './features/tickets/tickets.routes.js';
 import businessRoutes from './features/business/business.routes.js';
 import drawsRoutes from './features/draws/draws.routes.js';
 import stripeWebhookRoutes from './features/stripe/stripe.routes.js';
+import notificationRoutes from './features/notifications/notifications.routes.js';
 
 import { authenticateToken } from './shared/middleware/auth.middleware.js';
 
@@ -36,5 +37,6 @@ app.use('/admin', adminRoutes);
 app.use('/tickets', ticketsRoutes);
 app.use('/draws', drawsRoutes);
 app.use('/business', businessRoutes);
+app.use('/notifications', notificationRoutes);
 
 export default app;
