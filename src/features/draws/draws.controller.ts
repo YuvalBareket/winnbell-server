@@ -21,7 +21,7 @@ export const getDrawHistory = async (req: Request, res: Response) => {
 
 export const getDrawResult = async (req: Request, res: Response) => {
   try {
-    const drawId = parseInt(req.params.drawId);
+    const drawId = parseInt(req.params.drawId as string);
     const result = await getDrawResultService(drawId);
     res.status(200).json(result);
   } catch (error: any) {

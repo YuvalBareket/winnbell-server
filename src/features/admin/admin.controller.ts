@@ -77,7 +77,7 @@ export const createDraw = async (req: Request, res: Response) => {
 };
 
 export const openDraw = async (req: Request, res: Response) => {
-  const drawId = parseInt(req.params.drawId, 10);
+  const drawId = parseInt(req.params.drawId as string, 10);
   try {
     await openDrawService(drawId);
     res.status(200).json({ message: 'Draw opened successfully' });
@@ -87,7 +87,7 @@ export const openDraw = async (req: Request, res: Response) => {
 };
 
 export const closeDraw = async (req: Request, res: Response) => {
-  const drawId = parseInt(req.params.drawId, 10);
+  const drawId = parseInt(req.params.drawId as string, 10);
   try {
     await closeDrawService(drawId);
     res.status(200).json({ message: 'Draw closed successfully' });
@@ -115,7 +115,7 @@ export const getUsers = async (req: Request, res: Response) => {
 };
 
 export const updateUserRole = async (req: Request, res: Response) => {
-  const userId = parseInt(req.params.userId, 10);
+  const userId = parseInt(req.params.userId as string, 10);
   const { role } = req.body;
   try {
     await updateUserRoleService(userId, role);
@@ -126,7 +126,7 @@ export const updateUserRole = async (req: Request, res: Response) => {
 };
 
 export const toggleUserActive = async (req: Request, res: Response) => {
-  const userId = parseInt(req.params.userId, 10);
+  const userId = parseInt(req.params.userId as string, 10);
   const { is_active } = req.body;
   try {
     await toggleUserActiveService(userId, !!is_active);
@@ -137,7 +137,7 @@ export const toggleUserActive = async (req: Request, res: Response) => {
 };
 
 export const pickWinner = async (req: Request, res: Response) => {
-  const drawId = parseInt(req.params.drawId, 10);
+  const drawId = parseInt(req.params.drawId as string, 10);
   try {
     const winner = await pickDrawWinnerService(drawId);
     res.status(200).json(winner);
