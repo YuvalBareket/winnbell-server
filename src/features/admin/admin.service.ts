@@ -243,3 +243,54 @@ export const pickDrawWinnerService = async (drawId: number): Promise<{
     prizePool,
   };
 };
+
+export const getAdminOverviewService = async () => {
+  const pool = getPool();
+
+  const [usersRes, bizRes, subRes, drawRes, ticketRes] = await Promise.all([
+    pool.query(`SELECT COUNT(*) AS total_users, SUM(CASE WHEN role='Business' THEN 1 ELSE 0 END) AS business_users, SUM(CASE WHEN role='User' THEN 1 ELSE 0 END) AS regular_users FROM dbo.[user] WHERE role != 'Admin'`),
+    pool.query(`SELECT COUNT(*) AS total, SUM(CASE WHEN is_active=1 THEN 1 ELSE 0 END) AS active FROM dbo.business`),
+    pool.query(`SELECT COUNT(*) AS active_subs, ISNULL(SUM(fee_at_entry),0) AS total_fees FROM dbo.subscription s LEFT JOIN dbo.draw_entry de ON de.business_id=s.business_id AND de.draw_id=(SELECT TOP 1 id FROM dbo.draw WHERE UPPER(status)='OPEN' ORDER BY draw_date ASC) WHERE UPPER(s.status)='ACTIVE'`),
+    pool.query(`SELECT TOP 1 id, name, prize_pool, draw_date FROM dbo.draw WHERE UPPER(status)='OPEN' ORDER BY draw_date ASC`),
+    pool.query(`SELECT COUNT(*) AS total_tickets, SUM(CASE WHEN UPPER(status)='ACTIVATED' THEN 1 ELSE 0 END) AS activated FROM dbo.ticket WHERE draw_id=(SELECT TOP 1 id FROM dbo.draw WHERE UPPER(status)='OPEN' ORDER BY draw_date ASC)`),
+  ]);
+
+  return {
+    users: usersRes.recordset[0],
+    businesses: bizRes.recordset[0],
+    subscriptions: subRes.recordset[0],
+    currentDraw: drawRes.recordset[0] ?? null,
+    currentDrawTickets: ticketRes.recordset[0],
+  };
+};
+
+export const getAllUsersService = async () => {
+  const pool = getPool();
+  const result = await pool.query(`
+    SELECT u.id, u.full_name, u.email, u.role, u.is_active, u.is_email_verified, u.created_at,
+      b.id AS business_id, b.name AS business_name, b.is_active AS business_active
+    FROM dbo.[user] u
+    LEFT JOIN dbo.business b ON b.user_id = u.id
+    WHERE u.role != 'Admin'
+    ORDER BY u.created_at DESC
+  `);
+  return result.recordset;
+};
+
+export const updateUserRoleService = async (userId: number, role: string) => {
+  const allowed = ['User', 'Business'];
+  if (!allowed.includes(role)) throw new Error('Invalid role');
+  const pool = getPool();
+  await pool.request()
+    .input('userId', sql.Int, userId)
+    .input('role', sql.VarChar(50), role)
+    .query(`UPDATE dbo.[user] SET role=@role WHERE id=@userId AND role!='Admin'`);
+};
+
+export const toggleUserActiveService = async (userId: number, isActive: boolean) => {
+  const pool = getPool();
+  await pool.request()
+    .input('userId', sql.Int, userId)
+    .input('isActive', sql.Bit, isActive ? 1 : 0)
+    .query(`UPDATE dbo.[user] SET is_active=@isActive WHERE id=@userId AND role!='Admin'`);
+};

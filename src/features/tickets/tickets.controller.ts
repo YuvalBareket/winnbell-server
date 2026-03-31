@@ -69,7 +69,7 @@ export const activate = async (req: AuthRequest, res: Response) => {
 export const generateTicket = async (req: AuthRequest, res: Response) => {
   try {
     const user_id = req.user!.id;
-    let location_id: number | undefined = req.body?.location_id ?? req.user!.location_id ?? undefined;
+    let location_id: number | undefined = req.body?.location_id || req.user!.location_id || undefined;
 
     if (!location_id) {
       const businessLocations = await getBusinessLocationsByUserId(user_id);

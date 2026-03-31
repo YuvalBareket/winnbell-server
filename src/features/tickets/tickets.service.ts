@@ -45,15 +45,17 @@ export const activateTicket = async (code: string, userId: number) => {
 export const getUserTicketsService = async (userId: number, drawId: number) => {
   const pool = getPool();
   const query = `
-    SELECT 
+    SELECT
       t.id, t.code, t.status, t.activated_at,
       b.name as business_name, b.sector as business_sector,
+      bl.name as location_name,
       d.name as draw_name
     FROM ticket t
-   LEFT JOIN business b ON t.business_id = b.id
+    LEFT JOIN business b ON t.business_id = b.id
+    LEFT JOIN business_location bl ON t.location_id = bl.id
     JOIN draw d ON t.draw_id = d.id
     WHERE t.activated_by_user_id = @userId
-    AND  t.draw_id=@drawId
+    AND t.draw_id = @drawId
     ORDER BY t.activated_at DESC
   `;
 

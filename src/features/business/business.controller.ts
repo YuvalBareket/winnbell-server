@@ -10,9 +10,12 @@ import {
   getAddress,
   getMyBusinessData,
   getNearbyBusinessesService,
+  removeLocationManagerService,
   updateBusinessLocation,
+  updateBusinessLogo,
   updateBusinessProfile,
 } from './business.service.js';
+import { getPresignedUploadUrl } from '../../shared/s3.js';
 
 export const getNearby = async (
   req: Request<{}, {}, {}, INearbyQuery>,
@@ -160,6 +163,60 @@ export const deleteLocation = async (req: AuthRequest, res: Response): Promise<v
       return;
     }
     res.status(500).json({ message: 'Failed to delete location' });
+  }
+};
+
+export const removeManager = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { locationId } = req.params;
+    await removeLocationManagerService(Number(locationId), req.user!.id);
+    res.status(200).json({ success: true });
+  } catch (error: unknown) {
+    if (error instanceof Error && error.message === 'UNAUTHORIZED_OR_INVALID_LOCATION') {
+      res.status(403).json({ message: 'Forbidden' });
+      return;
+    }
+    if (error instanceof Error && error.message === 'NO_MANAGER_ASSIGNED') {
+      res.status(400).json({ message: 'No manager assigned to this location' });
+      return;
+    }
+    res.status(500).json({ message: 'Failed to remove manager' });
+  }
+};
+
+export const getUploadUrl = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const contentType = String(req.query.contentType || '').trim();
+    const result = await getPresignedUploadUrl(contentType);
+    res.json(result);
+  } catch (error: unknown) {
+    if (error instanceof Error && error.message === 'R2_NOT_CONFIGURED') {
+      res.status(503).json({ message: 'Image upload is not configured yet.' });
+      return;
+    }
+    if (error instanceof Error && error.message === 'INVALID_CONTENT_TYPE') {
+      res.status(400).json({ message: 'Only JPEG, PNG, and WebP images are allowed.' });
+      return;
+    }
+    res.status(500).json({ message: 'Failed to generate upload URL.' });
+  }
+};
+
+export const updateLogo = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { logo_url } = req.body as { logo_url: string };
+    if (!logo_url) {
+      res.status(400).json({ message: 'logo_url is required' });
+      return;
+    }
+    await updateBusinessLogo(req.user!.id, logo_url);
+    res.status(204).send();
+  } catch (error: unknown) {
+    if (error instanceof Error && error.message === 'BUSINESS_NOT_FOUND') {
+      res.status(404).json({ message: 'Business not found' });
+      return;
+    }
+    res.status(500).json({ message: 'Failed to update logo' });
   }
 };
 

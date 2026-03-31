@@ -9,6 +9,10 @@ import {
   getAllDrawsService,
   getBusinessesWithStats,
   pickDrawWinnerService,
+  getAdminOverviewService,
+  getAllUsersService,
+  updateUserRoleService,
+  toggleUserActiveService,
 } from './admin.service.js';
 
 export const getDashboardData = async (req: Request, res: Response) => {
@@ -89,6 +93,46 @@ export const closeDraw = async (req: Request, res: Response) => {
     res.status(200).json({ message: 'Draw closed successfully' });
   } catch (error) {
     res.status(500).json({ message: error instanceof Error ? error.message : 'Failed to close draw' });
+  }
+};
+
+export const getOverview = async (req: Request, res: Response) => {
+  try {
+    const data = await getAdminOverviewService();
+    res.status(200).json(data);
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to fetch overview' });
+  }
+};
+
+export const getUsers = async (req: Request, res: Response) => {
+  try {
+    const users = await getAllUsersService();
+    res.status(200).json(users);
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to fetch users' });
+  }
+};
+
+export const updateUserRole = async (req: Request, res: Response) => {
+  const userId = parseInt(req.params.userId, 10);
+  const { role } = req.body;
+  try {
+    await updateUserRoleService(userId, role);
+    res.status(200).json({ message: 'Role updated' });
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : 'Failed to update role' });
+  }
+};
+
+export const toggleUserActive = async (req: Request, res: Response) => {
+  const userId = parseInt(req.params.userId, 10);
+  const { is_active } = req.body;
+  try {
+    await toggleUserActiveService(userId, !!is_active);
+    res.status(200).json({ message: 'User status updated' });
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to update user status' });
   }
 };
 

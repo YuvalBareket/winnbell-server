@@ -38,6 +38,7 @@ export interface MyBusinessData {
   sector: string;
   description: string;
   terms_text: string;
+  logo_url: string | null;
   subscription_status: string | null;
   monthly_fee: number | null;
   next_billing_date: string | null;

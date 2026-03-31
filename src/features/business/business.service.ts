@@ -181,6 +181,7 @@ export const getMyBusinessData = async (userId: number): Promise<MyBusinessData 
         b.sector,
         b.description,
         b.terms_text,
+        b.logo_url,
         b.is_active,
         s.status as subscription_status,
         s.current_period_end,
@@ -255,6 +256,47 @@ export const createManagerInviteLink = async (
   const baseUrl = process.env.CLIENT_URL || 'http://localhost:8081';
   return `${baseUrl}/register/Location?token=${token}`;
 };
+export const removeLocationManagerService = async (
+  locationId: number,
+  ownerUserId: number,
+): Promise<void> => {
+  const pool = getPool();
+
+  // Verify the requester owns the business that owns this location, and get the current manager
+  const result = await pool
+    .request()
+    .input('locId', sql.Int, locationId)
+    .input('ownerId', sql.Int, ownerUserId)
+    .query(`
+      SELECT bl.manager_user_id
+      FROM business_location bl
+      JOIN business b ON bl.business_id = b.id
+      WHERE bl.id = @locId AND b.user_id = @ownerId
+    `);
+
+  if (result.recordset.length === 0) throw new Error('UNAUTHORIZED_OR_INVALID_LOCATION');
+
+  const managerId = result.recordset[0].manager_user_id;
+  if (!managerId) throw new Error('NO_MANAGER_ASSIGNED');
+
+  const transaction = new sql.Transaction(pool);
+  await transaction.begin();
+  try {
+    await transaction.request()
+      .input('locId', sql.Int, locationId)
+      .query(`UPDATE business_location SET manager_user_id = NULL WHERE id = @locId`);
+
+    await transaction.request()
+      .input('userId', sql.Int, managerId)
+      .query(`UPDATE [user] SET role = 'User' WHERE id = @userId`);
+
+    await transaction.commit();
+  } catch (err) {
+    await transaction.rollback();
+    throw err;
+  }
+};
+
 export const updateBusinessProfile = async (
   ownerUserId: number,
   data: UpdateBusinessInput,
@@ -380,15 +422,28 @@ export const deleteBusinessLocation = async (
   }
 };
 
+export const updateBusinessLogo = async (ownerUserId: number, logoUrl: string): Promise<void> => {
+  const pool = getPool();
+  const result = await pool
+    .request()
+    .input('ownerId', sql.Int, ownerUserId)
+    .input('logoUrl', sql.NVarChar(500), logoUrl)
+    .query(`UPDATE business SET logo_url = @logoUrl WHERE user_id = @ownerId`);
+
+  if (result.rowsAffected[0] === 0) {
+    throw new Error('BUSINESS_NOT_FOUND');
+  }
+};
+
 export const getBusinessLocationsByUserId = async (userId: number) => {
   const pool = getPool();
   const result = await pool.request()
     .input('userId', sql.Int, userId)
     .query(`
-      SELECT bl.id 
+      SELECT bl.id
       FROM business_location bl
       JOIN business b ON bl.business_id = b.id
-      WHERE b.user_id = @userId 
+      WHERE b.user_id = @userId OR bl.manager_user_id = @userId
       ORDER BY bl.created_at ASC
     `);
 
