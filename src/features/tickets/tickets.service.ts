@@ -153,13 +153,26 @@ export const checkFreeTicketEligibility = async (
     return { canActivate: true };
   }
 
+  // One ticket per calendar week (Sunday 00:00 → Saturday 23:59)
+  const now = new Date();
+  const weekStart = new Date(now);
+  weekStart.setDate(now.getDate() - now.getDay()); // back to Sunday
+  weekStart.setHours(0, 0, 0, 0);
+
   const lastDate = new Date(lastUsage.activated_at);
-  const nextAvailable = new Date(lastDate.getTime() + 7 * 24 * 60 * 60 * 1000);
-  const canActivate = new Date() >= nextAvailable;
+  const usedThisWeek = lastDate >= weekStart;
+
+  if (!usedThisWeek) {
+    return { canActivate: true };
+  }
+
+  // Next available = start of next Sunday
+  const nextSunday = new Date(weekStart);
+  nextSunday.setDate(weekStart.getDate() + 7);
 
   return {
-    canActivate,
-    nextAvailableDate: !canActivate ? nextAvailable : undefined,
+    canActivate: false,
+    nextAvailableDate: nextSunday,
   };
 };
 export const generateGlobalUniqueCode = async (
@@ -205,8 +218,12 @@ export const activateFreeTicket = async (
 
     const lastUsage = eligibilityResult.recordset[0];
     if (lastUsage) {
-      const nextAvailable = new Date(new Date(lastUsage.activated_at).getTime() + 7 * 24 * 60 * 60 * 1000);
-      if (new Date() < nextAvailable) {
+      const now = new Date();
+      const weekStart = new Date(now);
+      weekStart.setDate(now.getDate() - now.getDay());
+      weekStart.setHours(0, 0, 0, 0);
+      const usedThisWeek = new Date(lastUsage.activated_at) >= weekStart;
+      if (usedThisWeek) {
         throw new Error('Weekly limit reached. Please wait until your next available date.');
       }
     }
