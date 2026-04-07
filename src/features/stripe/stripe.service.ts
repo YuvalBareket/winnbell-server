@@ -1,26 +1,22 @@
 import Stripe from 'stripe';
-import { getPool, sql } from '../../shared/db/db.js';
+import { Pool } from 'pg';
+import { getPool } from '../../shared/db/db.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string);
 
 // ─── Create Checkout Session ──────────────────────────────────────────────────
 
-export const createCheckoutSession = async (
-  businessId: number,
-  userEmail: string,
-): Promise<string> => {
+export const createCheckoutSession = async (businessId: number, userEmail: string): Promise<string> => {
   const priceId = process.env.STRIPE_PRICE_ID;
   if (!priceId) throw new Error('STRIPE_PRICE_ID is not configured');
 
-  // Block if business already has a non-cancelled subscription
   const pool = getPool();
-  const existing = await pool.request()
-    .input('businessId', sql.Int, businessId)
-    .query(`SELECT id FROM subscription WHERE business_id = @businessId AND status != 'Cancelled'`);
+  const existing = await pool.query(
+    `SELECT id FROM subscription WHERE business_id = $1 AND status != 'Cancelled'`,
+    [businessId],
+  );
 
-  if (existing.recordset.length > 0) {
-    throw new Error('This business already has an active subscription');
-  }
+  if (existing.rows.length > 0) throw new Error('This business already has an active subscription');
 
   const baseUrl = process.env.CLIENT_URL || 'http://localhost:8081';
 
@@ -38,32 +34,21 @@ export const createCheckoutSession = async (
   return session.url as string;
 };
 
-// ─── Verify Session (called from success page as reliable fallback) ───────────
+// ─── Verify Session ───────────────────────────────────────────────────────────
 
 export const verifyAndActivateSession = async (sessionId: string, userId: number): Promise<void> => {
   const pool = getPool();
 
-  // Get the business for this user
-  const bizResult = await pool.request()
-    .input('userId', sql.Int, userId)
-    .query(`SELECT id FROM business WHERE user_id = @userId`);
-
-  const businessId = bizResult.recordset[0]?.id;
+  const bizResult = await pool.query(`SELECT id FROM business WHERE user_id = $1`, [userId]);
+  const businessId = bizResult.rows[0]?.id;
   if (!businessId) throw new Error('Business not found');
 
-  // Retrieve and validate the session from Stripe
   const session = await stripe.checkout.sessions.retrieve(sessionId, {
     expand: ['subscription', 'subscription.items'],
   });
 
-  if (session.payment_status !== 'paid') {
-    throw new Error('Payment not completed');
-  }
-
-  // Guard: make sure this session belongs to this business
-  if (session.metadata?.business_id !== String(businessId)) {
-    throw new Error('Session does not belong to this business');
-  }
+  if (session.payment_status !== 'paid') throw new Error('Payment not completed');
+  if (session.metadata?.business_id !== String(businessId)) throw new Error('Session does not belong to this business');
 
   const subscription = session.subscription as Stripe.Subscription;
   const customerId = session.customer as string;
@@ -77,10 +62,7 @@ export const verifyAndActivateSession = async (sessionId: string, userId: number
 
 // ─── Handle Webhook ───────────────────────────────────────────────────────────
 
-export const handleStripeWebhook = async (
-  rawBody: Buffer,
-  signature: string,
-): Promise<void> => {
+export const handleStripeWebhook = async (rawBody: Buffer, signature: string): Promise<void> => {
   const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET as string;
 
   let event: Stripe.Event;
@@ -98,20 +80,12 @@ export const handleStripeWebhook = async (
       try {
         const session = event.data.object as Stripe.Checkout.Session;
         const businessId = Number(session.metadata?.business_id);
-        if (!businessId) {
-          console.error('[Stripe] checkout.session.completed: missing business_id in metadata', session.id);
-          break;
-        }
+        if (!businessId) { console.error('[Stripe] checkout.session.completed: missing business_id', session.id); break; }
 
         const subscriptionId = session.subscription as string;
-        if (!subscriptionId) {
-          console.error('[Stripe] checkout.session.completed: session has no subscription', session.id);
-          break;
-        }
+        if (!subscriptionId) { console.error('[Stripe] checkout.session.completed: no subscription', session.id); break; }
 
-        const subscription = await stripe.subscriptions.retrieve(subscriptionId, {
-          expand: ['items'],
-        });
+        const subscription = await stripe.subscriptions.retrieve(subscriptionId, { expand: ['items'] });
         const customerId = session.customer as string;
         const priceItem = subscription.items.data[0];
         const priceId = priceItem?.price.id ?? '';
@@ -135,25 +109,19 @@ export const handleStripeWebhook = async (
 
         const status = mapStripeStatus(subscription.status);
         const currentPeriodEnd = extractPeriodEnd(subscription);
-        const cancelAtPeriodEnd = subscription.cancel_at_period_end ? 1 : 0;
-        const isActive = status === 'Active' || status === 'Trialing' ? 1 : 0;
+        const cancelAtPeriodEnd = subscription.cancel_at_period_end;
+        const isActive = status === 'Active' || status === 'Trialing';
         const previousStatus = (event.data as any).previous_attributes?.status;
 
-        await pool.request()
-          .input('businessId', sql.Int, businessId)
-          .input('status', sql.NVarChar, status)
-          .input('periodEnd', sql.DateTime2, currentPeriodEnd)
-          .input('cancelAtPeriodEnd', sql.Bit, cancelAtPeriodEnd)
-          .input('isActive', sql.Bit, isActive)
-          .query(`
-            UPDATE subscription
-            SET status = @status, current_period_end = @periodEnd,
-                cancel_at_period_end = @cancelAtPeriodEnd, updated_at = GETDATE()
-            WHERE business_id = @businessId;
-            UPDATE business SET is_active = @isActive WHERE id = @businessId;
-          `);
+        await pool.query(`
+          UPDATE subscription
+          SET status = $1, current_period_end = $2, cancel_at_period_end = $3, updated_at = NOW()
+          WHERE business_id = $4
+        `, [status, currentPeriodEnd, cancelAtPeriodEnd, businessId]);
 
-        if (isActive === 1 && previousStatus && previousStatus !== 'active') {
+        await pool.query(`UPDATE business SET is_active = $1 WHERE id = $2`, [isActive, businessId]);
+
+        if (isActive && previousStatus && previousStatus !== 'active') {
           const priceItem = subscription.items.data[0];
           const monthlyFee = (priceItem?.price.unit_amount ?? 0) / 100;
           await handleDrawParticipation(pool, businessId, monthlyFee);
@@ -171,12 +139,11 @@ export const handleStripeWebhook = async (
         const businessId = Number(subscription.metadata?.business_id);
         if (!businessId) break;
 
-        await pool.request()
-          .input('businessId', sql.Int, businessId)
-          .query(`
-            UPDATE subscription SET status = 'Cancelled', updated_at = GETDATE() WHERE business_id = @businessId;
-            UPDATE business SET is_active = 0 WHERE id = @businessId;
-          `);
+        await pool.query(
+          `UPDATE subscription SET status = 'Cancelled', updated_at = NOW() WHERE business_id = $1`,
+          [businessId],
+        );
+        await pool.query(`UPDATE business SET is_active = false WHERE id = $1`, [businessId]);
         console.log(`[Stripe] Business ${businessId} deactivated`);
       } catch (err: any) {
         console.error('[Stripe] ERROR in customer.subscription.deleted:', err.message);
@@ -191,9 +158,6 @@ export const handleStripeWebhook = async (
         const subscriptionId = (invoice as any).subscription as string | null;
         if (!subscriptionId) break;
 
-        // Only process recurring renewals (billing_reason = 'subscription_cycle')
-        // The first payment ('subscription_create') is already handled by checkout.session.completed
-        // but the duplicate-participant guard makes it safe to process both
         const billingReason = (invoice as any).billing_reason as string | null;
         if (billingReason !== 'subscription_cycle') break;
 
@@ -219,9 +183,10 @@ export const handleStripeWebhook = async (
         const subscriptionId = (invoice as any).subscription as string | null;
         if (!subscriptionId) break;
 
-        await pool.request()
-          .input('subscriptionId', sql.NVarChar, subscriptionId)
-          .query(`UPDATE subscription SET status = 'Past_Due', updated_at = GETDATE() WHERE stripe_subscription_id = @subscriptionId;`);
+        await pool.query(
+          `UPDATE subscription SET status = 'Past_Due', updated_at = NOW() WHERE stripe_subscription_id = $1`,
+          [subscriptionId],
+        );
       } catch (err: any) {
         console.error('[Stripe] ERROR in invoice.payment_failed:', err.message);
         throw err;
@@ -234,7 +199,7 @@ export const handleStripeWebhook = async (
 // ─── Shared Activation Logic ──────────────────────────────────────────────────
 
 async function activateBusinessSubscription(
-  pool: ReturnType<typeof getPool>,
+  pool: Pool,
   businessId: number,
   subscriptionId: string,
   customerId: string,
@@ -244,51 +209,28 @@ async function activateBusinessSubscription(
 ): Promise<void> {
   console.log(`[Stripe] Activating business ${businessId}...`);
 
-  // Step 1: Activate business
-  const updateResult = await pool.request()
-    .input('businessId', sql.Int, businessId)
-    .query(`UPDATE business SET is_active = 1 WHERE id = @businessId`);
-  console.log(`[Stripe] business.is_active updated, rows affected: ${updateResult.rowsAffected[0]}`);
+  const updateResult = await pool.query(
+    `UPDATE business SET is_active = true WHERE id = $1`,
+    [businessId],
+  );
+  console.log(`[Stripe] business.is_active updated, rows affected: ${updateResult.rowCount}`);
 
-  // Step 2: Upsert subscription row using IF EXISTS (more reliable than MERGE)
-  const existing = await pool.request()
-    .input('businessId', sql.Int, businessId)
-    .query(`SELECT id FROM subscription WHERE business_id = @businessId`);
+  // Upsert subscription using ON CONFLICT
+  await pool.query(`
+    INSERT INTO subscription
+      (business_id, stripe_customer_id, stripe_subscription_id, stripe_price_id, status, current_period_end, cancel_at_period_end)
+    VALUES ($1, $2, $3, $4, 'Active', $5, false)
+    ON CONFLICT (business_id) DO UPDATE
+      SET stripe_customer_id     = EXCLUDED.stripe_customer_id,
+          stripe_subscription_id = EXCLUDED.stripe_subscription_id,
+          stripe_price_id        = EXCLUDED.stripe_price_id,
+          status                 = 'Active',
+          current_period_end     = EXCLUDED.current_period_end,
+          cancel_at_period_end   = false,
+          updated_at             = NOW()
+  `, [businessId, customerId, subscriptionId, priceId, currentPeriodEnd]);
+  console.log(`[Stripe] subscription row upserted for business ${businessId}`);
 
-  if (existing.recordset.length > 0) {
-    await pool.request()
-      .input('businessId', sql.Int, businessId)
-      .input('customerId', sql.NVarChar, customerId)
-      .input('subscriptionId', sql.NVarChar, subscriptionId)
-      .input('priceId', sql.NVarChar, priceId)
-      .input('periodEnd', sql.DateTime2, currentPeriodEnd)
-      .query(`
-        UPDATE subscription
-        SET stripe_customer_id     = @customerId,
-            stripe_subscription_id = @subscriptionId,
-            stripe_price_id        = @priceId,
-            status                 = 'Active',
-            current_period_end     = @periodEnd,
-            cancel_at_period_end   = 0,
-            updated_at             = GETDATE()
-        WHERE business_id = @businessId
-      `);
-    console.log(`[Stripe] subscription row updated for business ${businessId}`);
-  } else {
-    await pool.request()
-      .input('businessId', sql.Int, businessId)
-      .input('customerId', sql.NVarChar, customerId)
-      .input('subscriptionId', sql.NVarChar, subscriptionId)
-      .input('priceId', sql.NVarChar, priceId)
-      .input('periodEnd', sql.DateTime2, currentPeriodEnd)
-      .query(`
-        INSERT INTO subscription (business_id, stripe_customer_id, stripe_subscription_id, stripe_price_id, status, current_period_end, cancel_at_period_end)
-        VALUES (@businessId, @customerId, @subscriptionId, @priceId, 'Active', @periodEnd, 0)
-      `);
-    console.log(`[Stripe] subscription row inserted for business ${businessId}`);
-  }
-
-  // Step 3: Draw participation (isolated — never blocks activation)
   try {
     await handleDrawParticipation(pool, businessId, monthlyFee);
   } catch (err: any) {
@@ -298,89 +240,76 @@ async function activateBusinessSubscription(
 
 // ─── Draw Participation ───────────────────────────────────────────────────────
 
-async function handleDrawParticipation(
-  pool: ReturnType<typeof getPool>,
-  businessId: number,
-  monthlyFee: number,
-): Promise<void> {
-  const transaction = new sql.Transaction(pool);
-  await transaction.begin();
+async function handleDrawParticipation(pool: Pool, businessId: number, monthlyFee: number): Promise<void> {
+  const client = await pool.connect();
+  await client.query('BEGIN');
 
   try {
-    // Find the upcoming draw for next calendar month (status must be 'Upcoming' — never touch the current open draw)
-    const drawResult = await transaction.request().query(`
-      SELECT TOP 1 id, prize_percentage FROM draw
-      WHERE MONTH(draw_date) = MONTH(DATEADD(month, 1, GETDATE()))
-        AND YEAR(draw_date)  = YEAR(DATEADD(month, 1, GETDATE()))
+    const drawResult = await client.query(`
+      SELECT id, prize_percentage FROM draw
+      WHERE EXTRACT(MONTH FROM draw_date) = EXTRACT(MONTH FROM NOW() + INTERVAL '1 month')
+        AND EXTRACT(YEAR FROM draw_date)  = EXTRACT(YEAR FROM NOW() + INTERVAL '1 month')
         AND status = 'Upcoming'
+      LIMIT 1
     `);
 
-    const existingDraw = drawResult.recordset[0] as { id: number; prize_percentage: number } | undefined;
+    const existingDraw = drawResult.rows[0] as { id: number; prize_percentage: number } | undefined;
 
     if (existingDraw) {
       const contribution = parseFloat((monthlyFee * existingDraw.prize_percentage / 100).toFixed(2));
 
-      // INSERT ... WHERE NOT EXISTS is atomic — handles concurrent duplicate calls without throwing
-      const insertResult = await transaction.request()
-        .input('drawId', sql.Int, existingDraw.id)
-        .input('businessId', sql.Int, businessId)
-        .input('fee', sql.Decimal(10, 2), monthlyFee)
-        .input('contribution', sql.Decimal(10, 2), contribution)
-        .query(`
-          INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, contribution_amount)
-          SELECT @drawId, @businessId, @fee, @contribution
-          WHERE NOT EXISTS (
-            SELECT 1 FROM draw_entry WHERE draw_id = @drawId AND business_id = @businessId
-          )
-        `);
+      const insertResult = await client.query(`
+        INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, contribution_amount)
+        SELECT $1, $2, $3, $4
+        WHERE NOT EXISTS (
+          SELECT 1 FROM draw_entry WHERE draw_id = $1 AND business_id = $2
+        )
+      `, [existingDraw.id, businessId, monthlyFee, contribution]);
 
-      if (insertResult.rowsAffected[0] === 0) {
+      if (insertResult.rowCount === 0) {
         console.log(`[Draw] Business ${businessId} already in draw ${existingDraw.id} — skipped`);
-        await transaction.commit();
+        await client.query('COMMIT');
         return;
       }
 
-      await transaction.request()
-        .input('drawId', sql.Int, existingDraw.id)
-        .input('contribution', sql.Decimal(10, 2), contribution)
-        .query(`UPDATE draw SET prize_pool = prize_pool + @contribution WHERE id = @drawId`);
+      await client.query(
+        `UPDATE draw SET prize_pool = prize_pool + $1 WHERE id = $2`,
+        [contribution, existingDraw.id],
+      );
 
       console.log(`[Draw] Business ${businessId} entered draw ${existingDraw.id} — fee $${monthlyFee}, contribution $${contribution} (${existingDraw.prize_percentage}%)`);
     } else {
-      // No draw for next month — create one with default 80% prize percentage
       const DEFAULT_PRIZE_PCT = 80.00;
       const contribution = parseFloat((monthlyFee * DEFAULT_PRIZE_PCT / 100).toFixed(2));
 
-      const newDrawResult = await transaction.request()
-        .input('contribution', sql.Decimal(10, 2), contribution)
-        .query(`
-          INSERT INTO draw (name, prize_pool, prize_percentage, draw_date, status)
-          OUTPUT INSERTED.id, INSERTED.prize_percentage
-          VALUES (
-            FORMAT(DATEADD(month, 1, GETDATE()), 'MMMM yyyy') + ' Monthly Draw',
-            @contribution,
-            ${DEFAULT_PRIZE_PCT},
-            EOMONTH(DATEADD(month, 1, GETDATE())),
-            'Upcoming'
-          )
-        `);
+      const newDrawResult = await client.query(`
+        INSERT INTO draw (name, prize_pool, prize_percentage, draw_date, status)
+        VALUES (
+          TRIM(TO_CHAR(NOW() + INTERVAL '1 month', 'Month')) || ' ' || TO_CHAR(NOW() + INTERVAL '1 month', 'YYYY') || ' Monthly Draw',
+          $1,
+          $2,
+          DATE_TRUNC('month', NOW() + INTERVAL '1 month') + INTERVAL '1 month' - INTERVAL '1 day',
+          'Upcoming'
+        )
+        RETURNING id, prize_percentage
+      `, [contribution, DEFAULT_PRIZE_PCT]);
 
-      const newDraw = newDrawResult.recordset[0] as { id: number; prize_percentage: number };
+      const newDraw = newDrawResult.rows[0] as { id: number; prize_percentage: number };
 
-      await transaction.request()
-        .input('drawId', sql.Int, newDraw.id)
-        .input('businessId', sql.Int, businessId)
-        .input('fee', sql.Decimal(10, 2), monthlyFee)
-        .input('contribution', sql.Decimal(10, 2), contribution)
-        .query(`INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, contribution_amount) VALUES (@drawId, @businessId, @fee, @contribution)`);
+      await client.query(
+        `INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, contribution_amount) VALUES ($1, $2, $3, $4)`,
+        [newDraw.id, businessId, monthlyFee, contribution],
+      );
 
       console.log(`[Draw] Created new draw ${newDraw.id} for business ${businessId} — fee $${monthlyFee}, contribution $${contribution}`);
     }
 
-    await transaction.commit();
+    await client.query('COMMIT');
   } catch (err) {
-    await transaction.rollback();
+    await client.query('ROLLBACK');
     throw err;
+  } finally {
+    client.release();
   }
 }
 
@@ -389,29 +318,26 @@ async function handleDrawParticipation(
 export const getSubscriptionDetails = async (userId: number) => {
   const pool = getPool();
 
-  const result = await pool.request()
-    .input('userId', sql.Int, userId)
-    .query(`
-      SELECT
-        s.id, s.status, s.current_period_end, s.cancel_at_period_end,
-        s.stripe_subscription_id, s.stripe_price_id,
-        -- Next month's draw this business is participating in
-        d.id        AS draw_id,
-        d.name      AS draw_name,
-        d.draw_date AS draw_date,
-        d.status    AS draw_status,
-        d.prize_pool AS prize_amount
-      FROM business b
-      JOIN subscription s ON s.business_id = b.id
-      LEFT JOIN draw_entry de ON de.business_id = b.id
-      LEFT JOIN draw d ON d.id = de.draw_id
-        AND MONTH(d.draw_date) = MONTH(DATEADD(month, 1, GETDATE()))
-        AND YEAR(d.draw_date)  = YEAR(DATEADD(month, 1, GETDATE()))
-        AND d.status = 'Upcoming'
-      WHERE b.user_id = @userId
-    `);
+  const result = await pool.query(`
+    SELECT
+      s.id, s.status, s.current_period_end, s.cancel_at_period_end,
+      s.stripe_subscription_id, s.stripe_price_id,
+      d.id        AS draw_id,
+      d.name      AS draw_name,
+      d.draw_date AS draw_date,
+      d.status    AS draw_status,
+      d.prize_pool AS prize_amount
+    FROM business b
+    JOIN subscription s ON s.business_id = b.id
+    LEFT JOIN draw_entry de ON de.business_id = b.id
+    LEFT JOIN draw d ON d.id = de.draw_id
+      AND EXTRACT(MONTH FROM d.draw_date) = EXTRACT(MONTH FROM NOW() + INTERVAL '1 month')
+      AND EXTRACT(YEAR FROM d.draw_date)  = EXTRACT(YEAR FROM NOW() + INTERVAL '1 month')
+      AND d.status = 'Upcoming'
+    WHERE b.user_id = $1
+  `, [userId]);
 
-  return result.recordset[0] ?? null;
+  return result.rows[0] ?? null;
 };
 
 // ─── Resume Subscription ──────────────────────────────────────────────────────
@@ -419,30 +345,22 @@ export const getSubscriptionDetails = async (userId: number) => {
 export const resumeSubscription = async (userId: number): Promise<void> => {
   const pool = getPool();
 
-  const subResult = await pool.request()
-    .input('userId', sql.Int, userId)
-    .query(`
-      SELECT s.id, s.stripe_subscription_id, b.id AS business_id
-      FROM subscription s
-      JOIN business b ON b.id = s.business_id
-      WHERE b.user_id = @userId AND s.cancel_at_period_end = 1 AND s.status != 'Cancelled'
-    `);
+  const subResult = await pool.query(`
+    SELECT s.id, s.stripe_subscription_id, b.id AS business_id
+    FROM subscription s
+    JOIN business b ON b.id = s.business_id
+    WHERE b.user_id = $1 AND s.cancel_at_period_end = true AND s.status != 'Cancelled'
+  `, [userId]);
 
-  const sub = subResult.recordset[0];
+  const sub = subResult.rows[0];
   if (!sub) throw new Error('No pending cancellation found to resume');
 
-  await stripe.subscriptions.update(sub.stripe_subscription_id, {
-    cancel_at_period_end: false,
-  });
+  await stripe.subscriptions.update(sub.stripe_subscription_id, { cancel_at_period_end: false });
 
-  await pool.request()
-    .input('subId', sql.Int, sub.id)
-    .query(`UPDATE subscription SET cancel_at_period_end = 0, updated_at = GETDATE() WHERE id = @subId`);
-
-  // Re-add to next month's draw if not already in it
-  const priceResult = await pool.request()
-    .input('subId', sql.Int, sub.id)
-    .query(`SELECT stripe_price_id FROM subscription WHERE id = @subId`);
+  await pool.query(
+    `UPDATE subscription SET cancel_at_period_end = false, updated_at = NOW() WHERE id = $1`,
+    [sub.id],
+  );
 
   const stripeSubscription = await stripe.subscriptions.retrieve(sub.stripe_subscription_id, { expand: ['items'] });
   const monthlyFee = (stripeSubscription.items.data[0]?.price.unit_amount ?? 0) / 100;
@@ -459,73 +377,62 @@ export const resumeSubscription = async (userId: number): Promise<void> => {
 export const cancelSubscription = async (userId: number): Promise<{ removedFromDraw: boolean }> => {
   const pool = getPool();
 
-  // Get subscription record
-  const subResult = await pool.request()
-    .input('userId', sql.Int, userId)
-    .query(`
-      SELECT s.id, s.stripe_subscription_id, b.id AS business_id
-      FROM subscription s
-      JOIN business b ON b.id = s.business_id
-      WHERE b.user_id = @userId AND s.status != 'Cancelled'
-    `);
+  const subResult = await pool.query(`
+    SELECT s.id, s.stripe_subscription_id, b.id AS business_id
+    FROM subscription s
+    JOIN business b ON b.id = s.business_id
+    WHERE b.user_id = $1 AND s.status != 'Cancelled'
+  `, [userId]);
 
-  const sub = subResult.recordset[0];
+  const sub = subResult.rows[0];
   if (!sub) throw new Error('No active subscription found');
 
-  // Cancel in Stripe at period end
-  await stripe.subscriptions.update(sub.stripe_subscription_id, {
-    cancel_at_period_end: true,
-  });
+  await stripe.subscriptions.update(sub.stripe_subscription_id, { cancel_at_period_end: true });
 
-  // Update our DB
-  await pool.request()
-    .input('subId', sql.Int, sub.id)
-    .query(`UPDATE subscription SET cancel_at_period_end = 1, updated_at = GETDATE() WHERE id = @subId`);
+  await pool.query(
+    `UPDATE subscription SET cancel_at_period_end = true, updated_at = NOW() WHERE id = $1`,
+    [sub.id],
+  );
 
-  // Find any upcoming draw this business is registered for (next calendar month, not yet locked)
-  const drawResult = await pool.request()
-    .input('businessId', sql.Int, sub.business_id)
-    .query(`
-      SELECT d.id, d.status, d.prize_pool, de.contribution_amount, d.draw_date
-      FROM draw_entry de
-      JOIN draw d ON d.id = de.draw_id
-      WHERE de.business_id = @businessId
-        AND d.status = 'Upcoming'
-    `);
+  const drawResult = await pool.query(`
+    SELECT d.id, d.status, d.prize_pool, de.contribution_amount, d.draw_date
+    FROM draw_entry de
+    JOIN draw d ON d.id = de.draw_id
+    WHERE de.business_id = $1 AND d.status = 'Upcoming'
+  `, [sub.business_id]);
 
-  console.log(`[Cancel] business_id=${sub.business_id} draw rows found: ${drawResult.recordset.length}`);
-  drawResult.recordset.forEach(r => console.log(`[Cancel] draw: id=${r.id} status=${r.status} date=${r.draw_date} contribution=${r.contribution_amount} pool=${r.prize_pool}`));
+  console.log(`[Cancel] business_id=${sub.business_id} draw rows found: ${drawResult.rows.length}`);
+  drawResult.rows.forEach(r => console.log(`[Cancel] draw: id=${r.id} status=${r.status} date=${r.draw_date} contribution=${r.contribution_amount} pool=${r.prize_pool}`));
 
-  const nextDraw = drawResult.recordset[0];
+  const nextDraw = drawResult.rows[0];
   let removedFromDraw = false;
 
   if (nextDraw) {
-    // Locked once we are on or past the 1st day of the draw's month
     const drawDate = new Date(nextDraw.draw_date);
     const lockDate = new Date(drawDate.getFullYear(), drawDate.getMonth(), 1);
     const isLocked = new Date() >= lockDate;
     console.log(`[Cancel] draw ${nextDraw.id} lockDate=${lockDate.toISOString()} isLocked=${isLocked} contribution=${nextDraw.contribution_amount}`);
 
     if (!isLocked) {
-      const transaction = new sql.Transaction(pool);
-      await transaction.begin();
+      const client = await pool.connect();
+      await client.query('BEGIN');
       try {
-        await transaction.request()
-          .input('drawId', sql.Int, nextDraw.id)
-          .input('contribution', sql.Decimal(10, 2), nextDraw.contribution_amount)
-          .query(`UPDATE draw SET prize_pool = IIF(prize_pool - @contribution < 0, 0, prize_pool - @contribution) WHERE id = @drawId`);
-
-        await transaction.request()
-          .input('drawId', sql.Int, nextDraw.id)
-          .input('businessId', sql.Int, sub.business_id)
-          .query(`DELETE FROM draw_entry WHERE draw_id = @drawId AND business_id = @businessId`);
-
-        await transaction.commit();
+        await client.query(
+          `UPDATE draw SET prize_pool = GREATEST(0, prize_pool - $1) WHERE id = $2`,
+          [nextDraw.contribution_amount, nextDraw.id],
+        );
+        await client.query(
+          `DELETE FROM draw_entry WHERE draw_id = $1 AND business_id = $2`,
+          [nextDraw.id, sub.business_id],
+        );
+        await client.query('COMMIT');
         removedFromDraw = true;
         console.log(`[Cancel] Removed business ${sub.business_id} from draw ${nextDraw.id}, prize_pool reduced by $${nextDraw.contribution_amount}`);
       } catch (err) {
-        await transaction.rollback();
+        await client.query('ROLLBACK');
         throw err;
+      } finally {
+        client.release();
       }
     } else {
       console.log(`[Cancel] Draw ${nextDraw.id} is locked — business stays in draw`);
@@ -537,7 +444,6 @@ export const cancelSubscription = async (userId: number): Promise<{ removedFromD
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-// Stripe moved current_period_end around across API versions — try every known location
 function extractPeriodEnd(subscription: Stripe.Subscription): Date {
   const raw =
     (subscription as any).current_period_end ??
@@ -548,7 +454,6 @@ function extractPeriodEnd(subscription: Stripe.Subscription): Date {
     return new Date(raw * 1000);
   }
 
-  // Safe fallback: 30 days from now
   console.warn('[Stripe] could not read current_period_end, defaulting to 30 days from now');
   return new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 }
