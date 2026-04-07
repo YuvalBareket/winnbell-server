@@ -18,7 +18,7 @@ export const createCheckoutSession = async (businessId: number, userEmail: strin
 
   if (existing.rows.length > 0) throw new Error('This business already has an active subscription');
 
-  const baseUrl = process.env.CLIENT_URL || 'http://localhost:8081';
+  const baseUrl = process.env.FRONTEND_URL || 'http://localhost:8081';
 
   const session = await stripe.checkout.sessions.create({
     mode: 'subscription',
