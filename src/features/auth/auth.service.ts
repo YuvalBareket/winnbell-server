@@ -143,13 +143,17 @@ export const loginUser = async (
 
   let hasBusiness = false;
   let businessIsActive = false;
+  let businessLogoUrl: string | null = null;
+  let businessId: number | null = null;
   if (user.role === 'Business' && !locationId) {
     const bizResult = await pool.query(
-      `SELECT id, is_active FROM business WHERE user_id = $1`,
+      `SELECT id, is_active, logo_url FROM business WHERE user_id = $1`,
       [user.id],
     );
     hasBusiness = bizResult.rows.length > 0;
     businessIsActive = !!bizResult.rows[0]?.is_active;
+    businessLogoUrl = bizResult.rows[0]?.logo_url ?? null;
+    businessId = bizResult.rows[0]?.id ?? null;
   }
 
   const token = jwt.sign(
@@ -167,8 +171,10 @@ export const loginUser = async (
       fullName: user.full_name,
       role: user.role,
       location_id: locationId,
+      business_id: businessId,
       requiresBusinessSetup: user.role === 'Business' && !locationId && !hasBusiness,
       businessIsActive,
+      businessLogoUrl,
     },
   };
 };
@@ -234,13 +240,17 @@ export const syncExternalUser = async (
 
     let hasBusiness = false;
     let businessIsActive = false;
+    let businessLogoUrl: string | null = null;
+    let businessId: number | null = null;
     if (dbUser.role === 'Business' && !locationId) {
       const bizResult = await client.query(
-        `SELECT id, is_active FROM business WHERE user_id = $1`,
+        `SELECT id, is_active, logo_url FROM business WHERE user_id = $1`,
         [dbUser.id],
       );
       hasBusiness = bizResult.rows.length > 0;
       businessIsActive = !!bizResult.rows[0]?.is_active;
+      businessLogoUrl = bizResult.rows[0]?.logo_url ?? null;
+      businessId = bizResult.rows[0]?.id ?? null;
     }
 
     await client.query('COMMIT');
@@ -257,8 +267,10 @@ export const syncExternalUser = async (
       user: {
         ...dbUser,
         location_id: locationId,
+        business_id: businessId,
         requiresBusinessSetup: dbUser.role === 'Business' && !locationId && !hasBusiness,
         businessIsActive,
+        businessLogoUrl,
       },
     };
   } catch (error) {
