@@ -16,40 +16,51 @@ export const getNearbyBusinessesService = async (
   lat: number,
   lon: number,
   radius: number = 10,
+  minRadius: number = 0,
 ): Promise<NearbyBusiness[]> => {
   const pool = getPool();
 
+  // Bounding box pre-filter eliminates most rows before the expensive Haversine runs.
+  // 1 degree latitude ≈ 111 km, longitude varies by cos(lat).
+  const latDelta = radius / 111.0;
+  const lonDelta = radius / (111.0 * Math.cos(lat * (Math.PI / 180)));
+
   const query = `
-    SELECT
-      loc.id AS location_id,
-      loc.address,
-      loc.latitude,
-      loc.longitude,
-      b.id,
-      b.description,
-      b.terms_text,
-      b.name,
-      b.sector,
-      b.logo_url,
-      (6371 * acos(
-        LEAST(1.0, GREATEST(-1.0,
-          cos($1 * 0.0174532925) * cos(loc.latitude * 0.0174532925) * cos((loc.longitude * 0.0174532925) - ($2 * 0.0174532925)) +
-          sin($1 * 0.0174532925) * sin(loc.latitude * 0.0174532925)
-        ))
-      )) AS distance_km
-    FROM business_location loc
-    INNER JOIN business b ON loc.business_id = b.id
-    WHERE loc.is_active = true AND b.is_active = true
-      AND (6371 * acos(
-        LEAST(1.0, GREATEST(-1.0,
-          cos($1 * 0.0174532925) * cos(loc.latitude * 0.0174532925) * cos((loc.longitude * 0.0174532925) - ($2 * 0.0174532925)) +
-          sin($1 * 0.0174532925) * sin(loc.latitude * 0.0174532925)
-        ))
-      )) <= $3
+    WITH candidates AS (
+      SELECT
+        loc.id AS location_id,
+        loc.address,
+        loc.latitude,
+        loc.longitude,
+        b.id,
+        b.description,
+        b.terms_text,
+        b.name,
+        b.sector,
+        b.logo_url
+      FROM business_location loc
+      INNER JOIN business b ON loc.business_id = b.id
+      WHERE loc.is_active = true AND b.is_active = true
+        AND loc.latitude  BETWEEN ($1 - $5) AND ($1 + $5)
+        AND loc.longitude BETWEEN ($2 - $6) AND ($2 + $6)
+    ),
+    with_distance AS (
+      SELECT *,
+        (6371 * acos(
+          LEAST(1.0, GREATEST(-1.0,
+            cos($1 * 0.0174532925) * cos(latitude * 0.0174532925) *
+            cos((longitude * 0.0174532925) - ($2 * 0.0174532925)) +
+            sin($1 * 0.0174532925) * sin(latitude * 0.0174532925)
+          ))
+        )) AS distance_km
+      FROM candidates
+    )
+    SELECT * FROM with_distance
+    WHERE distance_km > $4 AND distance_km <= $3
     ORDER BY distance_km
   `;
 
-  const result = await pool.query(query, [lat, lon, radius]);
+  const result = await pool.query(query, [lat, lon, radius, minRadius, latDelta, lonDelta]);
   return result.rows;
 };
 

@@ -4,6 +4,7 @@ export interface INearbyQuery {
   latitude: string;
   longitude: string;
   radius?: string; // in Kilometers
+  minRadius?: string; // inner bound for ring fetch
 }
 
 /** Shape returned by the nearby search query */

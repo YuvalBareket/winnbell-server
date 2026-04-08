@@ -22,7 +22,7 @@ export const getNearby = async (
   res: Response,
 ) => {
   try {
-    const { latitude, longitude, radius } = req.query;
+    const { latitude, longitude, radius, minRadius } = req.query;
 
     if (!latitude || !longitude) {
       return res
@@ -34,6 +34,7 @@ export const getNearby = async (
       parseFloat(latitude),
       parseFloat(longitude),
       radius ? parseFloat(radius) : 10,
+      minRadius ? parseFloat(minRadius) : 0,
     );
 
     res.json(businesses);
