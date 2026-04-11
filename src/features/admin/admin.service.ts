@@ -124,6 +124,9 @@ export const openDrawService = async (drawId: number): Promise<void> => {
   if (check.rows[0].status.toUpperCase() !== 'UPCOMING') throw new Error('Only Upcoming draws can be opened');
 
   await pool.query(`UPDATE draw SET status = 'Open' WHERE id = $1`, [drawId]);
+
+  // All subscribed businesses go live when a draw opens
+  await pool.query(`UPDATE business SET is_participating = true WHERE is_subscribed = true`);
 };
 
 export const closeDrawService = async (drawId: number): Promise<void> => {
@@ -198,7 +201,7 @@ export const getAdminOverviewService = async () => {
 
   const [usersRes, bizRes, subRes, drawRes, ticketRes] = await Promise.all([
     pool.query(`SELECT COUNT(*) AS total_users, SUM(CASE WHEN role='Business' THEN 1 ELSE 0 END) AS business_users, SUM(CASE WHEN role='User' THEN 1 ELSE 0 END) AS regular_users FROM "user" WHERE role != 'Admin'`),
-    pool.query(`SELECT COUNT(*) AS total, SUM(CASE WHEN is_active=true THEN 1 ELSE 0 END) AS active FROM business`),
+    pool.query(`SELECT COUNT(*) AS total, SUM(CASE WHEN is_subscribed=true THEN 1 ELSE 0 END) AS active FROM business`),
     pool.query(`SELECT COUNT(*) AS active_subs, COALESCE(SUM(fee_at_entry),0) AS total_fees FROM subscription s LEFT JOIN draw_entry de ON de.business_id=s.business_id AND de.draw_id=(SELECT id FROM draw WHERE UPPER(status)='OPEN' ORDER BY draw_date ASC LIMIT 1) WHERE UPPER(s.status)='ACTIVE'`),
     pool.query(`SELECT id, name, prize_pool, draw_date FROM draw WHERE UPPER(status)='OPEN' ORDER BY draw_date ASC LIMIT 1`),
     pool.query(`SELECT COUNT(*) AS total_tickets, SUM(CASE WHEN UPPER(status)='ACTIVATED' THEN 1 ELSE 0 END) AS activated FROM ticket WHERE draw_id=(SELECT id FROM draw WHERE UPPER(status)='OPEN' ORDER BY draw_date ASC LIMIT 1)`),
@@ -217,7 +220,7 @@ export const getAllUsersService = async () => {
   const pool = getPool();
   const result = await pool.query(`
     SELECT u.id, u.full_name, u.email, u.role, u.is_active, u.is_email_verified, u.created_at,
-      b.id AS business_id, b.name AS business_name, b.is_active AS business_active
+      b.id AS business_id, b.name AS business_name, b.is_subscribed AS business_active
     FROM "user" u
     LEFT JOIN business b ON b.user_id = u.id
     WHERE u.role != 'Admin'

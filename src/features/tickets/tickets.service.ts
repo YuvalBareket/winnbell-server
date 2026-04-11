@@ -213,7 +213,8 @@ export const generateTicketService = async (user_id: number, location_id: number
       WHERE bl.id = $1
         AND (b.user_id = $2 OR bl.manager_user_id = $2)
         AND bl.is_active = true
-        AND b.is_active = true
+        AND b.is_subscribed = true
+        AND b.is_participating = true
     `, [location_id, user_id]);
 
     if (authInfo.rows.length === 0) {

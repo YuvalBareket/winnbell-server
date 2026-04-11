@@ -119,7 +119,7 @@ export const handleStripeWebhook = async (rawBody: Buffer, signature: string): P
           WHERE business_id = $4
         `, [status, currentPeriodEnd, cancelAtPeriodEnd, businessId]);
 
-        await pool.query(`UPDATE business SET is_active = $1 WHERE id = $2`, [isActive, businessId]);
+        await pool.query(`UPDATE business SET is_subscribed = $1 WHERE id = $2`, [isActive, businessId]);
 
         if (isActive && previousStatus && previousStatus !== 'active') {
           const priceItem = subscription.items.data[0];
@@ -143,7 +143,7 @@ export const handleStripeWebhook = async (rawBody: Buffer, signature: string): P
           `UPDATE subscription SET status = 'Cancelled', updated_at = NOW() WHERE business_id = $1`,
           [businessId],
         );
-        await pool.query(`UPDATE business SET is_active = false WHERE id = $1`, [businessId]);
+        await pool.query(`UPDATE business SET is_subscribed = false, is_participating = false WHERE id = $1`, [businessId]);
         console.log(`[Stripe] Business ${businessId} deactivated`);
       } catch (err: any) {
         console.error('[Stripe] ERROR in customer.subscription.deleted:', err.message);
@@ -210,10 +210,10 @@ async function activateBusinessSubscription(
   console.log(`[Stripe] Activating business ${businessId}...`);
 
   const updateResult = await pool.query(
-    `UPDATE business SET is_active = true WHERE id = $1`,
+    `UPDATE business SET is_subscribed = true WHERE id = $1`,
     [businessId],
   );
-  console.log(`[Stripe] business.is_active updated, rows affected: ${updateResult.rowCount}`);
+  console.log(`[Stripe] business.is_subscribed updated, rows affected: ${updateResult.rowCount}`);
 
   // Upsert subscription using ON CONFLICT
   await pool.query(`
@@ -329,11 +329,17 @@ export const getSubscriptionDetails = async (userId: number) => {
       d.prize_pool AS prize_amount
     FROM business b
     JOIN subscription s ON s.business_id = b.id
-    LEFT JOIN draw_entry de ON de.business_id = b.id
-    LEFT JOIN draw d ON d.id = de.draw_id
-      AND EXTRACT(MONTH FROM d.draw_date) = EXTRACT(MONTH FROM NOW() + INTERVAL '1 month')
-      AND EXTRACT(YEAR FROM d.draw_date)  = EXTRACT(YEAR FROM NOW() + INTERVAL '1 month')
-      AND d.status = 'Upcoming'
+    LEFT JOIN LATERAL (
+      SELECT d2.id, d2.name, d2.draw_date, d2.status, d2.prize_pool
+      FROM draw_entry de2
+      JOIN draw d2 ON d2.id = de2.draw_id
+      WHERE de2.business_id = b.id
+        AND d2.status IN ('Open', 'Upcoming')
+      ORDER BY
+        CASE d2.status WHEN 'Open' THEN 0 ELSE 1 END,
+        d2.draw_date ASC
+      LIMIT 1
+    ) d ON true
     WHERE b.user_id = $1
   `, [userId]);
 

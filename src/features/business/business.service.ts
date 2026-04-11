@@ -39,7 +39,7 @@ export const getNearbyBusinessesService = async (
       )) AS distance_km
     FROM business_location loc
     INNER JOIN business b ON loc.business_id = b.id
-    WHERE loc.is_active = true AND b.is_active = true
+    WHERE loc.is_active = true AND b.is_subscribed = true AND b.is_participating = true
       AND (6371 * acos(
         LEAST(1.0, GREATEST(-1.0,
           cos($1 * 0.0174532925) * cos(loc.latitude * 0.0174532925) * cos((loc.longitude * 0.0174532925) - ($2 * 0.0174532925)) +
@@ -141,7 +141,8 @@ export const getMyBusinessData = async (userId: number): Promise<MyBusinessData 
       b.description,
       b.terms_text,
       b.logo_url,
-      b.is_active,
+      b.is_subscribed,
+      b.is_participating,
       s.status AS subscription_status,
       s.current_period_end,
       s.cancel_at_period_end,

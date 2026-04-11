@@ -147,7 +147,7 @@ export const loginUser = async (
   let businessId: number | null = null;
   if (user.role === 'Business' && !locationId) {
     const bizResult = await pool.query(
-      `SELECT id, is_active, logo_url FROM business WHERE user_id = $1`,
+      `SELECT id, is_subscribed, logo_url FROM business WHERE user_id = $1`,
       [user.id],
     );
     hasBusiness = bizResult.rows.length > 0;
@@ -244,11 +244,11 @@ export const syncExternalUser = async (
     let businessId: number | null = null;
     if (dbUser.role === 'Business' && !locationId) {
       const bizResult = await client.query(
-        `SELECT id, is_active, logo_url FROM business WHERE user_id = $1`,
+        `SELECT id, is_subscribed, logo_url FROM business WHERE user_id = $1`,
         [dbUser.id],
       );
       hasBusiness = bizResult.rows.length > 0;
-      businessIsActive = !!bizResult.rows[0]?.is_active;
+      businessIsActive = !!bizResult.rows[0]?.is_subscribed;
       businessLogoUrl = bizResult.rows[0]?.logo_url ?? null;
       businessId = bizResult.rows[0]?.id ?? null;
     }
