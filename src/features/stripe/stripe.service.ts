@@ -4,6 +4,17 @@ import { getPool } from '../../shared/db/db.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string);
 
+// ─── Get Business For Checkout ────────────────────────────────────────────────
+
+export const getBusinessForCheckout = async (userId: number): Promise<{ id: number; email: string } | null> => {
+  const pool = getPool();
+  const result = await pool.query(
+    `SELECT b.id, u.email FROM business b JOIN "user" u ON u.id = b.user_id WHERE b.user_id = $1`,
+    [userId],
+  );
+  return result.rows[0] ?? null;
+};
+
 // ─── Create Checkout Session ──────────────────────────────────────────────────
 
 export const createCheckoutSession = async (businessId: number, userEmail: string): Promise<string> => {

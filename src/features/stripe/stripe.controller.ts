@@ -6,21 +6,14 @@ import {
   getSubscriptionDetails,
   cancelSubscription,
   resumeSubscription,
+  getBusinessForCheckout,
 } from './stripe.service.js';
-import { getPool } from '../../shared/db/db.js';
 
 // POST /business/subscription/checkout
 export const createCheckout = async (req: Request, res: Response) => {
   try {
     const userId = req.user!.id;
-    const pool = getPool();
-
-    const result = await pool.query(
-      `SELECT b.id, b.name, u.email FROM business b JOIN "user" u ON u.id = b.user_id WHERE b.user_id = $1`,
-      [userId],
-    );
-
-    const business = result.rows[0];
+    const business = await getBusinessForCheckout(userId);
     if (!business) {
       res.status(404).json({ error: 'Business not found' });
       return;
