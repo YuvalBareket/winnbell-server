@@ -276,12 +276,21 @@ export const submitReceiptEntryService = async (
       throw new Error(`Transaction amount does not meet the minimum required amount.`);
     }
 
-    // Transaction date validation against draw period
+    // Transaction date validation
     if (input.transactionDate) {
       const txDate = new Date(input.transactionDate);
       const drawOpenedAt = new Date(drawResult.rows[0].draw_opened_at);
       const now = new Date();
-      if (txDate < drawOpenedAt || txDate > now) {
+      const sevenDaysAgo = new Date(now);
+      sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+
+      if (txDate > now) {
+        throw new Error('Purchase date cannot be in the future.');
+      }
+      if (txDate < sevenDaysAgo) {
+        throw new Error('Receipt is older than 7 days and cannot be accepted.');
+      }
+      if (txDate < drawOpenedAt) {
         throw new Error('Transaction date must fall within the current campaign period.');
       }
     }

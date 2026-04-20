@@ -72,8 +72,8 @@ export const submitReceiptEntry = async (req: AuthRequest, res: Response) => {
     const userId = req.user!.id;
     const { locationId, receiptIdentifier, transactionAmount, transactionDate, receiptImageUrl, typingDurationMs, receiptInputMethod } = req.body;
 
-    if (!locationId || !receiptIdentifier || !transactionAmount) {
-      res.status(400).json({ message: 'locationId, receiptIdentifier, and transactionAmount are required.' });
+    if (!locationId || !receiptIdentifier || !transactionAmount || !transactionDate) {
+      res.status(400).json({ message: 'locationId, receiptIdentifier, transactionAmount, and transactionDate are required.' });
       return;
     }
     if (typeof transactionAmount !== 'number' || transactionAmount <= 0) {
