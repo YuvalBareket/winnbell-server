@@ -8,14 +8,46 @@ import {
   createManagerInviteLink,
   deleteBusinessLocation,
   getAddress,
+  getEntryModeService,
   getMyBusinessData,
   getNearbyBusinessesService,
+  getParticipatingBusinessesService,
   removeLocationManagerService,
+  searchParticipatingLocationsService,
   updateBusinessLocation,
   updateBusinessLogo,
   updateBusinessProfile,
 } from './business.service.js';
 import { getPresignedUploadUrl } from '../../shared/s3.js';
+
+export const getEntryMode = async (_req: Request, res: Response) => {
+  try {
+    const result = await getEntryModeService();
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+export const getParticipating = async (_req: Request, res: Response) => {
+  try {
+    const result = await getParticipatingBusinessesService();
+    res.json(result);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+export const searchParticipatingLocations = async (req: Request, res: Response) => {
+  try {
+    const q = String(req.query.q || '').trim();
+    if (q.length < 2) { res.json([]); return; }
+    const locations = await searchParticipatingLocationsService(q);
+    res.json(locations);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+};
 
 export const getNearby = async (
   req: Request<{}, {}, {}, INearbyQuery>,

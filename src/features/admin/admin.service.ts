@@ -166,10 +166,10 @@ export const pickDrawWinnerService = async (drawId: number): Promise<{
       b.name AS business_name,
       bl.name AS location_name
     FROM ticket t
-    JOIN "user" u ON t.activated_by_user_id = u.id
+    JOIN "user" u ON t.activated_by_user_id = u.id AND u.risk_score < 15
     LEFT JOIN business b ON t.business_id = b.id
     LEFT JOIN business_location bl ON t.location_id = bl.id
-    WHERE t.draw_id = $1 AND t.status = 'Activated'
+    WHERE t.draw_id = $1 AND t.status = 'Activated' AND t.is_quarantined = FALSE
     ORDER BY random()
     LIMIT 1
   `, [drawId]);

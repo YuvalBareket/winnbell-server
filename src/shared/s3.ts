@@ -13,6 +13,7 @@ const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 
 export const getPresignedUploadUrl = async (
   contentType: string,
+  folder: string = 'business-logos',
 ): Promise<{ uploadUrl: string; key: string }> => {
   const { R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ACCOUNT_ID, R2_BUCKET } = process.env;
 
@@ -35,7 +36,7 @@ export const getPresignedUploadUrl = async (
 
   const ext = contentType.split('/')[1];
   const filename = `${crypto.randomUUID()}.${ext}`;
-  const key = `business-logos/${filename}`;
+  const key = `${folder}/${filename}`;
 
   const command = new PutObjectCommand({
     Bucket: R2_BUCKET,

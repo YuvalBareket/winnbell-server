@@ -7,6 +7,7 @@ import {
   GeoapifyResult,
   MyBusinessData,
   NearbyBusiness,
+  ParticipatingLocation,
   UpdateBusinessInput,
   UpdateLocationInput,
 } from './business.types.js';
@@ -143,6 +144,8 @@ export const getMyBusinessData = async (userId: number): Promise<MyBusinessData 
       b.logo_url,
       b.is_subscribed,
       b.is_participating,
+      b.entry_mode,
+      b.entry_cap,
       s.status AS subscription_status,
       s.current_period_end,
       s.cancel_at_period_end,
@@ -297,6 +300,57 @@ export const updateBusinessLogo = async (ownerUserId: number, logoUrl: string): 
     [logoUrl, ownerUserId],
   );
   if (result.rowCount === 0) throw new Error('BUSINESS_NOT_FOUND');
+};
+
+export const getEntryModeService = async (): Promise<{ entry_mode: string }> => {
+  const pool = getPool();
+  const result = await pool.query(
+    `SELECT entry_mode FROM business WHERE is_participating = true LIMIT 1`,
+  );
+  return { entry_mode: result.rows[0]?.entry_mode ?? 'receipt' };
+};
+
+export const getParticipatingBusinessesService = async () => {
+  const pool = getPool();
+
+  const result = await pool.query(`
+    SELECT b.id, b.name, b.sector, b.logo_url, b.entry_mode
+    FROM business b
+    WHERE b.is_subscribed = true AND b.is_participating = true
+    ORDER BY b.name ASC
+  `);
+
+  const businesses = result.rows;
+  // All participating businesses share the same entry_mode; default to 'receipt' if none found
+  const entry_mode = businesses[0]?.entry_mode ?? 'receipt';
+
+  return { entry_mode, businesses };
+};
+
+export const searchParticipatingLocationsService = async (query: string): Promise<ParticipatingLocation[]> => {
+  const pool = getPool();
+  const result = await pool.query(
+    `SELECT
+      bl.id AS location_id,
+      bl.name AS location_name,
+      bl.address,
+      b.id AS business_id,
+      b.name AS business_name,
+      b.sector,
+      b.logo_url
+    FROM business_location bl
+    JOIN business b ON bl.business_id = b.id
+    WHERE bl.is_active = true AND b.is_subscribed = true AND b.is_participating = true
+      AND (
+        LOWER(b.name) LIKE LOWER($1) OR
+        LOWER(bl.name) LIKE LOWER($1) OR
+        LOWER(bl.address) LIKE LOWER($1)
+      )
+    ORDER BY b.name ASC, bl.name ASC
+    LIMIT 20`,
+    [`%${query}%`],
+  );
+  return result.rows;
 };
 
 export const getBusinessLocationsByUserId = async (userId: number) => {

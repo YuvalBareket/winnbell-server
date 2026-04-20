@@ -6,10 +6,13 @@ import {
   createInviteLink,
   deleteLocation,
   getAddressController,
+  getEntryMode,
   getMyBusiness,
   getNearby,
+  getParticipating,
   getUploadUrl,
   removeManager,
+  searchParticipatingLocations,
   setupBusiness,
   updateBusiness,
   updateLocation,
@@ -21,6 +24,9 @@ import { createCheckout, verifySession, getSubscription, cancelSub, resumeSub } 
 const router = Router();
 
 router.get('/nearby', getNearby);
+router.get('/participating', getParticipating);
+router.get('/participating/locations/search', searchParticipatingLocations);
+router.get('/mode', getEntryMode);
 router.post('/address', getAddressController);
 router.post('/setup', setupBusiness);
 router.get('/my-business', authenticateToken, getMyBusiness);

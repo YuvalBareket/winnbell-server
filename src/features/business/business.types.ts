@@ -31,6 +31,11 @@ export interface MyBusinessLocation {
   is_active: boolean;
 }
 
+// Entry mode controls how customers submit entries for this business.
+// 'code'    = MVP: business generates codes, customers activate them
+// 'receipt' = v2: customers self-submit receipt identifier + amount
+export type EntryMode = 'code' | 'receipt';
+
 /** Shape returned by getMyBusinessData */
 export interface MyBusinessData {
   id: number;
@@ -41,6 +46,8 @@ export interface MyBusinessData {
   logo_url: string | null;
   is_subscribed: boolean;
   is_participating: boolean;
+  entry_mode: EntryMode;
+  entry_cap: number | null;   // NULL = unlimited
   subscription_status: string | null;
   monthly_fee: number | null;
   next_billing_date: string | null;
@@ -57,6 +64,17 @@ export interface IBusinessLocation {
   sector: string;
   location: string;
   logo_url?: string;
+}
+
+/** Flat location row returned by getAllParticipatingLocationsService */
+export interface ParticipatingLocation {
+  location_id: number;
+  location_name: string;
+  address: string;
+  business_id: number;
+  business_name: string;
+  sector: string;
+  logo_url: string | null;
 }
 
 export type AddressSuggestion = {
