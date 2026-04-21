@@ -326,3 +326,39 @@ export const updatePlatformSettingsService = async (global_entry_cap: number | n
     [global_entry_cap],
   );
 };
+
+export const getPromoCodesService = async () => {
+  const pool = getPool();
+  const result = await pool.query(
+    `SELECT pc.id, pc.code, pc.is_active, pc.created_at,
+            COUNT(pe.id)::int AS use_count
+     FROM promotional_code pc
+     LEFT JOIN promotional_entry pe ON pe.code = pc.code
+     GROUP BY pc.id
+     ORDER BY pc.created_at DESC`,
+  );
+  return result.rows;
+};
+
+export const createPromoCodeService = async (code: string): Promise<{ id: number; code: string }> => {
+  const pool = getPool();
+  const normalized = code.toUpperCase().trim();
+  if (!normalized.startsWith('PROMO_') || normalized.length < 8) {
+    throw new Error('Code must start with PROMO_ and be at least 8 characters.');
+  }
+  try {
+    const result = await pool.query(
+      `INSERT INTO promotional_code (code) VALUES ($1) RETURNING id, code`,
+      [normalized],
+    );
+    return result.rows[0];
+  } catch (err: any) {
+    if (err.code === '23505') throw new Error('A promo code with that name already exists.');
+    throw err;
+  }
+};
+
+export const deactivatePromoCodeService = async (id: number): Promise<void> => {
+  const pool = getPool();
+  await pool.query(`UPDATE promotional_code SET is_active = false WHERE id = $1`, [id]);
+};

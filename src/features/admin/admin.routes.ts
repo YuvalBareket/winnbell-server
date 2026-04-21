@@ -23,4 +23,8 @@ router.get('/draws/:drawId/businesses', adminController.getDrawBusinesses);
 router.get('/settings', adminController.getPlatformSettings);
 router.patch('/settings', adminController.updatePlatformSettings);
 
+router.get('/promo-codes', adminController.getPromoCodes);
+router.post('/promo-codes', adminController.createPromoCode);
+router.patch('/promo-codes/:id/deactivate', adminController.deactivatePromoCode);
+
 export default router;

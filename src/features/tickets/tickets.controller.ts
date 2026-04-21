@@ -148,6 +148,23 @@ export const getReceiptUploadUrl = async (req: AuthRequest, res: Response) => {
   }
 };
 
+export const activatePromotional = async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const { code } = req.body as { code: string };
+
+    if (!code || typeof code !== 'string') {
+      res.status(400).json({ message: 'code is required.' });
+      return;
+    }
+
+    const result = await ticketService.activatePromotionalEntry(userId, code);
+    res.status(201).json({ success: true, ...result });
+  } catch (error: unknown) {
+    res.status(400).json({ message: error instanceof Error ? error.message : 'Promotional entry failed.' });
+  }
+};
+
 export const getMyRiskLevel = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;

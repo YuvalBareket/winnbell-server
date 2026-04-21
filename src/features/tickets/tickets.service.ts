@@ -58,17 +58,40 @@ export const getUserTicketsService = async (userId: number, drawId: number) => {
   const pool = getPool();
   const result = await pool.query(`
     SELECT
-      t.id, t.code, t.status, t.activated_at,
-      b.name as business_name, b.sector as business_sector, b.logo_url,
-      bl.name as location_name,
-      d.name as draw_name
+      t.id,
+      t.code,
+      t.status,
+      t.activated_at,
+      b.name  AS business_name,
+      b.sector AS business_sector,
+      b.logo_url,
+      bl.name AS location_name,
+      d.name  AS draw_name
     FROM ticket t
     LEFT JOIN business b ON t.business_id = b.id
     LEFT JOIN business_location bl ON t.location_id = bl.id
     JOIN draw d ON t.draw_id = d.id
     WHERE t.activated_by_user_id = $1
-    AND t.draw_id = $2
-    ORDER BY t.activated_at DESC
+      AND t.draw_id = $2
+
+    UNION ALL
+
+    SELECT
+      pe.id,
+      pe.code,
+      'Activated'           AS status,
+      pe.created_at         AS activated_at,
+      'Promotional Entry'   AS business_name,
+      NULL                  AS business_sector,
+      NULL                  AS logo_url,
+      NULL                  AS location_name,
+      d.name                AS draw_name
+    FROM promotional_entry pe
+    JOIN draw d ON d.id = pe.draw_id
+    WHERE pe.user_id = $1
+      AND pe.draw_id = $2
+
+    ORDER BY activated_at DESC
   `, [userId, drawId]);
   return result.rows;
 };
@@ -484,6 +507,50 @@ export const submitReceiptEntryService = async (
     throw err;
   } finally {
     client.release();
+  }
+};
+
+export const activatePromotionalEntry = async (
+  userId: number,
+  code: string,
+): Promise<{ entryId: number; drawName: string }> => {
+  const pool = getPool();
+
+  const normalizedCode = code.toUpperCase().trim();
+
+  // Validate the code exists in the admin-created registry and is active.
+  // This prevents users from fabricating codes by changing the URL parameter.
+  const codeCheck = await pool.query(
+    `SELECT id FROM promotional_code WHERE code = $1 AND is_active = true`,
+    [normalizedCode],
+  );
+  if (codeCheck.rows.length === 0) {
+    throw new Error('This promotional code is not valid or has expired.');
+  }
+
+  // Find the current open draw
+  const drawResult = await pool.query(
+    `SELECT id, name FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1`,
+  );
+  if (drawResult.rows.length === 0) {
+    throw new Error('There is no active draw at the moment. Please try again later.');
+  }
+  const draw = drawResult.rows[0];
+
+  // Insert — the UNIQUE(code, user_id) constraint rejects duplicate use per account
+  try {
+    const result = await pool.query(
+      `INSERT INTO promotional_entry (code, user_id, draw_id)
+       VALUES ($1, $2, $3)
+       RETURNING id`,
+      [normalizedCode, userId, draw.id],
+    );
+    return { entryId: result.rows[0].id, drawName: draw.name };
+  } catch (err: any) {
+    if (err.code === '23505') {
+      throw new Error('You have already used this promotional code.');
+    }
+    throw err;
   }
 };
 

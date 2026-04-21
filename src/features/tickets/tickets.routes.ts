@@ -12,4 +12,5 @@ router.post('/generate', authenticateToken, requireRole('Business', 'Admin'), ti
 router.post('/receipt-entry', authenticateToken, ticketController.submitReceiptEntry);
 router.get('/receipt-upload-url', authenticateToken, ticketController.getReceiptUploadUrl);
 router.get('/my-risk-level', authenticateToken, ticketController.getMyRiskLevel);
+router.post('/activate-promotional', authenticateToken, ticketController.activatePromotional);
 export default router;

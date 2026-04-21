@@ -3,6 +3,9 @@ import {
   closeDrawService,
   openDrawService,
   createBusinessService,
+  getPromoCodesService,
+  createPromoCodeService,
+  deactivatePromoCodeService,
   createDrawService,
   generateBatchTickets,
   getActiveDraws,
@@ -199,5 +202,44 @@ export const pickWinner = async (req: Request, res: Response) => {
   } catch (error) {
     console.error('[admin.pickWinner]', error);
     res.status(500).json({ message: 'Failed to pick winner' });
+  }
+};
+
+export const getPromoCodes = async (_req: Request, res: Response) => {
+  try {
+    const codes = await getPromoCodesService();
+    res.json(codes);
+  } catch (error) {
+    console.error('[admin.getPromoCodes]', error);
+    res.status(500).json({ message: 'Failed to fetch promo codes' });
+  }
+};
+
+export const createPromoCode = async (req: Request, res: Response) => {
+  const { code } = req.body as { code: string };
+  if (!code || typeof code !== 'string') {
+    res.status(400).json({ message: 'code is required' });
+    return;
+  }
+  try {
+    const result = await createPromoCodeService(code);
+    res.status(201).json(result);
+  } catch (error) {
+    res.status(400).json({ message: error instanceof Error ? error.message : 'Failed to create promo code' });
+  }
+};
+
+export const deactivatePromoCode = async (req: Request, res: Response) => {
+  const id = parseInt(req.params.id as string, 10);
+  if (isNaN(id)) {
+    res.status(400).json({ message: 'Invalid id' });
+    return;
+  }
+  try {
+    await deactivatePromoCodeService(id);
+    res.status(204).send();
+  } catch (error) {
+    console.error('[admin.deactivatePromoCode]', error);
+    res.status(500).json({ message: 'Failed to deactivate promo code' });
   }
 };
