@@ -455,7 +455,17 @@ export const resumeSubscription = async (userId: number): Promise<void> => {
 
 // ─── Cancel Subscription ──────────────────────────────────────────────────────
 
-export const cancelSubscription = async (userId: number): Promise<{ removedFromDraw: boolean }> => {
+const ONBOARDING_CUTOFF_DAYS = 7;
+
+export type CancelRefundType = 'full' | 'partial_40' | 'none';
+
+export interface CancelResult {
+  removedFromDraw: boolean;
+  refundType: CancelRefundType;
+  refundAmount: number; // actual dollars refunded (0 if none)
+}
+
+export const cancelSubscription = async (userId: number): Promise<CancelResult> => {
   const pool = getPool();
 
   const subResult = await pool.query(`
@@ -469,7 +479,6 @@ export const cancelSubscription = async (userId: number): Promise<{ removedFromD
   if (!sub) throw new Error('No active subscription found');
 
   await stripe.subscriptions.update(sub.stripe_subscription_id, { cancel_at_period_end: true });
-
   await pool.query(
     `UPDATE subscription SET cancel_at_period_end = true, updated_at = NOW() WHERE id = $1`,
     [sub.id],
@@ -482,45 +491,106 @@ export const cancelSubscription = async (userId: number): Promise<{ removedFromD
     WHERE de.business_id = $1 AND d.status = 'Upcoming'
   `, [sub.business_id]);
 
-  console.log(`[Cancel] business_id=${sub.business_id} draw rows found: ${drawResult.rows.length}`);
-  drawResult.rows.forEach(r => console.log(`[Cancel] draw: id=${r.id} status=${r.status} date=${r.draw_date} contribution=${r.contribution_amount} pool=${r.prize_pool}`));
-
   const nextDraw = drawResult.rows[0];
   let removedFromDraw = false;
+  let refundType: CancelRefundType = 'none';
+  let refundAmount = 0;
 
   if (nextDraw) {
+    const now = new Date();
     const drawDate = new Date(nextDraw.draw_date);
-    const lockDate = new Date(drawDate.getFullYear(), drawDate.getMonth(), 1);
-    const isLocked = new Date() >= lockDate;
-    console.log(`[Cancel] draw ${nextDraw.id} lockDate=${lockDate.toISOString()} isLocked=${isLocked} contribution=${nextDraw.contribution_amount}`);
+    const cutoffDate = new Date(drawDate);
+    cutoffDate.setDate(cutoffDate.getDate() - ONBOARDING_CUTOFF_DAYS);
 
-    if (!isLocked) {
-      const client = await pool.connect();
-      await client.query('BEGIN');
+    const contribution = parseFloat(nextDraw.contribution_amount);
+
+    if (now < cutoffDate) {
+      // ── Before cutoff: full draw removal + full refund ──────────────────────
+      refundType = 'full';
+      const poolClient = await pool.connect();
+      await poolClient.query('BEGIN');
       try {
-        await client.query(
+        await poolClient.query(
           `UPDATE draw SET prize_pool = GREATEST(0, prize_pool - $1) WHERE id = $2`,
-          [nextDraw.contribution_amount, nextDraw.id],
+          [contribution, nextDraw.id],
         );
-        await client.query(
+        await poolClient.query(
           `DELETE FROM draw_entry WHERE draw_id = $1 AND business_id = $2`,
           [nextDraw.id, sub.business_id],
         );
-        await client.query('COMMIT');
+        await poolClient.query('COMMIT');
         removedFromDraw = true;
-        console.log(`[Cancel] Removed business ${sub.business_id} from draw ${nextDraw.id}, prize_pool reduced by $${nextDraw.contribution_amount}`);
       } catch (err) {
-        await client.query('ROLLBACK');
+        await poolClient.query('ROLLBACK');
         throw err;
       } finally {
-        client.release();
+        poolClient.release();
       }
+
+      // Issue full Stripe refund for current billing period
+      try {
+        const invoices = await stripe.invoices.list({ subscription: sub.stripe_subscription_id, limit: 1 });
+        const latestInvoice = invoices.data[0];
+        const paymentIntentId = (latestInvoice as any)?.payment_intent as string | null;
+        if (paymentIntentId && latestInvoice.amount_paid > 0) {
+          await stripe.refunds.create({ payment_intent: paymentIntentId });
+          refundAmount = latestInvoice.amount_paid / 100;
+        }
+      } catch (err: any) {
+        console.error(`[Cancel] Stripe full refund failed (non-fatal): ${err.message}`);
+      }
+
+      console.log(`[Cancel] Before cutoff — full removal + full refund $${refundAmount} for business ${sub.business_id}`);
+
+    } else if (now < drawDate) {
+      // ── After cutoff, before draw: remove from draw, 40% refund ─────────────
+      refundType = 'partial_40';
+      const poolRetained = parseFloat((contribution * 0.6).toFixed(2));
+      const poolClient = await pool.connect();
+      await poolClient.query('BEGIN');
+      try {
+        // Keep 60% of contribution in prize pool, remove 40%
+        await poolClient.query(
+          `UPDATE draw SET prize_pool = GREATEST(0, prize_pool - $1) WHERE id = $2`,
+          [parseFloat((contribution * 0.4).toFixed(2)), nextDraw.id],
+        );
+        await poolClient.query(
+          `DELETE FROM draw_entry WHERE draw_id = $1 AND business_id = $2`,
+          [nextDraw.id, sub.business_id],
+        );
+        await poolClient.query('COMMIT');
+        removedFromDraw = true;
+      } catch (err) {
+        await poolClient.query('ROLLBACK');
+        throw err;
+      } finally {
+        poolClient.release();
+      }
+
+      // Issue 40% Stripe refund
+      try {
+        const invoices = await stripe.invoices.list({ subscription: sub.stripe_subscription_id, limit: 1 });
+        const latestInvoice = invoices.data[0];
+        const paymentIntentId = (latestInvoice as any)?.payment_intent as string | null;
+        if (paymentIntentId && latestInvoice.amount_paid > 0) {
+          const refundCents = Math.round(latestInvoice.amount_paid * 0.4);
+          await stripe.refunds.create({ payment_intent: paymentIntentId, amount: refundCents });
+          refundAmount = refundCents / 100;
+        }
+      } catch (err: any) {
+        console.error(`[Cancel] Stripe 40% refund failed (non-fatal): ${err.message}`);
+      }
+
+      console.log(`[Cancel] After cutoff — partial removal, 40% refund $${refundAmount} for business ${sub.business_id}`);
+
     } else {
-      console.log(`[Cancel] Draw ${nextDraw.id} is locked — business stays in draw`);
+      // ── After draw commenced: no removal, no refund ──────────────────────────
+      refundType = 'none';
+      console.log(`[Cancel] Draw already commenced — no removal, no refund for business ${sub.business_id}`);
     }
   }
 
-  return { removedFromDraw };
+  return { removedFromDraw, refundType, refundAmount };
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
