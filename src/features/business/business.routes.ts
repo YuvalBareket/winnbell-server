@@ -45,10 +45,10 @@ router.delete('/locations/:locationId', authenticateToken, deleteLocation);
 router.post('/locations/:locationId/invite', authenticateToken, createInviteLink);
 router.delete('/locations/:locationId/manager', authenticateToken, removeManager);
 router.get('/stats', authenticateToken, requireRole('Business', 'Admin'), getStats);
-router.post('/subscription/checkout', authenticateToken, createCheckout);
-router.post('/subscription/verify-session', authenticateToken, verifySession);
-router.get('/subscription', authenticateToken, getSubscription);
-router.post('/subscription/cancel', authenticateToken, cancelSub);
-router.post('/subscription/resume', authenticateToken, resumeSub);
+router.post('/subscription/checkout', requireRole('Business'), createCheckout);
+router.post('/subscription/verify-session', requireRole('Business'), verifySession);
+router.get('/subscription', requireRole('Business'), getSubscription);
+router.post('/subscription/cancel', requireRole('Business'), cancelSub);
+router.post('/subscription/resume', requireRole('Business'), resumeSub);
 
 export default router;

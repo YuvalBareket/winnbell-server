@@ -13,7 +13,7 @@ export const registerUser = async (
   fullName: string,
   email: string,
   password: string,
-  role: string,
+  _roleIgnored: string, // role from request body is NEVER trusted — always defaulted to 'User'
   inviteToken?: string,
 ) => {
   const pool = getPool();
@@ -32,11 +32,13 @@ export const registerUser = async (
     const salt = await bcrypt.genSalt(10);
     const passwordHash = await bcrypt.hash(password, salt);
 
+    // All self-registered users start as 'User'. Role can only be elevated to 'Business'
+    // via a valid invite token, never by client-supplied input.
     const result = await client.query(
       `INSERT INTO "user" (full_name, email, password_hash, role)
-       VALUES ($1, $2, $3, $4)
+       VALUES ($1, $2, $3, 'User')
        RETURNING id, role, full_name, email`,
-      [fullName, email, passwordHash, role ?? 'User'],
+      [fullName, email, passwordHash],
     );
     const newUser = result.rows[0];
 
@@ -62,6 +64,12 @@ export const registerUser = async (
           if (locResult.rowCount === 0) {
             throw new Error('Invalid or already-used invitation link');
           }
+          // Valid invite → promote to Business role
+          await client.query(
+            `UPDATE "user" SET role = 'Business' WHERE id = $1`,
+            [newUser.id],
+          );
+          newUser.role = 'Business';
         }
       } catch (err: unknown) {
         throw new Error(err instanceof Error ? err.message : 'Invalid or expired invitation link');
