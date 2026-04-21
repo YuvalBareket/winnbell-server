@@ -17,6 +17,7 @@ import {
   updateBusinessLocation,
   updateBusinessLogo,
   updateBusinessProfile,
+  updateCampaignSettings,
 } from './business.service.js';
 import { getPresignedUploadUrl } from '../../shared/s3.js';
 
@@ -133,6 +134,21 @@ export const updateBusiness = async (req: AuthRequest, res: Response): Promise<v
       return;
     }
     res.status(500).json({ message: 'Failed to update business' });
+  }
+};
+
+export const updateCampaignSettingsController = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const { min_transaction_amount } = req.body as { min_transaction_amount: number | null };
+
+    await updateCampaignSettings(req.user!.id, { min_transaction_amount });
+    res.status(204).send();
+  } catch (error: unknown) {
+    if (error instanceof Error && error.message === 'BUSINESS_NOT_FOUND') {
+      res.status(404).json({ message: 'Business not found' });
+      return;
+    }
+    res.status(500).json({ message: 'Failed to update campaign settings' });
   }
 };
 

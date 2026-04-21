@@ -291,28 +291,51 @@ async function handleDrawParticipation(pool: Pool, businessId: number, monthlyFe
       console.log(`[Draw] Business ${businessId} entered draw ${existingDraw.id} — fee $${monthlyFee}, contribution $${contribution} (${existingDraw.prize_percentage}%)`);
     } else {
       const DEFAULT_PRIZE_PCT = 80.00;
-      const contribution = parseFloat((monthlyFee * DEFAULT_PRIZE_PCT / 100).toFixed(2));
 
+      // Create draw with prize_pool = 0 first, then sum all contributions
       const newDrawResult = await client.query(`
         INSERT INTO draw (name, prize_pool, prize_percentage, draw_date, status)
         VALUES (
           TRIM(TO_CHAR(NOW() + INTERVAL '1 month', 'Month')) || ' ' || TO_CHAR(NOW() + INTERVAL '1 month', 'YYYY') || ' Monthly Draw',
+          0,
           $1,
-          $2,
           DATE_TRUNC('month', NOW() + INTERVAL '1 month') + INTERVAL '1 month' - INTERVAL '1 day',
           'Upcoming'
         )
         RETURNING id, prize_percentage
-      `, [contribution, DEFAULT_PRIZE_PCT]);
+      `, [DEFAULT_PRIZE_PCT]);
 
       const newDraw = newDrawResult.rows[0] as { id: number; prize_percentage: number };
 
+      // Enroll the triggering business
+      const triggerContribution = parseFloat((monthlyFee * DEFAULT_PRIZE_PCT / 100).toFixed(2));
       await client.query(
         `INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, contribution_amount) VALUES ($1, $2, $3, $4)`,
-        [newDraw.id, businessId, monthlyFee, contribution],
+        [newDraw.id, businessId, monthlyFee, triggerContribution],
       );
+      let totalPrizePool = triggerContribution;
 
-      console.log(`[Draw] Created new draw ${newDraw.id} for business ${businessId} — fee $${monthlyFee}, contribution $${contribution}`);
+      // Enroll all other currently subscribed businesses
+      const otherSubsResult = await client.query(`
+        SELECT b.id AS business_id, COALESCE(s.fee_at_entry, 0) AS monthly_fee
+        FROM business b
+        JOIN subscription s ON s.business_id = b.id
+        WHERE b.is_subscribed = true AND s.status = 'Active' AND b.id != $1
+      `, [businessId]);
+
+      for (const sub of otherSubsResult.rows) {
+        const contribution = parseFloat((sub.monthly_fee * DEFAULT_PRIZE_PCT / 100).toFixed(2));
+        await client.query(
+          `INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, contribution_amount) VALUES ($1, $2, $3, $4)
+           ON CONFLICT (draw_id, business_id) DO NOTHING`,
+          [newDraw.id, sub.business_id, sub.monthly_fee, contribution],
+        );
+        totalPrizePool += contribution;
+      }
+
+      await client.query(`UPDATE draw SET prize_pool = $1 WHERE id = $2`, [totalPrizePool, newDraw.id]);
+
+      console.log(`[Draw] Created new draw ${newDraw.id} with ${1 + otherSubsResult.rows.length} businesses — total pool $${totalPrizePool}`);
     }
 
     await client.query('COMMIT');

@@ -9,6 +9,7 @@ import {
   NearbyBusiness,
   ParticipatingLocation,
   UpdateBusinessInput,
+  UpdateCampaignSettingsInput,
   UpdateLocationInput,
 } from './business.types.js';
 import jwt from 'jsonwebtoken';
@@ -134,40 +135,48 @@ export const createFullBusinessProfile = async (userId: number, data: BusinessSe
 export const getMyBusinessData = async (userId: number): Promise<MyBusinessData | undefined> => {
   const pool = getPool();
 
-  const result = await pool.query(`
-    SELECT
-      b.id,
-      b.name,
-      b.sector,
-      b.description,
-      b.terms_text,
-      b.logo_url,
-      b.is_subscribed,
-      b.is_participating,
-      b.entry_mode,
-      b.entry_cap,
-      s.status AS subscription_status,
-      s.current_period_end,
-      s.cancel_at_period_end,
-      (
-        SELECT COALESCE(json_agg(json_build_object(
-          'id', bl.id,
-          'name', bl.name,
-          'address', bl.address,
-          'manager_id', bl.manager_user_id,
-          'manager_name', u.full_name,
-          'is_active', bl.is_active
-        )), '[]'::json)
-        FROM business_location bl
-        LEFT JOIN "user" u ON bl.manager_user_id = u.id
-        WHERE bl.business_id = b.id
-      ) AS locations
-    FROM business b
-    LEFT JOIN subscription s ON b.id = s.business_id
-    WHERE b.user_id = $1
-  `, [userId]);
+  const [bizResult, settingsResult] = await Promise.all([
+    pool.query(`
+      SELECT
+        b.id,
+        b.name,
+        b.sector,
+        b.description,
+        b.terms_text,
+        b.logo_url,
+        b.is_subscribed,
+        b.is_participating,
+        b.entry_mode,
+        b.entry_cap,
+        b.min_transaction_amount,
+        s.status AS subscription_status,
+        s.current_period_end,
+        s.cancel_at_period_end,
+        (
+          SELECT COALESCE(json_agg(json_build_object(
+            'id', bl.id,
+            'name', bl.name,
+            'address', bl.address,
+            'manager_id', bl.manager_user_id,
+            'manager_name', u.full_name,
+            'is_active', bl.is_active
+          )), '[]'::json)
+          FROM business_location bl
+          LEFT JOIN "user" u ON bl.manager_user_id = u.id
+          WHERE bl.business_id = b.id
+        ) AS locations
+      FROM business b
+      LEFT JOIN subscription s ON b.id = s.business_id
+      WHERE b.user_id = $1
+    `, [userId]),
+    pool.query(`SELECT global_entry_cap FROM platform_settings WHERE id = 1`),
+  ]);
 
-  return result.rows[0];
+  if (!bizResult.rows[0]) return undefined;
+  return {
+    ...bizResult.rows[0],
+    global_entry_cap: settingsResult.rows[0]?.global_entry_cap ?? null,
+  };
 };
 
 export const createManagerInviteLink = async (locationId: number, ownerUserId: number) => {
@@ -337,7 +346,8 @@ export const searchParticipatingLocationsService = async (query: string): Promis
       b.id AS business_id,
       b.name AS business_name,
       b.sector,
-      b.logo_url
+      b.logo_url,
+      b.min_transaction_amount
     FROM business_location bl
     JOIN business b ON bl.business_id = b.id
     WHERE bl.is_active = true AND b.is_subscribed = true AND b.is_participating = true
@@ -351,6 +361,18 @@ export const searchParticipatingLocationsService = async (query: string): Promis
     [`%${query}%`],
   );
   return result.rows;
+};
+
+export const updateCampaignSettings = async (
+  ownerUserId: number,
+  data: UpdateCampaignSettingsInput,
+): Promise<void> => {
+  const pool = getPool();
+  const result = await pool.query(
+    `UPDATE business SET min_transaction_amount = $1 WHERE user_id = $2`,
+    [data.min_transaction_amount, ownerUserId],
+  );
+  if (result.rowCount === 0) throw new Error('BUSINESS_NOT_FOUND');
 };
 
 export const getBusinessLocationsByUserId = async (userId: number) => {

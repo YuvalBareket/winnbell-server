@@ -251,7 +251,13 @@ export const submitReceiptEntryService = async (
     if (bizResult.rows.length === 0) {
       throw new Error('Location is not currently participating in a draw.');
     }
-    const { business_id, entry_cap, min_transaction_amount: minTransactionAmount } = bizResult.rows[0];
+    const { business_id, min_transaction_amount: minTransactionAmount } = bizResult.rows[0];
+
+    // Cap is set globally by admin only
+    const settingsResult = await client.query(
+      `SELECT global_entry_cap FROM platform_settings WHERE id = 1`,
+    );
+    const entry_cap: number | null = settingsResult.rows[0]?.global_entry_cap ?? null;
 
     // Conflict-of-interest guard: business owners and managers cannot submit entries for their own business
     const conflictResult = await client.query(
@@ -272,8 +278,31 @@ export const submitReceiptEntryService = async (
     if (drawResult.rows.length === 0) throw new Error('No active draw found.');
     const drawId = drawResult.rows[0].id;
 
-    if (minTransactionAmount !== null && input.transactionAmount < minTransactionAmount) {
-      throw new Error(`Transaction amount does not meet the minimum required amount.`);
+    // Multi-entry calculation: floor(amount / threshold), capped at 10 per receipt
+    const entriesEarned = minTransactionAmount
+      ? Math.min(Math.floor(input.transactionAmount / minTransactionAmount), 10)
+      : 1;
+
+    if (entriesEarned < 1) {
+      // Penalise amount probing: same receipt identifier submitted again with a different (lower) amount
+      const probeCheck = await client.query(
+        `SELECT COUNT(*) AS count FROM ticket
+         WHERE business_id = $1 AND receipt_identifier = $2
+           AND transaction_amount != $3`,
+        [business_id, input.receiptIdentifier, input.transactionAmount],
+      );
+      if (parseInt(probeCheck.rows[0].count, 10) > 0) {
+        // Use the open draw id; safe to query outside the lock since we only need drawId for sync
+        const probeDrawResult = await client.query(
+          `SELECT id FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1`,
+        );
+        const probDrawId = probeDrawResult.rows[0]?.id;
+        if (probDrawId) {
+          await updateUserRiskScore(userId, 4, client);
+          await syncUserQuarantineState(userId, probDrawId, client);
+        }
+      }
+      throw new Error('Transaction amount is not sufficient to earn an entry.');
     }
 
     // Transaction date validation
@@ -372,57 +401,67 @@ export const submitReceiptEntryService = async (
     }
 
     // Entry cap enforcement — quarantined tickets do not consume the cap
+    // Account for all N entries atomically
     if (entry_cap !== null && countsAgainstCap(riskEval, dupCheck.isDuplicate)) {
       const capCheck = await client.query(
         `SELECT COUNT(*) AS count FROM ticket
          WHERE business_id = $1 AND draw_id = $2 AND is_quarantined = FALSE`,
         [business_id, drawId],
       );
-      if (parseInt(capCheck.rows[0].count, 10) >= entry_cap) {
+      const currentCount = parseInt(capCheck.rows[0].count, 10);
+      if (currentCount + entriesEarned > entry_cap) {
         throw new Error('This business has reached its entry cap for the current draw.');
       }
     }
 
-    // Generate internal reference code
-    const code = await generateGlobalUniqueCode(client);
-
     const isHighRisk = riskEval.totalScore > RISK_THRESHOLDS.MEDIUM_MAX;
 
-    const ticketResult = await client.query(
-      `INSERT INTO ticket
-        (code, status, entry_source, business_id, location_id, draw_id,
-         activated_by_user_id, activated_at,
-         receipt_identifier, transaction_amount, transaction_date, receipt_image_url, risk_score,
-         is_quarantined, quarantine_reason, quarantined_at, image_validation_status)
-       VALUES ($1, 'Activated', 'receipt', $2, $3, $4, $5, NOW(), $6, $7, $8, $9, $10, $11, $12, $13, $14)
-       RETURNING id`,
-      [
-        code,
-        business_id,
-        input.locationId,
-        drawId,
-        userId,
-        input.receiptIdentifier,
-        input.transactionAmount,
-        input.transactionDate ?? null,
-        input.receiptImageUrl ?? null,
-        riskEval.totalScore,
-        isHighRisk,
-        isHighRisk ? 'high_risk_user' : null,
-        isHighRisk ? new Date() : null,
-        input.receiptImageUrl ? 'pending' : 'not_required',
-      ],
-    );
+    // Insert one ticket row per entry earned (multi-entry support)
+    // Only the first ticket carries the receipt fields; subsequent entries share the receipt identifier
+    let firstTicketId: number = 0;
+    let firstCode = '';
+    for (let i = 0; i < entriesEarned; i++) {
+      const code = await generateGlobalUniqueCode(client);
+      const ticketResult = await client.query(
+        `INSERT INTO ticket
+          (code, status, entry_source, business_id, location_id, draw_id,
+           activated_by_user_id, activated_at,
+           receipt_identifier, transaction_amount, transaction_date, receipt_image_url, risk_score,
+           is_quarantined, quarantine_reason, quarantined_at, image_validation_status)
+         VALUES ($1, 'Activated', 'receipt', $2, $3, $4, $5, NOW(), $6, $7, $8, $9, $10, $11, $12, $13, $14)
+         RETURNING id`,
+        [
+          code,
+          business_id,
+          input.locationId,
+          drawId,
+          userId,
+          input.receiptIdentifier,
+          input.transactionAmount,
+          input.transactionDate ?? null,
+          i === 0 ? (input.receiptImageUrl ?? null) : null,
+          riskEval.totalScore,
+          isHighRisk,
+          isHighRisk ? 'high_risk_user' : null,
+          isHighRisk ? new Date() : null,
+          i === 0 && input.receiptImageUrl ? 'pending' : 'not_required',
+        ],
+      );
+      if (i === 0) {
+        firstTicketId = ticketResult.rows[0].id;
+        firstCode = code;
+      }
+    }
 
     // Sync quarantine in case score decayed below 15 after the clean-entry update above
     await syncUserQuarantineState(userId, drawId, client);
 
     await client.query('COMMIT');
 
-    // Trigger async OCR validation — runs after commit, never blocks the response
+    // Trigger async OCR validation on the first ticket — runs after commit, never blocks the response
     if (input.receiptImageUrl) {
       validateReceiptAsync(
-        ticketResult.rows[0].id,
+        firstTicketId,
         userId,
         drawId,
         input.receiptImageUrl,
@@ -434,7 +473,7 @@ export const submitReceiptEntryService = async (
       );
     }
 
-    return { ticketId: ticketResult.rows[0].id, code };
+    return { ticketId: firstTicketId, code: firstCode };
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;

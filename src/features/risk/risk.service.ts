@@ -144,6 +144,18 @@ export const evaluateUserRisk = async (
       }
     }
 
+    // Signal: threshold probing — same receipt identifier re-submitted with a different amount
+    const probeResult = await pool.query(
+      `SELECT COUNT(*) AS count FROM ticket
+       WHERE activated_by_user_id = $1 AND business_id = $2
+         AND receipt_identifier = $3 AND transaction_amount != $4`,
+      [userId, businessId, receiptIdentifier, transactionAmount],
+    );
+    if (parseInt(probeResult.rows[0].count, 10) > 0) {
+      delta += 4;
+      flags.push('threshold_probing');
+    }
+
     // Signal 3: amount outlier vs business 30-day average
     if (transactionAmount > 0) {
       const avgResult = await pool.query(

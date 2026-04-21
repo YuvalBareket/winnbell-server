@@ -15,6 +15,7 @@ import {
   searchParticipatingLocations,
   setupBusiness,
   updateBusiness,
+  updateCampaignSettingsController,
   updateLocation,
   updateLogo,
 } from './business.controller.js';
@@ -31,6 +32,7 @@ router.post('/address', getAddressController);
 router.post('/setup', setupBusiness);
 router.get('/my-business', authenticateToken, getMyBusiness);
 router.patch('/', authenticateToken, updateBusiness);
+router.patch('/campaign-settings', authenticateToken, updateCampaignSettingsController);
 router.get('/upload-url', authenticateToken, getUploadUrl);
 router.patch('/logo', authenticateToken, updateLogo);
 router.post('/locations', authenticateToken, addLocation);

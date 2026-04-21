@@ -108,12 +108,72 @@ export const createDrawService = async (data: {
 }) => {
   const pool = getPool();
   const prizePct = data.prize_percentage ?? 80.00;
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const drawResult = await client.query(`
+      INSERT INTO draw (name, prize_pool, prize_percentage, draw_date, status)
+      VALUES ($1, 0, $2, $3, 'Upcoming')
+      RETURNING *
+    `, [data.name, prizePct, new Date(data.draw_date)]);
+
+    const draw = drawResult.rows[0];
+
+    // Auto-enroll all currently subscribed businesses into this draw
+    const subsResult = await client.query(`
+      SELECT b.id AS business_id, COALESCE(s.fee_at_entry, 0) AS monthly_fee
+      FROM business b
+      JOIN subscription s ON s.business_id = b.id
+      WHERE b.is_subscribed = true AND s.status = 'Active'
+    `);
+
+    let totalPrizePool = 0;
+    for (const sub of subsResult.rows) {
+      const contribution = parseFloat((sub.monthly_fee * prizePct / 100).toFixed(2));
+      await client.query(`
+        INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, contribution_amount)
+        VALUES ($1, $2, $3, $4)
+        ON CONFLICT (draw_id, business_id) DO NOTHING
+      `, [draw.id, sub.business_id, sub.monthly_fee, contribution]);
+      totalPrizePool += contribution;
+    }
+
+    if (totalPrizePool > 0) {
+      await client.query(
+        `UPDATE draw SET prize_pool = $1 WHERE id = $2`,
+        [totalPrizePool, draw.id],
+      );
+    }
+
+    await client.query('COMMIT');
+    return draw;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+};
+
+export const getDrawBusinessesService = async (drawId: number) => {
+  const pool = getPool();
   const result = await pool.query(`
-    INSERT INTO draw (name, prize_pool, prize_percentage, draw_date, status)
-    VALUES ($1, 0, $2, $3, 'Upcoming')
-    RETURNING *
-  `, [data.name, prizePct, new Date(data.draw_date)]);
-  return result.rows[0];
+    SELECT
+      b.id,
+      b.name,
+      b.sector,
+      b.logo_url,
+      de.fee_at_entry,
+      de.contribution_amount,
+      de.created_at AS joined_at
+    FROM draw_entry de
+    JOIN business b ON b.id = de.business_id
+    WHERE de.draw_id = $1
+    ORDER BY b.name ASC
+  `, [drawId]);
+  return result.rows;
 };
 
 export const openDrawService = async (drawId: number): Promise<void> => {
@@ -202,7 +262,7 @@ export const getAdminOverviewService = async () => {
   const [usersRes, bizRes, subRes, drawRes, ticketRes] = await Promise.all([
     pool.query(`SELECT COUNT(*) AS total_users, SUM(CASE WHEN role='Business' THEN 1 ELSE 0 END) AS business_users, SUM(CASE WHEN role='User' THEN 1 ELSE 0 END) AS regular_users FROM "user" WHERE role != 'Admin'`),
     pool.query(`SELECT COUNT(*) AS total, SUM(CASE WHEN is_subscribed=true THEN 1 ELSE 0 END) AS active FROM business`),
-    pool.query(`SELECT COUNT(*) AS active_subs, COALESCE(SUM(fee_at_entry),0) AS total_fees FROM subscription s LEFT JOIN draw_entry de ON de.business_id=s.business_id AND de.draw_id=(SELECT id FROM draw WHERE UPPER(status)='OPEN' ORDER BY draw_date ASC LIMIT 1) WHERE UPPER(s.status)='ACTIVE'`),
+    pool.query(`SELECT COUNT(*) AS active_subs, COALESCE(SUM(de.fee_at_entry),0) AS total_fees FROM subscription s LEFT JOIN draw_entry de ON de.business_id=s.business_id AND de.draw_id=(SELECT id FROM draw WHERE UPPER(status)='OPEN' ORDER BY draw_date ASC LIMIT 1) WHERE UPPER(s.status)='ACTIVE'`),
     pool.query(`SELECT id, name, prize_pool, draw_date FROM draw WHERE UPPER(status)='OPEN' ORDER BY draw_date ASC LIMIT 1`),
     pool.query(`SELECT COUNT(*) AS total_tickets, SUM(CASE WHEN UPPER(status)='ACTIVATED' THEN 1 ELSE 0 END) AS activated FROM ticket WHERE draw_id=(SELECT id FROM draw WHERE UPPER(status)='OPEN' ORDER BY draw_date ASC LIMIT 1)`),
   ]);
@@ -244,5 +304,21 @@ export const toggleUserActiveService = async (userId: number, isActive: boolean)
   await pool.query(
     `UPDATE "user" SET is_active=$1 WHERE id=$2 AND role!='Admin'`,
     [isActive, userId],
+  );
+};
+
+export const getPlatformSettingsService = async (): Promise<{ global_entry_cap: number | null }> => {
+  const pool = getPool();
+  const result = await pool.query(`SELECT global_entry_cap FROM platform_settings WHERE id = 1`);
+  return result.rows[0] ?? { global_entry_cap: null };
+};
+
+export const updatePlatformSettingsService = async (global_entry_cap: number | null): Promise<void> => {
+  const pool = getPool();
+  await pool.query(
+    `INSERT INTO platform_settings (id, global_entry_cap, updated_at)
+     VALUES (1, $1, NOW())
+     ON CONFLICT (id) DO UPDATE SET global_entry_cap = $1, updated_at = NOW()`,
+    [global_entry_cap],
   );
 };

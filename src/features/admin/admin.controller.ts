@@ -13,6 +13,9 @@ import {
   getAllUsersService,
   updateUserRoleService,
   toggleUserActiveService,
+  getPlatformSettingsService,
+  updatePlatformSettingsService,
+  getDrawBusinessesService,
 } from './admin.service.js';
 
 export const getDashboardData = async (req: Request, res: Response) => {
@@ -133,6 +136,42 @@ export const toggleUserActive = async (req: Request, res: Response) => {
     res.status(200).json({ message: 'User status updated' });
   } catch (error) {
     res.status(500).json({ message: 'Failed to update user status' });
+  }
+};
+
+export const getDrawBusinesses = async (req: Request, res: Response) => {
+  const drawId = parseInt(req.params.drawId as string, 10);
+  try {
+    const businesses = await getDrawBusinessesService(drawId);
+    res.json(businesses);
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to fetch draw businesses' });
+  }
+};
+
+export const getPlatformSettings = async (_req: Request, res: Response) => {
+  try {
+    const settings = await getPlatformSettingsService();
+    res.json(settings);
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to fetch platform settings' });
+  }
+};
+
+export const updatePlatformSettings = async (req: Request, res: Response) => {
+  try {
+    const { global_entry_cap } = req.body as { global_entry_cap: number | null };
+    if (global_entry_cap !== null && global_entry_cap !== undefined) {
+      const parsed = Number(global_entry_cap);
+      if (!Number.isInteger(parsed) || parsed < 1) {
+        res.status(400).json({ message: 'global_entry_cap must be a positive integer or null' });
+        return;
+      }
+    }
+    await updatePlatformSettingsService(global_entry_cap ?? null);
+    res.status(204).send();
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to update platform settings' });
   }
 };
 

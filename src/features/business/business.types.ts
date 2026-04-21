@@ -47,11 +47,17 @@ export interface MyBusinessData {
   is_subscribed: boolean;
   is_participating: boolean;
   entry_mode: EntryMode;
-  entry_cap: number | null;   // NULL = unlimited
+  entry_cap: number | null;              // NULL = falls back to global cap
+  min_transaction_amount: number | null; // NULL = no minimum
+  global_entry_cap: number | null;       // platform ceiling set by admin
   subscription_status: string | null;
   monthly_fee: number | null;
   next_billing_date: string | null;
   locations: MyBusinessLocation[];
+}
+
+export interface UpdateCampaignSettingsInput {
+  min_transaction_amount: number | null;
 }
 
 /** @deprecated Use NearbyBusiness instead */
@@ -75,6 +81,7 @@ export interface ParticipatingLocation {
   business_name: string;
   sector: string;
   logo_url: string | null;
+  min_transaction_amount: number | null;
 }
 
 export type AddressSuggestion = {

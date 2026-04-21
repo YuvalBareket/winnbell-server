@@ -19,5 +19,8 @@ router.post('/draw', adminController.createDraw);
 router.post('/draws/:drawId/open', adminController.openDraw);
 router.post('/draws/:drawId/close', adminController.closeDraw);
 router.post('/draws/:drawId/pick-winner', adminController.pickWinner);
+router.get('/draws/:drawId/businesses', adminController.getDrawBusinesses);
+router.get('/settings', adminController.getPlatformSettings);
+router.patch('/settings', adminController.updatePlatformSettings);
 
 export default router;
