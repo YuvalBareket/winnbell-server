@@ -115,6 +115,7 @@ CREATE TABLE IF NOT EXISTS subscription (
   current_period_end     TIMESTAMP,
   cancel_at_period_end   BOOLEAN       NOT NULL DEFAULT false,
   fee_at_entry           DECIMAL(10, 2),
+  entries_per_location   INTEGER       NULL,
   created_at             TIMESTAMP     NOT NULL DEFAULT NOW(),
   updated_at             TIMESTAMP     NOT NULL DEFAULT NOW()
 );

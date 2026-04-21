@@ -15,11 +15,34 @@ export const getBusinessForCheckout = async (userId: number): Promise<{ id: numb
   return result.rows[0] ?? null;
 };
 
+// ─── Tier Price Map ────────────────────────────────────────────────────────────
+// Each tier has its own Stripe price ID (set in .env) and a fixed price per location/month.
+// Quantity sent to Stripe = number of locations (not cap units) — making pricing non-linear.
+export const TIER_PRICE_MAP: Record<number, { envKey: string; pricePerLocation: number }> = {
+  250:  { envKey: 'STRIPE_PRICE_ID_250',  pricePerLocation: 250  },
+  500:  { envKey: 'STRIPE_PRICE_ID_500',  pricePerLocation: 490  },
+  750:  { envKey: 'STRIPE_PRICE_ID_750',  pricePerLocation: 720  },
+  1000: { envKey: 'STRIPE_PRICE_ID_1000', pricePerLocation: 940  },
+  1250: { envKey: 'STRIPE_PRICE_ID_1250', pricePerLocation: 1150 },
+  1500: { envKey: 'STRIPE_PRICE_ID_1500', pricePerLocation: 1350 },
+  1750: { envKey: 'STRIPE_PRICE_ID_1750', pricePerLocation: 1540 },
+  2000: { envKey: 'STRIPE_PRICE_ID_2000', pricePerLocation: 1720 },
+  2250: { envKey: 'STRIPE_PRICE_ID_2250', pricePerLocation: 1890 },
+  2500: { envKey: 'STRIPE_PRICE_ID_2500', pricePerLocation: 2000 },
+};
+
 // ─── Create Checkout Session ──────────────────────────────────────────────────
 
-export const createCheckoutSession = async (businessId: number, userEmail: string): Promise<string> => {
-  const priceId = process.env.STRIPE_PRICE_ID;
-  if (!priceId) throw new Error('STRIPE_PRICE_ID is not configured');
+export const createCheckoutSession = async (
+  businessId: number,
+  userEmail: string,
+  entriesPerLocation: number,
+): Promise<string> => {
+  const tier = TIER_PRICE_MAP[entriesPerLocation];
+  if (!tier) throw new Error('Invalid entries_per_location value');
+
+  const priceId = process.env[tier.envKey];
+  if (!priceId) throw new Error(`${tier.envKey} is not configured`);
 
   const pool = getPool();
   const existing = await pool.query(
@@ -29,15 +52,22 @@ export const createCheckoutSession = async (businessId: number, userEmail: strin
 
   if (existing.rows.length > 0) throw new Error('This business already has an active subscription');
 
+  // Get active location count (minimum 1). Quantity = locationCount — price per location already includes tier discount.
+  const locResult = await pool.query(
+    `SELECT COUNT(*) AS cnt FROM business_location WHERE business_id = $1 AND is_active = true`,
+    [businessId],
+  );
+  const locationCount = Math.max(1, Number(locResult.rows[0]?.cnt ?? 1));
+
   const baseUrl = process.env.FRONTEND_URL || 'http://localhost:8081';
 
   const session = await stripe.checkout.sessions.create({
     mode: 'subscription',
     payment_method_types: ['card'],
     customer_email: userEmail,
-    line_items: [{ price: priceId, quantity: 1 }],
-    metadata: { business_id: String(businessId) },
-    subscription_data: { metadata: { business_id: String(businessId) } },
+    line_items: [{ price: priceId, quantity: locationCount }],
+    metadata: { business_id: String(businessId), entries_per_location: String(entriesPerLocation) },
+    subscription_data: { metadata: { business_id: String(businessId), entries_per_location: String(entriesPerLocation) } },
     success_url: `${baseUrl}/subscription/success?session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${baseUrl}/subscribe`,
   });
@@ -65,10 +95,12 @@ export const verifyAndActivateSession = async (sessionId: string, userId: number
   const customerId = session.customer as string;
   const priceItem = subscription.items.data[0];
   const priceId = priceItem?.price.id ?? '';
-  const monthlyFee = (priceItem?.price.unit_amount ?? 0) / 100;
+  const quantity = priceItem?.quantity ?? 1;
+  const monthlyFee = Math.round((priceItem?.price.unit_amount ?? 0) * quantity) / 100;
   const currentPeriodEnd = extractPeriodEnd(subscription);
+  const entriesPerLocation = Number(session.metadata?.entries_per_location ?? 0);
 
-  await activateBusinessSubscription(pool, businessId, subscription.id, customerId, priceId, currentPeriodEnd, monthlyFee);
+  await activateBusinessSubscription(pool, businessId, subscription.id, customerId, priceId, currentPeriodEnd, monthlyFee, entriesPerLocation);
 };
 
 // ─── Handle Webhook ───────────────────────────────────────────────────────────
@@ -100,10 +132,12 @@ export const handleStripeWebhook = async (rawBody: Buffer, signature: string): P
         const customerId = session.customer as string;
         const priceItem = subscription.items.data[0];
         const priceId = priceItem?.price.id ?? '';
-        const monthlyFee = (priceItem?.price.unit_amount ?? 0) / 100;
+        const quantity = priceItem?.quantity ?? 1;
+        const monthlyFee = Math.round((priceItem?.price.unit_amount ?? 0) * quantity) / 100;
         const currentPeriodEnd = extractPeriodEnd(subscription);
+        const entriesPerLocation = Number(session.metadata?.entries_per_location ?? 0);
 
-        await activateBusinessSubscription(pool, businessId, subscriptionId, customerId, priceId, currentPeriodEnd, monthlyFee);
+        await activateBusinessSubscription(pool, businessId, subscriptionId, customerId, priceId, currentPeriodEnd, monthlyFee, entriesPerLocation);
         console.log(`[Stripe] Webhook activated business ${businessId}`);
       } catch (err: any) {
         console.error('[Stripe] ERROR in checkout.session.completed:', err.message);
@@ -134,7 +168,8 @@ export const handleStripeWebhook = async (rawBody: Buffer, signature: string): P
 
         if (isActive && previousStatus && previousStatus !== 'active') {
           const priceItem = subscription.items.data[0];
-          const monthlyFee = (priceItem?.price.unit_amount ?? 0) / 100;
+          const quantity = priceItem?.quantity ?? 1;
+          const monthlyFee = Math.round((priceItem?.price.unit_amount ?? 0) * quantity) / 100;
           await handleDrawParticipation(pool, businessId, monthlyFee);
         }
       } catch (err: any) {
@@ -177,7 +212,8 @@ export const handleStripeWebhook = async (rawBody: Buffer, signature: string): P
         if (!businessId) break;
 
         const priceItem = subscription.items.data[0];
-        const monthlyFee = (priceItem?.price.unit_amount ?? 0) / 100;
+        const quantity = priceItem?.quantity ?? 1;
+        const monthlyFee = Math.round((priceItem?.price.unit_amount ?? 0) * quantity) / 100;
 
         await handleDrawParticipation(pool, businessId, monthlyFee);
         console.log(`[Stripe] Renewal draw participation updated for business ${businessId}`);
@@ -217,20 +253,22 @@ async function activateBusinessSubscription(
   priceId: string,
   currentPeriodEnd: Date,
   monthlyFee: number,
+  entriesPerLocation: number,
 ): Promise<void> {
-  console.log(`[Stripe] Activating business ${businessId}...`);
+  console.log(`[Stripe] Activating business ${businessId} — entries/location: ${entriesPerLocation}...`);
 
+  // Set entry_cap per location on business
   const updateResult = await pool.query(
-    `UPDATE business SET is_subscribed = true WHERE id = $1`,
-    [businessId],
+    `UPDATE business SET is_subscribed = true, entry_cap = $2 WHERE id = $1`,
+    [businessId, entriesPerLocation || null],
   );
   console.log(`[Stripe] business.is_subscribed updated, rows affected: ${updateResult.rowCount}`);
 
   // Upsert subscription using ON CONFLICT
   await pool.query(`
     INSERT INTO subscription
-      (business_id, stripe_customer_id, stripe_subscription_id, stripe_price_id, status, current_period_end, cancel_at_period_end)
-    VALUES ($1, $2, $3, $4, 'Active', $5, false)
+      (business_id, stripe_customer_id, stripe_subscription_id, stripe_price_id, status, current_period_end, cancel_at_period_end, fee_at_entry, entries_per_location)
+    VALUES ($1, $2, $3, $4, 'Active', $5, false, $6, $7)
     ON CONFLICT (business_id) DO UPDATE
       SET stripe_customer_id     = EXCLUDED.stripe_customer_id,
           stripe_subscription_id = EXCLUDED.stripe_subscription_id,
@@ -238,8 +276,10 @@ async function activateBusinessSubscription(
           status                 = 'Active',
           current_period_end     = EXCLUDED.current_period_end,
           cancel_at_period_end   = false,
+          fee_at_entry           = EXCLUDED.fee_at_entry,
+          entries_per_location   = EXCLUDED.entries_per_location,
           updated_at             = NOW()
-  `, [businessId, customerId, subscriptionId, priceId, currentPeriodEnd]);
+  `, [businessId, customerId, subscriptionId, priceId, currentPeriodEnd, monthlyFee, entriesPerLocation || null]);
   console.log(`[Stripe] subscription row upserted for business ${businessId}`);
 
   try {
@@ -403,7 +443,8 @@ export const resumeSubscription = async (userId: number): Promise<void> => {
   );
 
   const stripeSubscription = await stripe.subscriptions.retrieve(sub.stripe_subscription_id, { expand: ['items'] });
-  const monthlyFee = (stripeSubscription.items.data[0]?.price.unit_amount ?? 0) / 100;
+  const resumeItem = stripeSubscription.items.data[0];
+  const monthlyFee = Math.round((resumeItem?.price.unit_amount ?? 0) * (resumeItem?.quantity ?? 1)) / 100;
 
   try {
     await handleDrawParticipation(pool, sub.business_id, monthlyFee);

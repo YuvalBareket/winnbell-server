@@ -7,6 +7,7 @@ import {
   cancelSubscription,
   resumeSubscription,
   getBusinessForCheckout,
+  TIER_PRICE_MAP,
 } from './stripe.service.js';
 
 // POST /business/subscription/checkout
@@ -19,7 +20,13 @@ export const createCheckout = async (req: Request, res: Response) => {
       return;
     }
 
-    const url = await createCheckoutSession(business.id, business.email);
+    const entriesPerLocation = Number(req.body.entries_per_location);
+    if (!TIER_PRICE_MAP[entriesPerLocation]) {
+      res.status(400).json({ error: 'Invalid entries_per_location. Must be 250–2500 in steps of 250.' });
+      return;
+    }
+
+    const url = await createCheckoutSession(business.id, business.email, entriesPerLocation);
     res.json({ url });
   } catch (err: any) {
     const status = err.message.includes('already has an active subscription') ? 409 : 500;

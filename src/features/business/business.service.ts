@@ -107,10 +107,10 @@ export const createFullBusinessProfile = async (userId: number, data: BusinessSe
     await client.query('BEGIN');
 
     const businessResult = await client.query(
-      `INSERT INTO business (user_id, name, sector, description, terms_text)
+      `INSERT INTO business (user_id, name, sector, description, min_transaction_amount)
        VALUES ($1, $2, $3, $4, $5)
        RETURNING id`,
-      [userId, data.businessName, data.businessSector, data.description, data.terms_text],
+      [userId, data.businessName, data.businessSector, data.description, data.min_transaction_amount ?? null],
     );
     const businessId = businessResult.rows[0].id;
 

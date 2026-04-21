@@ -117,7 +117,7 @@ export interface BusinessSetupInput {
   businessSector: string;
   description: string;
   locations: LocationInput[];
-  terms_text: string;
+  min_transaction_amount: number | null;
 }
 
 export interface UpdateLocationInput {
