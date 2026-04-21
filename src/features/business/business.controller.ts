@@ -257,6 +257,11 @@ export const updateLogo = async (req: AuthRequest, res: Response): Promise<void>
       res.status(400).json({ message: 'logo_url is required' });
       return;
     }
+    const r2BaseUrl = process.env.R2_PUBLIC_URL;
+    if (r2BaseUrl && !logo_url.startsWith(r2BaseUrl + '/')) {
+      res.status(400).json({ message: 'logo_url must reference the application storage bucket' });
+      return;
+    }
     await updateBusinessLogo(req.user!.id, logo_url);
     res.status(204).send();
   } catch (error: unknown) {

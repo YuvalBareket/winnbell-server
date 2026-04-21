@@ -9,7 +9,9 @@ export const connectDB = async () => {
   try {
     pool = new Pool({
       connectionString: process.env.DATABASE_URL,
-      ssl: { rejectUnauthorized: false },
+      // Neon serverless Postgres requires SSL; rejectUnauthorized is true by default when using
+      // the full Neon connection string which includes `sslmode=require`.
+      ssl: process.env.DATABASE_URL?.includes('neon.tech') ? { rejectUnauthorized: true } : false,
       max: 10,
       idleTimeoutMillis: 30000,
     });

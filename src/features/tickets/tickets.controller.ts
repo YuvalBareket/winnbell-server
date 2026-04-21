@@ -80,6 +80,11 @@ export const submitReceiptEntry = async (req: AuthRequest, res: Response) => {
       res.status(400).json({ message: 'transactionAmount must be a positive number.' });
       return;
     }
+    const sanitizedId = String(receiptIdentifier).trim();
+    if (sanitizedId.length < 4 || sanitizedId.length > 100) {
+      res.status(400).json({ message: 'receiptIdentifier must be between 4 and 100 characters.' });
+      return;
+    }
 
     const result = await ticketService.submitReceiptEntryService(userId, {
       locationId: Number(locationId),
@@ -100,7 +105,16 @@ export const submitReceiptEntry = async (req: AuthRequest, res: Response) => {
 export const generateTicket = async (req: AuthRequest, res: Response) => {
   try {
     const user_id = req.user!.id;
-    let location_id: number | undefined = req.body?.location_id || req.user!.location_id || undefined;
+
+    // If the user is a manager (has a location_id in their JWT), they can ONLY generate tickets
+    // for their own assigned location — reject any attempt to target a different location.
+    const jwtLocationId = req.user!.location_id ?? null;
+    if (jwtLocationId && req.body?.location_id && Number(req.body.location_id) !== jwtLocationId) {
+      res.status(403).json({ message: 'Forbidden: cannot generate tickets for another location.' });
+      return;
+    }
+
+    let location_id: number | undefined = (jwtLocationId ?? req.body?.location_id) || undefined;
 
     if (!location_id) {
       const businessLocations = await getBusinessLocationsByUserId(user_id);

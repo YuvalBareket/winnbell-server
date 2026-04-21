@@ -24,12 +24,16 @@ import { createCheckout, verifySession, getSubscription, cancelSub, resumeSub } 
 
 const router = Router();
 
+// ── Public routes (no auth required) — these are also mounted in app.ts BEFORE authenticateToken ──
 router.get('/nearby', getNearby);
 router.get('/participating', getParticipating);
 router.get('/participating/locations/search', searchParticipatingLocations);
 router.get('/mode', getEntryMode);
 router.post('/address', getAddressController);
-router.post('/setup', setupBusiness);
+
+// ── Authenticated routes ──
+// /setup requires the user to already have role 'Business' (assigned at registration via invite or sign-up flow)
+router.post('/setup', requireRole('Business'), setupBusiness);
 router.get('/my-business', authenticateToken, getMyBusiness);
 router.patch('/', authenticateToken, updateBusiness);
 router.patch('/campaign-settings', authenticateToken, updateCampaignSettingsController);

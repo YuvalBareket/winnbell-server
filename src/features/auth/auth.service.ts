@@ -1,6 +1,7 @@
 import bcrypt from 'bcryptjs';
 import { getPool } from '../../shared/db/db.js';
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 
 interface ManagerInvitePayload {
   type: 'MANAGER_INVITE';
@@ -48,13 +49,22 @@ export const registerUser = async (
 
         if (decoded.type === 'MANAGER_INVITE' && decoded.locationId) {
           locationId = decoded.locationId;
-          await client.query(
-            `UPDATE business_location SET manager_user_id = $1 WHERE id = $2`,
-            [newUser.id, locationId],
+
+          // Single-use enforcement: verify token hash matches and hasn't been used yet
+          const tokenHash = crypto.createHash('sha256').update(inviteToken).digest('hex');
+          const locResult = await client.query(
+            `UPDATE business_location
+             SET manager_user_id = $1, invite_used_at = NOW(), invite_token_hash = NULL
+             WHERE id = $2 AND invite_token_hash = $3 AND invite_used_at IS NULL
+             RETURNING id`,
+            [newUser.id, locationId, tokenHash],
           );
+          if (locResult.rowCount === 0) {
+            throw new Error('Invalid or already-used invitation link');
+          }
         }
-      } catch {
-        throw new Error('Invalid or expired invitation link');
+      } catch (err: unknown) {
+        throw new Error(err instanceof Error ? err.message : 'Invalid or expired invitation link');
       }
     }
 
@@ -114,10 +124,18 @@ export const loginUser = async (
       ) as ManagerInvitePayload;
       if (decoded.type === 'MANAGER_INVITE' && decoded.locationId) {
         await client.query('BEGIN');
-        await client.query(
-          `UPDATE business_location SET manager_user_id = $1 WHERE id = $2`,
-          [user.id, decoded.locationId],
+
+        // Single-use enforcement
+        const tokenHash = crypto.createHash('sha256').update(inviteToken).digest('hex');
+        const updateResult = await client.query(
+          `UPDATE business_location
+           SET manager_user_id = $1, invite_used_at = NOW(), invite_token_hash = NULL
+           WHERE id = $2 AND invite_token_hash = $3 AND invite_used_at IS NULL
+           RETURNING id`,
+          [user.id, decoded.locationId, tokenHash],
         );
+        if (updateResult.rowCount === 0) throw new Error('Invalid or already-used invitation link');
+
         await client.query(
           `UPDATE "user" SET role = 'Business' WHERE id = $1`,
           [user.id],
@@ -126,8 +144,9 @@ export const loginUser = async (
         user.role = 'Business';
         locationId = decoded.locationId;
       }
-    } catch {
+    } catch (err: unknown) {
       try { await client.query('ROLLBACK'); } catch { /* ignore */ }
+      if (err instanceof Error) throw err;
     } finally {
       client.release();
     }
@@ -189,7 +208,8 @@ export const syncExternalUser = async (
   const client = await pool.connect();
   let locationId: number | null = null;
   const rawRole = metadata?.role || 'User';
-  const validRoles = ['User', 'Business', 'Admin'];
+  // Admin role can never be assigned through sync — only via direct DB action by an existing admin.
+  const validRoles = ['User', 'Business'];
   const role = validRoles.find(r => r.toLowerCase() === rawRole.toLowerCase()) || 'User';
   const inviteToken = metadata?.inviteToken;
 
@@ -215,10 +235,18 @@ export const syncExternalUser = async (
 
         if (decoded.type === 'MANAGER_INVITE' && decoded.locationId) {
           locationId = decoded.locationId;
-          await client.query(
-            `UPDATE business_location SET manager_user_id = $1 WHERE id = $2`,
-            [dbUser.id, locationId],
+
+          // Single-use enforcement
+          const tokenHash = crypto.createHash('sha256').update(inviteToken).digest('hex');
+          const updateResult = await client.query(
+            `UPDATE business_location
+             SET manager_user_id = $1, invite_used_at = NOW(), invite_token_hash = NULL
+             WHERE id = $2 AND invite_token_hash = $3 AND invite_used_at IS NULL
+             RETURNING id`,
+            [dbUser.id, locationId, tokenHash],
           );
+          if (updateResult.rowCount === 0) throw new Error('Invalid or already-used invitation link');
+
           await client.query(
             `UPDATE "user" SET role = 'Business' WHERE id = $1`,
             [dbUser.id],
@@ -227,6 +255,7 @@ export const syncExternalUser = async (
         }
       } catch (tokenErr: unknown) {
         console.error('Invite token processing failed during sync:', tokenErr instanceof Error ? tokenErr.message : tokenErr);
+        throw tokenErr; // propagate so the caller gets a 4xx instead of silently succeeding
       }
     } else {
       const locResult = await client.query(

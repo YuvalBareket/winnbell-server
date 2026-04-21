@@ -1,4 +1,5 @@
 import { getPool } from '../../shared/db/db.js';
+import crypto from 'crypto';
 import {
   AddLocationInput,
   AddressSuggestion,
@@ -198,6 +199,13 @@ export const createManagerInviteLink = async (locationId: number, ownerUserId: n
     { locationId, businessId, type: 'MANAGER_INVITE' },
     process.env.JWT_SECRET as string,
     { expiresIn: '1h' },
+  );
+
+  // Store a hash of the token so we can invalidate it after first use (single-use enforcement)
+  const tokenHash = crypto.createHash('sha256').update(token).digest('hex');
+  await pool.query(
+    `UPDATE business_location SET invite_token_hash = $1, invite_used_at = NULL WHERE id = $2`,
+    [tokenHash, locationId],
   );
 
   const baseUrl = process.env.CLIENT_URL || 'http://localhost:8081';

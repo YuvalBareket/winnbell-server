@@ -183,6 +183,10 @@ export const openDrawService = async (drawId: number): Promise<void> => {
   if (check.rows.length === 0) throw new Error('Draw not found');
   if (check.rows[0].status.toUpperCase() !== 'UPCOMING') throw new Error('Only Upcoming draws can be opened');
 
+  // Prevent multiple simultaneous open draws
+  const openCheck = await pool.query(`SELECT id FROM draw WHERE status = 'Open'`);
+  if (openCheck.rows.length > 0) throw new Error('A draw is already Open. Close it before opening another.');
+
   await pool.query(`UPDATE draw SET status = 'Open' WHERE id = $1`, [drawId]);
 
   // All subscribed businesses go live when a draw opens

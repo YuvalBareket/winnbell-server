@@ -3,6 +3,12 @@ import type { OcrProvider, OcrExpected, OcrValidationResult } from '../ocr.types
 
 export class TesseractProvider implements OcrProvider {
   async validate(imageUrl: string, expected: OcrExpected): Promise<OcrValidationResult> {
+    // SSRF protection: only fetch from the configured R2 storage bucket
+    const r2BaseUrl = process.env.R2_PUBLIC_URL;
+    if (!r2BaseUrl || !imageUrl.startsWith(r2BaseUrl + '/')) {
+      throw new Error('Invalid image URL: must reference the application storage bucket');
+    }
+
     // Download image into a buffer
     const response = await fetch(imageUrl);
     if (!response.ok) {

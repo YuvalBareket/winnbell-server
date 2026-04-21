@@ -23,7 +23,8 @@ export const getDashboardData = async (req: Request, res: Response) => {
     const stats = await getBusinessesWithStats();
     res.status(200).json(stats);
   } catch (error) {
-    res.status(500).json({ message: 'Error fetching admin data', error });
+    console.error('[admin.getDashboardData]', error);
+    res.status(500).json({ message: 'Error fetching admin data' });
   }
 };
 
@@ -32,7 +33,8 @@ export const getDraws = async (req: Request, res: Response) => {
     const draws = await getActiveDraws();
     res.status(200).json(draws);
   } catch (error) {
-    res.status(500).json({ message: 'Error fetching draws', error });
+    console.error('[admin.getDraws]', error);
+    res.status(500).json({ message: 'Error fetching draws' });
   }
 };
 
@@ -50,15 +52,17 @@ export const createTickets = async (req: Request, res: Response) => {
       .status(201)
       .json({ message: 'Tickets generated successfully', ...result });
   } catch (error) {
-    res.status(500).json({ message: 'Failed to generate tickets', error });
+    console.error('[admin.createTickets]', error);
+    res.status(500).json({ message: 'Failed to generate tickets' });
   }
 };
 export const createBusiness = async (req: Request, res: Response) => {
   try {
     const business = await createBusinessService(req.body);
     res.status(201).json(business);
-  } catch (error) {
-    res.status(500).json({ message: 'Failed to create business', error });
+  } catch (error: unknown) {
+    console.error('[admin.createBusiness]', error);
+    res.status(500).json({ message: 'Failed to create business' });
   }
 };
 export const getAllDraws = async (req: Request, res: Response) => {
@@ -119,7 +123,15 @@ export const getUsers = async (req: Request, res: Response) => {
 
 export const updateUserRole = async (req: Request, res: Response) => {
   const userId = parseInt(req.params.userId as string, 10);
+  if (isNaN(userId)) {
+    res.status(400).json({ message: 'Invalid userId' });
+    return;
+  }
   const { role } = req.body;
+  if (typeof role !== 'string') {
+    res.status(400).json({ message: 'role must be a string' });
+    return;
+  }
   try {
     await updateUserRoleService(userId, role);
     res.status(200).json({ message: 'Role updated' });
@@ -177,10 +189,15 @@ export const updatePlatformSettings = async (req: Request, res: Response) => {
 
 export const pickWinner = async (req: Request, res: Response) => {
   const drawId = parseInt(req.params.drawId as string, 10);
+  if (isNaN(drawId)) {
+    res.status(400).json({ message: 'Invalid drawId' });
+    return;
+  }
   try {
     const winner = await pickDrawWinnerService(drawId);
     res.status(200).json(winner);
   } catch (error) {
-    res.status(500).json({ message: 'Failed to pick winner', error });
+    console.error('[admin.pickWinner]', error);
+    res.status(500).json({ message: 'Failed to pick winner' });
   }
 };

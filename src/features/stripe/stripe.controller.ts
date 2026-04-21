@@ -28,9 +28,14 @@ export const createCheckout = async (req: Request, res: Response) => {
 
     const url = await createCheckoutSession(business.id, business.email, entriesPerLocation);
     res.json({ url });
-  } catch (err: any) {
-    const status = err.message.includes('already has an active subscription') ? 409 : 500;
-    res.status(status).json({ error: err.message });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : '';
+    if (msg.includes('already has an active subscription')) {
+      res.status(409).json({ error: 'This business already has an active subscription.' });
+      return;
+    }
+    console.error('[stripe.createCheckout]', err);
+    res.status(500).json({ error: 'Subscription setup failed. Please try again.' });
   }
 };
 
@@ -45,9 +50,9 @@ export const verifySession = async (req: Request, res: Response) => {
     }
     await verifyAndActivateSession(sessionId, userId);
     res.json({ activated: true });
-  } catch (err: any) {
-    console.error('[verifySession] Error:', err.message);
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    console.error('[stripe.verifySession]', err);
+    res.status(400).json({ error: 'Session verification failed. Please try again.' });
   }
 };
 
@@ -61,8 +66,9 @@ export const getSubscription = async (req: Request, res: Response) => {
       return;
     }
     res.json(details);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+  } catch (err: unknown) {
+    console.error('[stripe.getSubscription]', err);
+    res.status(500).json({ error: 'Failed to retrieve subscription.' });
   }
 };
 
@@ -72,8 +78,9 @@ export const cancelSub = async (req: Request, res: Response) => {
     const userId = req.user!.id;
     const result = await cancelSubscription(userId);
     res.json(result);
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    console.error('[stripe.cancelSub]', err);
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Cancellation failed. Please try again.' });
   }
 };
 
@@ -83,8 +90,9 @@ export const resumeSub = async (req: Request, res: Response) => {
     const userId = req.user!.id;
     await resumeSubscription(userId);
     res.json({ resumed: true });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    console.error('[stripe.resumeSub]', err);
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Could not resume subscription. Please try again.' });
   }
 };
 

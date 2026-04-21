@@ -1,5 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
+import { getPool } from '../db/db.js';
 
 // 1. Define the shape of the User object inside the token
 export interface UserPayload {
@@ -22,14 +23,13 @@ export const requireRole = (...roles: string[]) =>
     next();
   };
 
-export const authenticateToken = (
+export const authenticateToken = async (
   req: AuthRequest,
   res: Response,
   next: NextFunction,
-): void => {
-  // Get the header: "Authorization: Bearer <token>"
+): Promise<void> => {
   const authHeader = req.headers['authorization'];
-  const token = authHeader && authHeader.split(' ')[1]; // Extract just the token
+  const token = authHeader && authHeader.split(' ')[1];
 
   if (!token) {
     res.status(401).json({ message: 'Access denied. No token provided.' });
@@ -39,13 +39,21 @@ export const authenticateToken = (
   try {
     const jwtSecret = process.env.JWT_SECRET;
     if (!jwtSecret) throw new Error('JWT_SECRET is not configured');
-    // Verify the token
     const decoded = jwt.verify(token, jwtSecret) as UserPayload;
 
-    // Attach user info to the request object so controllers can use it
-    req.user = decoded;
+    // Verify the account is still active in the database (catches banned/deactivated users)
+    const pool = getPool();
+    const userCheck = await pool.query(
+      `SELECT is_active FROM "user" WHERE id = $1`,
+      [decoded.id],
+    );
+    if (!userCheck.rows[0]?.is_active) {
+      res.status(401).json({ message: 'Account is deactivated.' });
+      return;
+    }
 
-    next(); // Pass control to the next handler (the controller)
+    req.user = decoded;
+    next();
   } catch (error) {
     res.status(403).json({ message: 'Invalid or expired token.' });
   }

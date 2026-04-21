@@ -1,4 +1,5 @@
 import { getPool, PoolClient } from '../../shared/db/db.js';
+import crypto from 'crypto';
 import {
   ActivationResult,
   FreeTicketStatus,
@@ -146,11 +147,15 @@ export const checkFreeTicketEligibility = async (userId: number): Promise<FreeTi
   return { canActivate: false, nextAvailableDate: nextSunday };
 };
 
+const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // 32 chars, no ambiguous O/0/I/1/L
+
 export const generateGlobalUniqueCode = async (client?: PoolClient): Promise<string> => {
   const MAX_ATTEMPTS = 10;
   for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
-    const code = Math.random().toString(36).substring(2, 10).toUpperCase();
-    if (code.length !== 8) continue;
+    let code = '';
+    for (let i = 0; i < 8; i++) {
+      code += CODE_CHARS[crypto.randomInt(0, CODE_CHARS.length)];
+    }
 
     const result = client
       ? await client.query(`SELECT COUNT(*) as count FROM ticket WHERE code = $1`, [code])

@@ -92,6 +92,14 @@ export const verifyAndActivateSession = async (sessionId: string, userId: number
   if (session.metadata?.business_id !== String(businessId)) throw new Error('Session does not belong to this business');
 
   const subscription = session.subscription as Stripe.Subscription;
+
+  // Idempotency guard: if this Stripe subscription is already activated, skip re-processing
+  const existingCheck = await pool.query(
+    `SELECT id FROM subscription WHERE stripe_subscription_id = $1`,
+    [subscription.id],
+  );
+  if (existingCheck.rows.length > 0) return; // Already activated — safe to return success
+
   const customerId = session.customer as string;
   const priceItem = subscription.items.data[0];
   const priceId = priceItem?.price.id ?? '';

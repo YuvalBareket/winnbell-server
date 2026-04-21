@@ -60,10 +60,11 @@ export const syncUser = async (req: Request, res: Response): Promise<void> => {
 
     const email = clerkUser.emailAddresses[0]?.emailAddress;
     const fullName = `${clerkUser.firstName || ''} ${clerkUser.lastName || ''}`.trim();
-    const { role: bodyRole, inviteToken } = req.body;
+    const { inviteToken } = req.body;
 
-    // Prefer role from request body (set at registration time) over Clerk metadata
-    const role = bodyRole || (clerkUser.unsafeMetadata?.role as string) || 'User';
+    // Role is NEVER accepted from the request body — only from Clerk metadata (Business/User only, never Admin).
+    // Admin role can only be assigned directly in the database by an existing admin.
+    const role = (clerkUser.unsafeMetadata?.role as string) || 'User';
 
     const result = await authService.syncExternalUser(payload.sub, email, fullName, {
       role,

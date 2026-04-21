@@ -6,6 +6,6 @@ const router = Router();
 
 router.post('/subscribe', subscribe);
 router.post('/unsubscribe', unsubscribe);
-router.post('/broadcast', requireRole('admin'), broadcast);
+router.post('/broadcast', requireRole('Admin'), broadcast);
 
 export default router;
