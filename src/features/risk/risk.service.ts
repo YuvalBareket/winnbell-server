@@ -224,9 +224,10 @@ export const checkDuplicateReceiptIdentifier = async (
   businessId: number,
   receiptIdentifier: string,
   submittingUserId: number,
+  client?: PoolClient,
 ): Promise<DuplicateCheckResult> => {
-  const pool = getPool();
-  const result = await pool.query(
+  const db = client ?? getPool();
+  const result = await db.query(
     `SELECT activated_by_user_id FROM ticket
      WHERE business_id = $1 AND receipt_identifier = $2 AND activated_by_user_id != $3
      LIMIT 1`,

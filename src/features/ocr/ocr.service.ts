@@ -25,7 +25,7 @@ function getProvider(): OcrProvider {
 // ─── Async Validator ──────────────────────────────────────────────────────────
 // Called after ticket commit — runs in background, never blocks the response.
 // On failure: quarantines the ticket and adds a risk penalty.
-// On provider error: marks as 'skipped' so the ticket is not unfairly quarantined.
+// On provider error: quarantines for manual review (cannot be exploited by crashing the OCR provider).
 
 export const validateReceiptAsync = (
   ticketId: number,
@@ -40,30 +40,52 @@ export const validateReceiptAsync = (
       const provider = getProvider();
       const result = await provider.validate(imageUrl, expected);
 
-      const passed = result.identifierFound && result.amountMatches && result.isReceipt;
-      const status = passed ? 'passed' : 'failed';
+      // businessNameFound === false means the check ran and failed (null = not checked = pass-through)
+      const passed =
+        result.identifierFound &&
+        result.amountMatches &&
+        result.isReceipt &&
+        result.businessNameFound !== false;
 
-      await pool.query(
-        `UPDATE ticket SET image_validation_status = $1 WHERE id = $2`,
-        [status, ticketId],
-      );
-
-      if (!passed) {
+      if (passed) {
+        await pool.query(
+          `UPDATE ticket SET image_validation_status = 'passed' WHERE id = $1`,
+          [ticketId],
+        );
+        // Unquarantine medium-risk tickets that were held pending OCR
+        await pool.query(
+          `UPDATE ticket
+           SET is_quarantined = FALSE, quarantine_reason = NULL, quarantined_at = NULL
+           WHERE id = $1 AND quarantine_reason = 'ocr_pending'`,
+          [ticketId],
+        );
+      } else {
+        await pool.query(
+          `UPDATE ticket SET image_validation_status = 'failed' WHERE id = $1`,
+          [ticketId],
+        );
         await pool.query(
           `UPDATE ticket
            SET is_quarantined = TRUE, quarantine_reason = 'ocr_validation_failed', quarantined_at = NOW()
            WHERE id = $1 AND is_quarantined = FALSE`,
           [ticketId],
         );
-        // Penalty for submitting an image that doesn't match — use pool (no transaction context)
+        // Penalty for submitting an image that doesn't match
         await updateUserRiskScore(userId, 2);
         await syncUserQuarantineState(userId, drawId);
       }
     } catch (err) {
-      // Provider error (network, tesseract crash, etc.) — skip rather than penalise
+      // Provider error (network, tesseract crash, etc.) — quarantine pending manual review
+      // rather than leaving the ticket eligible, which could be exploited by crashing the OCR provider
       console.error(`[OCR] Validation error for ticket ${ticketId}:`, err);
       await pool.query(
-        `UPDATE ticket SET image_validation_status = 'skipped' WHERE id = $1`,
+        `UPDATE ticket SET image_validation_status = 'ocr_error' WHERE id = $1`,
+        [ticketId],
+      );
+      await pool.query(
+        `UPDATE ticket
+         SET is_quarantined = TRUE, quarantine_reason = 'ocr_error_pending_review', quarantined_at = NOW()
+         WHERE id = $1 AND is_quarantined = FALSE`,
         [ticketId],
       );
     }

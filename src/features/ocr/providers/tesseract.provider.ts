@@ -37,10 +37,24 @@ export class TesseractProvider implements OcrProvider {
     }
 
     // --- Receipt heuristic ---
-    // A real receipt typically contains keywords like TOTAL, AMOUNT, RECEIPT, INVOICE, TAX, etc.
-    const receiptKeywords = ['TOTAL', 'AMOUNT', 'RECEIPT', 'INVOICE', 'TAX', 'SUBTOTAL', 'GST', 'VAT', 'PAID'];
+    // A real receipt requires at least 2 distinct receipt-domain keywords.
+    // Requiring 2 prevents crafted images that just contain one word like "TOTAL".
+    const receiptKeywords = ['TOTAL', 'AMOUNT', 'RECEIPT', 'INVOICE', 'TAX', 'SUBTOTAL', 'GST', 'VAT', 'PAID', 'CHANGE', 'BALANCE', 'PURCHASE'];
     const keywordCount = receiptKeywords.filter(k => normalizedText.includes(k)).length;
-    const isReceipt = keywordCount >= 1 && normalizedText.length > 20;
+    const isReceipt = keywordCount >= 2 && normalizedText.length > 50;
+
+    // --- Business name match ---
+    // At least one significant word (4+ chars) from the business name must appear in the receipt text.
+    // This prevents fake receipts from unrelated businesses being submitted for a different business.
+    let businessNameFound: boolean | null = null;
+    if (expected.businessName) {
+      const normalizedBizName = expected.businessName.toUpperCase().replace(/[^A-Z0-9\s]/g, '');
+      const significantWords = normalizedBizName.split(/\s+/).filter(w => w.length >= 4);
+      // If no significant words can be extracted (e.g. very short name), skip the check
+      businessNameFound = significantWords.length === 0
+        ? null
+        : significantWords.some(word => normalizedText.includes(word));
+    }
 
     // --- Confidence ---
     let confidence: 'high' | 'medium' | 'low';
@@ -49,7 +63,7 @@ export class TesseractProvider implements OcrProvider {
     else if (matchCount === 1) confidence = 'medium';
     else confidence = 'low';
 
-    return { isReceipt, identifierFound, amountMatches, dateMatches, confidence, rawText: text };
+    return { isReceipt, identifierFound, amountMatches, dateMatches, businessNameFound, confidence, rawText: text };
   }
 }
 

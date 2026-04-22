@@ -22,6 +22,9 @@ import { authenticateToken } from './shared/middleware/auth.middleware.js';
 
 const app = express();
 
+// Trust reverse proxy (nginx/Render) so req.ip reflects the real client IP
+app.set('trust proxy', 1);
+
 // Security headers (helmet first)
 app.use(helmet());
 

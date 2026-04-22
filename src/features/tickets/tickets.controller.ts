@@ -94,6 +94,7 @@ export const submitReceiptEntry = async (req: AuthRequest, res: Response) => {
       receiptImageUrl: receiptImageUrl ?? undefined,
       typingDurationMs: typingDurationMs !== undefined ? Number(typingDurationMs) : undefined,
       receiptInputMethod: receiptInputMethod === 'pasted' ? 'pasted' : receiptInputMethod === 'typed' ? 'typed' : undefined,
+      submitterIp: req.ip,
     });
 
     res.status(201).json({ success: true, ...result });
@@ -182,7 +183,7 @@ export const getMyRiskLevel = async (req: AuthRequest, res: Response) => {
     if (score >= 15) {
       const recentResult = await pool.query(
         `SELECT COUNT(*) AS count FROM ticket
-         WHERE activated_by_user_id = $1 AND entry_source = 'receipt' AND activated_at >= NOW() - INTERVAL '24 hours'`,
+         WHERE activated_by_user_id = $1 AND entry_source = 'receipt' AND activated_at >= NOW() - INTERVAL '1 hour'`,
         [userId],
       );
       isThrottled = parseInt(recentResult.rows[0].count, 10) >= 1;

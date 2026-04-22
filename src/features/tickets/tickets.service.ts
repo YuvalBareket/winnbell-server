@@ -269,7 +269,7 @@ export const submitReceiptEntryService = async (
 
     // Resolve business from location and verify it is active + participating
     const bizResult = await client.query(
-      `SELECT b.id AS business_id, b.entry_cap, b.min_transaction_amount
+      `SELECT b.id AS business_id, b.name AS business_name, b.entry_cap, b.min_transaction_amount
        FROM business_location bl
        JOIN business b ON bl.business_id = b.id
        WHERE bl.id = $1 AND bl.is_active = true
@@ -279,13 +279,27 @@ export const submitReceiptEntryService = async (
     if (bizResult.rows.length === 0) {
       throw new Error('Location is not currently participating in a draw.');
     }
-    const { business_id, min_transaction_amount: minTransactionAmount } = bizResult.rows[0];
+    const { business_id, business_name, min_transaction_amount: minTransactionAmount } = bizResult.rows[0];
+
+    // Hard daily submission cap — prevents velocity spam regardless of risk score.
+    // High-risk users are also throttled per-hour by the gate below; this is an absolute ceiling.
+    const dailyCountResult = await client.query(
+      `SELECT COUNT(*) AS count FROM ticket
+       WHERE activated_by_user_id = $1 AND entry_source = 'receipt' AND activated_at >= NOW() - INTERVAL '24 hours'`,
+      [userId],
+    );
+    if (parseInt(dailyCountResult.rows[0].count, 10) >= 10) {
+      throw new Error('You have reached the daily receipt submission limit. Please try again tomorrow.');
+    }
 
     // Cap is set globally by admin only
+    // If the settings row is missing entirely, fall back to a safe default of 500 rather
+    // than null (which would mean unlimited and could be exploited if the row is deleted).
     const settingsResult = await client.query(
       `SELECT global_entry_cap FROM platform_settings WHERE id = 1`,
     );
-    const entry_cap: number | null = settingsResult.rows[0]?.global_entry_cap ?? null;
+    const entry_cap: number | null =
+      settingsResult.rows.length > 0 ? settingsResult.rows[0].global_entry_cap : 500;
 
     // Conflict-of-interest guard: business owners and managers cannot submit entries for their own business
     const conflictResult = await client.query(
@@ -312,22 +326,25 @@ export const submitReceiptEntryService = async (
       : 1;
 
     if (entriesEarned < 1) {
-      // Penalise amount probing: same receipt identifier submitted again with a different (lower) amount
-      const probeCheck = await client.query(
+      // Always penalise below-threshold submissions — prevents free threshold probing.
+      // Use pool directly so this persists even though the enclosing transaction rolls back on throw.
+      await updateUserRiskScore(userId, 1);
+
+      // Heavier penalty if the same identifier was previously submitted successfully with a different amount
+      const probeCheck = await pool.query(
         `SELECT COUNT(*) AS count FROM ticket
          WHERE business_id = $1 AND receipt_identifier = $2
            AND transaction_amount != $3`,
         [business_id, input.receiptIdentifier, input.transactionAmount],
       );
       if (parseInt(probeCheck.rows[0].count, 10) > 0) {
-        // Use the open draw id; safe to query outside the lock since we only need drawId for sync
-        const probeDrawResult = await client.query(
+        await updateUserRiskScore(userId, 3); // +3 more = +4 total for confirmed probe
+        const probeDrawResult = await pool.query(
           `SELECT id FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1`,
         );
         const probDrawId = probeDrawResult.rows[0]?.id;
         if (probDrawId) {
-          await updateUserRiskScore(userId, 4, client);
-          await syncUserQuarantineState(userId, probDrawId, client);
+          await syncUserQuarantineState(userId, probDrawId);
         }
       }
       throw new Error('Transaction amount is not sufficient to earn an entry.');
@@ -352,11 +369,21 @@ export const submitReceiptEntryService = async (
       }
     }
 
-    // Check cross-user duplicate (used as both a risk signal and a block)
+    // Acquire an advisory lock keyed on (business_id, receiptIdentifier) to prevent
+    // two concurrent submissions of the same receipt slipping through the duplicate check
+    // simultaneously (TOCTOU race condition). The lock is automatically released at COMMIT/ROLLBACK.
+    await client.query(
+      `SELECT pg_advisory_xact_lock(hashtext($1::text || '|' || $2::text))`,
+      [String(business_id), input.receiptIdentifier],
+    );
+
+    // Check cross-user duplicate inside the transaction (using client, not pool) so the
+    // advisory lock above actually serializes this read against concurrent submissions.
     const dupCheck = await checkDuplicateReceiptIdentifier(
       business_id,
       input.receiptIdentifier,
       userId,
+      client,
     );
 
     // Evaluate risk for this submission
@@ -398,33 +425,34 @@ export const submitReceiptEntryService = async (
     await updateUserRiskScore(userId, riskEval.delta, client);
     await syncUserQuarantineState(userId, drawId, client);
 
-    // Block cross-user duplicate
+    // Hard block on sequential identifier guessing — elevated from advisory signal to immediate block.
+    // Risk delta is already persisted above so the score increase survives this throw.
+    if (riskEval.flags.includes('sequential_guessing')) {
+      throw new Error('Suspicious sequential receipt pattern detected. Please contact support if this is in error.');
+    }
+
+    // Block cross-user duplicate and immediately quarantine the original submitter's ticket.
+    // Any second-user attempt on the same receipt is a sharing signal regardless of intent.
+    // The original ticket is held for manual review — if legitimate, an admin can release it.
     if (dupCheck.isDuplicate) {
-      // If 3+ distinct users have attempted this identifier, flag the original ticket for manual review
-      const dupCountResult = await client.query(
-        `SELECT COUNT(DISTINCT activated_by_user_id) AS dup_count FROM ticket
-         WHERE business_id = $1 AND receipt_identifier = $2`,
+      await client.query(
+        `UPDATE ticket
+         SET is_quarantined = TRUE, quarantine_reason = 'shared_receipt_suspected', quarantined_at = NOW()
+         WHERE business_id = $1 AND receipt_identifier = $2 AND is_quarantined = FALSE`,
         [business_id, input.receiptIdentifier],
       );
-      const dupCount = parseInt(dupCountResult.rows[0].dup_count, 10);
-      if (dupCount >= 3) {
-        await client.query(
-          `UPDATE ticket SET is_quarantined = TRUE, quarantine_reason = 'shared_receipt_suspected', quarantined_at = NOW()
-           WHERE business_id = $1 AND receipt_identifier = $2 AND is_quarantined = FALSE`,
-          [business_id, input.receiptIdentifier],
-        );
-      }
       throw new Error('This receipt has already been used for an entry.');
     }
 
-    // Block same-user re-submit — penalty for trying
+    // Block same-user re-submit — penalty for trying.
+    // Uses pool directly so the +4 penalty persists even though this throw causes a ROLLBACK.
     const existingEntry = await client.query(
       `SELECT id FROM ticket WHERE business_id = $1 AND receipt_identifier = $2`,
       [business_id, input.receiptIdentifier],
     );
     if (existingEntry.rows.length > 0) {
-      await updateUserRiskScore(userId, 4, client);
-      await syncUserQuarantineState(userId, drawId, client);
+      await updateUserRiskScore(userId, 4);
+      await syncUserQuarantineState(userId, drawId);
       throw new Error('This receipt identifier has already been used.');
     }
 
@@ -443,20 +471,35 @@ export const submitReceiptEntryService = async (
     }
 
     const isHighRisk = riskEval.totalScore > RISK_THRESHOLDS.MEDIUM_MAX;
+    // Medium-risk users' primary receipt ticket is held quarantined until OCR passes.
+    // This prevents medium-risk users from benefiting from a receipt before it is verified.
+    const isMediumRisk = riskEval.totalScore > RISK_THRESHOLDS.LOW_MAX && !isHighRisk;
 
     // Insert one ticket row per entry earned (multi-entry support)
     // Only the first ticket carries the receipt fields; subsequent entries share the receipt identifier
     let firstTicketId: number = 0;
     let firstCode = '';
     for (let i = 0; i < entriesEarned; i++) {
+      const isPrimary = i === 0;
+      const hasImage = isPrimary && !!input.receiptImageUrl;
+
+      // Determine quarantine state for this row
+      // - High risk: always quarantined
+      // - Medium risk + primary entry with image: quarantined as ocr_pending until OCR passes
+      // - All others: not quarantined
+      const isOcrPending = isMediumRisk && hasImage;
+      const isQuarantined = isHighRisk || isOcrPending;
+      const quarantineReason = isHighRisk ? 'high_risk_user' : isOcrPending ? 'ocr_pending' : null;
+      const quarantinedAt = isQuarantined ? new Date() : null;
+
       const code = await generateGlobalUniqueCode(client);
       const ticketResult = await client.query(
         `INSERT INTO ticket
           (code, status, entry_source, business_id, location_id, draw_id,
            activated_by_user_id, activated_at,
            receipt_identifier, transaction_amount, transaction_date, receipt_image_url, risk_score,
-           is_quarantined, quarantine_reason, quarantined_at, image_validation_status)
-         VALUES ($1, 'Activated', 'receipt', $2, $3, $4, $5, NOW(), $6, $7, $8, $9, $10, $11, $12, $13, $14)
+           is_quarantined, quarantine_reason, quarantined_at, image_validation_status, submitter_ip)
+         VALUES ($1, 'Activated', 'receipt', $2, $3, $4, $5, NOW(), $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
          RETURNING id`,
         [
           code,
@@ -467,15 +510,16 @@ export const submitReceiptEntryService = async (
           input.receiptIdentifier,
           input.transactionAmount,
           input.transactionDate ?? null,
-          i === 0 ? (input.receiptImageUrl ?? null) : null,
+          isPrimary ? (input.receiptImageUrl ?? null) : null,
           riskEval.totalScore,
-          isHighRisk,
-          isHighRisk ? 'high_risk_user' : null,
-          isHighRisk ? new Date() : null,
-          i === 0 && input.receiptImageUrl ? 'pending' : 'not_required',
+          isQuarantined,
+          quarantineReason,
+          quarantinedAt,
+          hasImage ? 'pending' : 'not_required',
+          input.submitterIp ?? null,
         ],
       );
-      if (i === 0) {
+      if (isPrimary) {
         firstTicketId = ticketResult.rows[0].id;
         firstCode = code;
       }
@@ -497,6 +541,7 @@ export const submitReceiptEntryService = async (
           identifier: input.receiptIdentifier,
           amount: input.transactionAmount,
           date: input.transactionDate,
+          businessName: business_name,
         },
       );
     }
@@ -515,42 +560,70 @@ export const activatePromotionalEntry = async (
   code: string,
 ): Promise<{ entryId: number; drawName: string }> => {
   const pool = getPool();
-
+  const client = await pool.connect();
   const normalizedCode = code.toUpperCase().trim();
 
-  // Validate the code exists in the admin-created registry and is active.
-  // This prevents users from fabricating codes by changing the URL parameter.
-  const codeCheck = await pool.query(
-    `SELECT id FROM promotional_code WHERE code = $1 AND is_active = true`,
-    [normalizedCode],
-  );
-  if (codeCheck.rows.length === 0) {
-    throw new Error('This promotional code is not valid or has expired.');
-  }
-
-  // Find the current open draw
-  const drawResult = await pool.query(
-    `SELECT id, name FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1`,
-  );
-  if (drawResult.rows.length === 0) {
-    throw new Error('There is no active draw at the moment. Please try again later.');
-  }
-  const draw = drawResult.rows[0];
-
-  // Insert — the UNIQUE(code, user_id) constraint rejects duplicate use per account
   try {
-    const result = await pool.query(
-      `INSERT INTO promotional_entry (code, user_id, draw_id)
-       VALUES ($1, $2, $3)
-       RETURNING id`,
-      [normalizedCode, userId, draw.id],
+    await client.query('BEGIN');
+
+    // Advisory lock keyed on the promo code prevents the max_uses race condition:
+    // two concurrent 100th-user requests would otherwise both read use_count=99,
+    // both pass the cap check, and both insert.
+    await client.query(
+      `SELECT pg_advisory_xact_lock(hashtext($1::text))`,
+      [`promo_code_${normalizedCode}`],
     );
-    return { entryId: result.rows[0].id, drawName: draw.name };
-  } catch (err: any) {
-    if (err.code === '23505') {
-      throw new Error('You have already used this promotional code.');
+
+    // Validate the code exists in the admin-created registry and is active.
+    // This prevents users from fabricating codes by changing the URL parameter.
+    const codeCheck = await client.query(
+      `SELECT pc.id, pc.max_uses, COUNT(pe.id)::int AS use_count
+       FROM promotional_code pc
+       LEFT JOIN promotional_entry pe ON pe.code = pc.code
+       WHERE pc.code = $1 AND pc.is_active = true
+       GROUP BY pc.id`,
+      [normalizedCode],
+    );
+    if (codeCheck.rows.length === 0) {
+      throw new Error('This promotional code is not valid or has expired.');
     }
+    const { max_uses, use_count } = codeCheck.rows[0];
+    if (max_uses !== null && use_count >= max_uses) {
+      throw new Error('This promotional code has reached its maximum number of uses.');
+    }
+
+    // Find the current open draw
+    const drawResult = await client.query(
+      `SELECT id, name FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1`,
+    );
+    if (drawResult.rows.length === 0) {
+      throw new Error('There is no active draw at the moment. Please try again later.');
+    }
+    const draw = drawResult.rows[0];
+
+    // Insert — the UNIQUE(code, user_id) constraint rejects duplicate use per account
+    let result;
+    try {
+      result = await client.query(
+        `INSERT INTO promotional_entry (code, user_id, draw_id)
+         VALUES ($1, $2, $3)
+         RETURNING id`,
+        [normalizedCode, userId, draw.id],
+      );
+    } catch (err: any) {
+      if (err.code === '23505') {
+        throw new Error('You have already used this promotional code.');
+      }
+      throw err;
+    }
+
+    await client.query('COMMIT');
+    return { entryId: result.rows[0].id, drawName: draw.name };
+  } catch (err) {
+    await client.query('ROLLBACK');
     throw err;
+  } finally {
+    client.release();
   }
 };
 

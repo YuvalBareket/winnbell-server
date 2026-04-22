@@ -330,7 +330,7 @@ export const updatePlatformSettingsService = async (global_entry_cap: number | n
 export const getPromoCodesService = async () => {
   const pool = getPool();
   const result = await pool.query(
-    `SELECT pc.id, pc.code, pc.is_active, pc.created_at,
+    `SELECT pc.id, pc.code, pc.is_active, pc.max_uses, pc.created_at,
             COUNT(pe.id)::int AS use_count
      FROM promotional_code pc
      LEFT JOIN promotional_entry pe ON pe.code = pc.code
@@ -340,16 +340,22 @@ export const getPromoCodesService = async () => {
   return result.rows;
 };
 
-export const createPromoCodeService = async (code: string): Promise<{ id: number; code: string }> => {
+export const createPromoCodeService = async (
+  code: string,
+  maxUses?: number | null,
+): Promise<{ id: number; code: string }> => {
   const pool = getPool();
   const normalized = code.toUpperCase().trim();
   if (!normalized.startsWith('PROMO_') || normalized.length < 8) {
     throw new Error('Code must start with PROMO_ and be at least 8 characters.');
   }
+  if (maxUses !== undefined && maxUses !== null && (!Number.isInteger(maxUses) || maxUses < 1)) {
+    throw new Error('max_uses must be a positive integer or null (unlimited).');
+  }
   try {
     const result = await pool.query(
-      `INSERT INTO promotional_code (code) VALUES ($1) RETURNING id, code`,
-      [normalized],
+      `INSERT INTO promotional_code (code, max_uses) VALUES ($1, $2) RETURNING id, code`,
+      [normalized, maxUses ?? null],
     );
     return result.rows[0];
   } catch (err: any) {

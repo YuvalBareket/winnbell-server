@@ -38,4 +38,5 @@ export interface ReceiptEntryInput {
   receiptImageUrl?: string;
   typingDurationMs?: number;
   receiptInputMethod?: 'typed' | 'pasted';
+  submitterIp?: string; // Captured server-side for fraud ring detection
 }

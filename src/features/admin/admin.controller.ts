@@ -216,13 +216,13 @@ export const getPromoCodes = async (_req: Request, res: Response) => {
 };
 
 export const createPromoCode = async (req: Request, res: Response) => {
-  const { code } = req.body as { code: string };
+  const { code, max_uses } = req.body as { code: string; max_uses?: number | null };
   if (!code || typeof code !== 'string') {
     res.status(400).json({ message: 'code is required' });
     return;
   }
   try {
-    const result = await createPromoCodeService(code);
+    const result = await createPromoCodeService(code, max_uses);
     res.status(201).json(result);
   } catch (error) {
     res.status(400).json({ message: error instanceof Error ? error.message : 'Failed to create promo code' });
