@@ -60,9 +60,10 @@ export const syncUser = async (req: Request, res: Response): Promise<void> => {
 
     const email = clerkUser.emailAddresses[0]?.emailAddress;
     const fullName = `${clerkUser.firstName || ''} ${clerkUser.lastName || ''}`.trim();
-    const { inviteToken } = req.body;
+    const { role, inviteToken } = req.body;
 
     const result = await authService.syncExternalUser(payload.sub, email, fullName, {
+      role: typeof role === 'string' ? role : undefined,
       inviteToken: inviteToken || (clerkUser.unsafeMetadata?.inviteToken as string) || null,
     });
 

@@ -274,7 +274,7 @@ export const getAdminOverviewService = async () => {
   const [usersRes, bizRes, subRes, drawRes, ticketRes] = await Promise.all([
     pool.query(`SELECT COUNT(*) AS total_users, SUM(CASE WHEN role='Business' THEN 1 ELSE 0 END) AS business_users, SUM(CASE WHEN role='User' THEN 1 ELSE 0 END) AS regular_users FROM "user" WHERE role != 'Admin'`),
     pool.query(`SELECT COUNT(*) AS total, SUM(CASE WHEN is_subscribed=true THEN 1 ELSE 0 END) AS active FROM business`),
-    pool.query(`SELECT COUNT(*) AS active_subs, COALESCE(SUM(de.fee_at_entry),0) AS total_fees FROM subscription s LEFT JOIN draw_entry de ON de.business_id=s.business_id AND de.draw_id=(SELECT id FROM draw WHERE UPPER(status)='OPEN' ORDER BY draw_date ASC LIMIT 1) WHERE UPPER(s.status)='ACTIVE'`),
+    pool.query(`SELECT COUNT(*) AS active_subs, COALESCE(SUM(fee_at_entry), 0) AS total_fees FROM subscription WHERE UPPER(status) = 'ACTIVE'`),
     pool.query(`SELECT id, name, prize_pool, draw_date FROM draw WHERE UPPER(status)='OPEN' ORDER BY draw_date ASC LIMIT 1`),
     pool.query(`SELECT COUNT(*) AS total_tickets, SUM(CASE WHEN UPPER(status)='ACTIVATED' THEN 1 ELSE 0 END) AS activated FROM ticket WHERE draw_id=(SELECT id FROM draw WHERE UPPER(status)='OPEN' ORDER BY draw_date ASC LIMIT 1)`),
   ]);

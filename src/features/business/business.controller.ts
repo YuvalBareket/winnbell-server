@@ -238,7 +238,9 @@ export const getUploadUrl = async (req: AuthRequest, res: Response): Promise<voi
   try {
     const contentType = String(req.query.contentType || '').trim();
     const result = await getPresignedUploadUrl(contentType);
-    res.json(result);
+    const r2BaseUrl = process.env.R2_PUBLIC_URL;
+    const publicUrl = r2BaseUrl ? `${r2BaseUrl}/business-logos/${result.key}` : null;
+    res.json({ ...result, publicUrl });
   } catch (error: unknown) {
     if (error instanceof Error && error.message === 'R2_NOT_CONFIGURED') {
       res.status(503).json({ message: 'Image upload is not configured yet.' });
@@ -254,21 +256,16 @@ export const getUploadUrl = async (req: AuthRequest, res: Response): Promise<voi
 
 export const updateLogo = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const { logo_url } = req.body as { logo_url: string };
-    if (!logo_url) {
-      res.status(400).json({ message: 'logo_url is required' });
+    const { key } = req.body as { key: string };
+    if (!key || typeof key !== 'string' || key.includes('..') || key.includes('/')) {
+      res.status(400).json({ message: 'key is required' });
       return;
     }
-    const r2BaseUrl = process.env.R2_PUBLIC_URL;
-    if (!r2BaseUrl) {
+    if (!process.env.R2_PUBLIC_URL) {
       res.status(500).json({ message: 'Storage not configured' });
       return;
     }
-    if (!logo_url.startsWith(r2BaseUrl + '/')) {
-      res.status(400).json({ message: 'logo_url must reference the application storage bucket' });
-      return;
-    }
-    await updateBusinessLogo(req.user!.id, logo_url);
+    await updateBusinessLogo(req.user!.id, key);
     res.status(204).send();
   } catch (error: unknown) {
     if (error instanceof Error && error.message === 'BUSINESS_NOT_FOUND') {
