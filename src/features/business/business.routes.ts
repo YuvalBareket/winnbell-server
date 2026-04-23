@@ -1,6 +1,6 @@
 // src/features/business/business.routes.ts
 import { Router } from 'express';
-import { authenticateToken, requireRole } from '../../shared/middleware/auth.middleware.js';
+import { requireRole } from '../../shared/middleware/auth.middleware.js';
 import {
   addLocation,
   createInviteLink,
@@ -34,17 +34,17 @@ router.post('/address', getAddressController);
 // ── Authenticated routes ──
 // /setup requires the user to already have role 'Business' (assigned at registration via invite or sign-up flow)
 router.post('/setup', requireRole('Business'), setupBusiness);
-router.get('/my-business', authenticateToken, getMyBusiness);
-router.patch('/', authenticateToken, updateBusiness);
-router.patch('/campaign-settings', authenticateToken, updateCampaignSettingsController);
-router.get('/upload-url', authenticateToken, getUploadUrl);
-router.patch('/logo', authenticateToken, updateLogo);
-router.post('/locations', authenticateToken, addLocation);
-router.patch('/locations/:locationId', authenticateToken, updateLocation);
-router.delete('/locations/:locationId', authenticateToken, deleteLocation);
-router.post('/locations/:locationId/invite', authenticateToken, createInviteLink);
-router.delete('/locations/:locationId/manager', authenticateToken, removeManager);
-router.get('/stats', authenticateToken, requireRole('Business', 'Admin'), getStats);
+router.get('/my-business', getMyBusiness);
+router.patch('/', updateBusiness);
+router.patch('/campaign-settings', updateCampaignSettingsController);
+router.get('/upload-url', getUploadUrl);
+router.patch('/logo', updateLogo);
+router.post('/locations', addLocation);
+router.patch('/locations/:locationId', updateLocation);
+router.delete('/locations/:locationId', deleteLocation);
+router.post('/locations/:locationId/invite', createInviteLink);
+router.delete('/locations/:locationId/manager', removeManager);
+router.get('/stats', requireRole('Business', 'Admin'), getStats);
 router.post('/subscription/checkout', requireRole('Business'), createCheckout);
 router.post('/subscription/verify-session', requireRole('Business'), verifySession);
 router.get('/subscription', requireRole('Business'), getSubscription);

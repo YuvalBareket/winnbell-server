@@ -17,6 +17,7 @@ import {
   getEntryMode,
   getAddressController,
 } from './features/business/business.controller.js';
+import { handleClerkWebhook } from './features/auth/auth.controller.js';
 
 import { authenticateToken } from './shared/middleware/auth.middleware.js';
 
@@ -56,8 +57,19 @@ const redeemLimiter = rateLimit({
   message: { message: 'Too many redemption attempts, please slow down.' },
 });
 
+const publicLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: 'Too many requests, please slow down.' },
+});
+
 // Stripe webhook must receive raw body — register BEFORE express.json()
 app.use('/webhooks/stripe', express.raw({ type: 'application/json' }), stripeWebhookRoutes);
+
+// Clerk webhook must be raw and bypass the auth rate limiter — register BEFORE express.json()
+app.post('/auth/webhooks', express.raw({ type: 'application/json' }), handleClerkWebhook);
 
 app.use(express.json());
 
@@ -70,7 +82,7 @@ publicBusinessRouter.get('/nearby', getNearby);
 publicBusinessRouter.get('/participating', getParticipating);
 publicBusinessRouter.get('/participating/locations/search', searchParticipatingLocations);
 publicBusinessRouter.get('/mode', getEntryMode);
-publicBusinessRouter.post('/address', getAddressController);
+publicBusinessRouter.post('/address', publicLimiter, getAddressController);
 app.use('/business', publicBusinessRouter);
 
 // ── Authenticated routes ──

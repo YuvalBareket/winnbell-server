@@ -1,5 +1,5 @@
-import crypto from 'crypto';
 import { getPool } from '../../shared/db/db.js';
+import { generateGlobalUniqueCode } from '../tickets/tickets.service.js';
 
 export const getBusinessesWithStats = async () => {
   const pool = getPool();
@@ -30,22 +30,15 @@ export const getActiveDraws = async () => {
 
 export const generateBatchTickets = async (businessId: number, drawId: number, quantity: number) => {
   const pool = getPool();
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   const batchId = `BATCH_${businessId}_${Date.now()}`;
-  const tickets: string[] = [];
-
-  for (let i = 0; i < quantity; i++) {
-    let code = '';
-    for (let j = 0; j < 6; j++) {
-      code += chars[crypto.randomInt(0, chars.length)];
-    }
-    tickets.push(code);
-  }
 
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    for (const code of tickets) {
+    const tickets: string[] = [];
+    for (let i = 0; i < quantity; i++) {
+      const code = await generateGlobalUniqueCode(client);
+      tickets.push(code);
       await client.query(
         `INSERT INTO ticket (code, business_id, draw_id, batch_id, status) VALUES ($1, $2, $3, $4, 'Issued')`,
         [code, businessId, drawId, batchId],
@@ -178,19 +171,31 @@ export const getDrawBusinessesService = async (drawId: number) => {
 
 export const openDrawService = async (drawId: number): Promise<void> => {
   const pool = getPool();
-  const check = await pool.query(`SELECT id, status FROM draw WHERE id = $1`, [drawId]);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
 
-  if (check.rows.length === 0) throw new Error('Draw not found');
-  if (check.rows[0].status.toUpperCase() !== 'UPCOMING') throw new Error('Only Upcoming draws can be opened');
+    // Lock the draw row first to prevent concurrent opens
+    const check = await client.query(
+      `SELECT id, status FROM draw WHERE id = $1 FOR UPDATE`,
+      [drawId],
+    );
+    if (check.rows.length === 0) throw new Error('Draw not found');
+    if (check.rows[0].status.toUpperCase() !== 'UPCOMING') throw new Error('Only Upcoming draws can be opened');
 
-  // Prevent multiple simultaneous open draws
-  const openCheck = await pool.query(`SELECT id FROM draw WHERE status = 'Open'`);
-  if (openCheck.rows.length > 0) throw new Error('A draw is already Open. Close it before opening another.');
+    // Atomically check for existing open draw
+    const openCheck = await client.query(`SELECT id FROM draw WHERE status = 'Open' FOR UPDATE SKIP LOCKED`);
+    if (openCheck.rows.length > 0) throw new Error('A draw is already Open. Close it before opening another.');
 
-  await pool.query(`UPDATE draw SET status = 'Open' WHERE id = $1`, [drawId]);
-
-  // All subscribed businesses go live when a draw opens
-  await pool.query(`UPDATE business SET is_participating = true WHERE is_subscribed = true`);
+    await client.query(`UPDATE draw SET status = 'Open' WHERE id = $1`, [drawId]);
+    await client.query(`UPDATE business SET is_participating = true WHERE is_subscribed = true`);
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 };
 
 export const closeDrawService = async (drawId: number): Promise<void> => {
@@ -213,10 +218,13 @@ export const pickDrawWinnerService = async (drawId: number): Promise<{
   prizePool: number;
 }> => {
   const pool = getPool();
-  const check = await pool.query(`SELECT id, status, prize_pool FROM draw WHERE id = $1`, [drawId]);
+  const check = await pool.query(`SELECT id, status, prize_pool, winner_user_id FROM draw WHERE id = $1`, [drawId]);
 
   if (check.rows.length === 0) throw new Error('Draw not found');
   if (check.rows[0].status.toUpperCase() !== 'CLOSED') throw new Error('Draw is not Closed');
+  if (check.rows[0].winner_user_id !== null) {
+    throw new Error('Winner has already been picked for this draw');
+  }
 
   const prizePool: number = check.rows[0].prize_pool;
 

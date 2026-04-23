@@ -207,6 +207,17 @@ CREATE TABLE push_subscription (
 );
 
 
+-- ── Refresh Tokens ─────────────────────────────────────────────────────────────
+
+CREATE TABLE refresh_token (
+  id           SERIAL PRIMARY KEY,
+  user_id      INTEGER NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+  token_hash   VARCHAR(64) NOT NULL UNIQUE,
+  expires_at   TIMESTAMP NOT NULL,
+  created_at   TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+
 -- ── Platform Settings (single-row config table) ───────────────────────────────
 
 CREATE TABLE platform_settings (
@@ -348,6 +359,11 @@ CREATE INDEX idx_subscription_stripe_id
 
 CREATE INDEX idx_push_sub_user
   ON push_subscription (user_id);
+
+-- ── refresh_token ──────────────────────────────────────────────────────────────
+
+CREATE INDEX idx_refresh_token_user ON refresh_token (user_id);
+CREATE INDEX idx_refresh_token_hash ON refresh_token (token_hash);
 
 -- ── promotional_entry ─────────────────────────────────────────────────────────
 

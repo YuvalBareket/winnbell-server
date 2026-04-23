@@ -63,10 +63,12 @@ export const getNearby = async (
         .json({ message: 'Latitude and Longitude are required' });
     }
 
+    const rawRadius = radius ? parseFloat(radius) : 10;
+    const cappedRadius = Math.min(Math.max(rawRadius, 0.1), 50);
     const businesses = await getNearbyBusinessesService(
       parseFloat(latitude),
       parseFloat(longitude),
-      radius ? parseFloat(radius) : 10,
+      cappedRadius,
     );
 
     res.json(businesses);
@@ -258,7 +260,11 @@ export const updateLogo = async (req: AuthRequest, res: Response): Promise<void>
       return;
     }
     const r2BaseUrl = process.env.R2_PUBLIC_URL;
-    if (r2BaseUrl && !logo_url.startsWith(r2BaseUrl + '/')) {
+    if (!r2BaseUrl) {
+      res.status(500).json({ message: 'Storage not configured' });
+      return;
+    }
+    if (!logo_url.startsWith(r2BaseUrl + '/')) {
       res.status(400).json({ message: 'logo_url must reference the application storage bucket' });
       return;
     }

@@ -81,7 +81,7 @@ export const registerUser = async (
     const token = jwt.sign(
       { id: newUser.id, role: newUser.role, location_id: locationId },
       process.env.JWT_SECRET as string,
-      { expiresIn: '30d' },
+      { expiresIn: '7d' },
     );
 
     return {
@@ -112,7 +112,7 @@ export const loginUser = async (
   const pool = getPool();
 
   const result = await pool.query(
-    `SELECT id, email, password_hash, full_name, role FROM "user" WHERE email = $1`,
+    `SELECT id, email, password_hash, full_name, role FROM "user" WHERE email = $1 AND is_active = true`,
     [email],
   );
   const user = result.rows[0];
@@ -186,7 +186,7 @@ export const loginUser = async (
   const token = jwt.sign(
     { id: user.id, role: user.role, location_id: locationId },
     process.env.JWT_SECRET as string,
-    { expiresIn: '30d' },
+    { expiresIn: '7d' },
   );
 
   return {
@@ -215,10 +215,7 @@ export const syncExternalUser = async (
   const pool = getPool();
   const client = await pool.connect();
   let locationId: number | null = null;
-  const rawRole = metadata?.role || 'User';
-  // Admin role can never be assigned through sync — only via direct DB action by an existing admin.
-  const validRoles = ['User', 'Business'];
-  const role = validRoles.find(r => r.toLowerCase() === rawRole.toLowerCase()) || 'User';
+  const role = 'User';
   const inviteToken = metadata?.inviteToken;
 
   try {
@@ -295,7 +292,7 @@ export const syncExternalUser = async (
     const internalToken = jwt.sign(
       { id: dbUser.id, role: dbUser.role, location_id: locationId },
       process.env.JWT_SECRET as string,
-      { expiresIn: '30d' },
+      { expiresIn: '7d' },
     );
 
     return {

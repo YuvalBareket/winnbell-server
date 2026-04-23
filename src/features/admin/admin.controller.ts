@@ -45,8 +45,12 @@ const MAX_BATCH_QUANTITY = 500;
 
 export const createTickets = async (req: Request, res: Response) => {
   const { businessId, drawId, quantity } = req.body;
-  if (!businessId || !drawId || !quantity || typeof quantity !== 'number' || quantity < 1 || quantity > MAX_BATCH_QUANTITY) {
-    res.status(400).json({ message: `quantity must be a number between 1 and ${MAX_BATCH_QUANTITY}` });
+  if (
+    !Number.isInteger(businessId) || businessId < 1 ||
+    !Number.isInteger(drawId) || drawId < 1 ||
+    !Number.isInteger(quantity) || quantity < 1 || quantity > MAX_BATCH_QUANTITY
+  ) {
+    res.status(400).json({ message: `businessId, drawId, and quantity must be positive integers; quantity max ${MAX_BATCH_QUANTITY}` });
     return;
   }
   try {
@@ -73,7 +77,7 @@ export const getAllDraws = async (req: Request, res: Response) => {
     const draws = await getAllDrawsService();
     res.status(200).json(draws);
   } catch (error) {
-    res.status(500).json({ message: 'Error fetching all draws', error });
+    res.status(500).json({ message: 'Error fetching all draws' });
   }
 };
 
@@ -82,7 +86,7 @@ export const createDraw = async (req: Request, res: Response) => {
     const draw = await createDrawService(req.body);
     res.status(201).json(draw);
   } catch (error) {
-    res.status(500).json({ message: 'Failed to create draw', error });
+    res.status(500).json({ message: 'Failed to create draw' });
   }
 };
 

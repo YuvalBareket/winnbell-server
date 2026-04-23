@@ -22,7 +22,6 @@ export const getDrawHistoryService = async () => {
       d.status,
       d.closed_at,
       wt.code AS winning_ticket_code,
-      u.id AS winner_user_id,
       u.full_name AS winner_name,
       b.name AS winner_business_name,
       bl.name AS winner_location_name
@@ -48,7 +47,6 @@ export const getDrawResultService = async (drawId: number) => {
       d.status,
       d.closed_at,
       wt.code AS winning_ticket_code,
-      u.id AS winner_user_id,
       u.full_name AS winner_name,
       b.name AS winner_business_name,
       bl.name AS winner_location_name

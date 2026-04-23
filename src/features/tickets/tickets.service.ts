@@ -22,7 +22,7 @@ export const activateTicket = async (code: string, userId: number) => {
   const checkResult = await pool.query(`
     SELECT t.id, t.status, t.business_id, t.location_id, d.status as draw_status
     FROM ticket t
-    JOIN draw d ON t.draw_id = d.id
+    LEFT JOIN draw d ON t.draw_id = d.id
     WHERE t.code = $1
   `, [code]);
 
@@ -30,13 +30,12 @@ export const activateTicket = async (code: string, userId: number) => {
   if (!ticket) throw new Error('Invalid ticket code.');
   if (ticket.draw_status?.toUpperCase() !== 'OPEN') throw new Error('The draw for this ticket is already closed.');
 
-  const ownerCheck = await pool.query(
-    `SELECT 1 FROM business b
-     LEFT JOIN business_location bl ON bl.business_id = b.id
-     WHERE (b.id = $1 OR bl.id = $2) AND (b.user_id = $3 OR bl.manager_user_id = $3)
-     LIMIT 1`,
-    [ticket.business_id, ticket.location_id, userId],
-  );
+  const ownerCheck = await pool.query(`
+    SELECT 1 FROM business WHERE id = $1 AND user_id = $2
+    UNION ALL
+    SELECT 1 FROM business_location WHERE id = $3 AND manager_user_id = $2
+    LIMIT 1
+  `, [ticket.business_id, userId, ticket.location_id]);
   if (ownerCheck.rows.length > 0) {
     throw new Error('Business owners and managers cannot activate tickets for their own business.');
   }
@@ -46,10 +45,12 @@ export const activateTicket = async (code: string, userId: number) => {
     SET status = 'Activated',
         activated_by_user_id = $1,
         activated_at = NOW()
-    WHERE code = $2 AND status = 'Issued'
+    WHERE code = $2
+      AND status = 'Issued'
+      AND draw_id IN (SELECT id FROM draw WHERE status = 'Open')
   `, [userId, code]);
 
-  if (updateResult.rowCount === 0) throw new Error('This ticket has already been used.');
+  if (updateResult.rowCount === 0) throw new Error('This ticket has already been used or the draw is no longer open.');
 
   return { message: 'Ticket activated successfully!' };
 };
@@ -196,14 +197,17 @@ export const activateFreeTicket = async (userId: number): Promise<ActivationResu
   try {
     await client.query('BEGIN');
 
-    // Check eligibility with FOR UPDATE to prevent concurrent activations
+    // Advisory lock scoped to this user's free ticket claim — prevents double-claim on empty table.
+    // Lock is acquired atomically within the same query as the eligibility check to avoid an
+    // extra round-trip. LEFT JOIN ensures one row is always returned (activated_at = NULL when
+    // no prior usage exists), which is equivalent to the original behaviour.
     const eligibilityResult = await client.query(`
-      SELECT activated_at
-      FROM free_ticket_usage
-      WHERE user_id = $1
-      ORDER BY activated_at DESC
-      LIMIT 1
-      FOR UPDATE
+      SELECT u.activated_at
+      FROM (SELECT pg_advisory_xact_lock($1)) AS _lock
+      LEFT JOIN LATERAL (
+        SELECT activated_at FROM free_ticket_usage WHERE user_id = $1
+        ORDER BY activated_at DESC LIMIT 1
+      ) AS u ON true
     `, [userId]);
 
     const lastUsage = eligibilityResult.rows[0];
@@ -315,7 +319,7 @@ export const submitReceiptEntryService = async (
 
     // Find open draw early so drawId is available for quarantine syncs below
     const drawResult = await client.query(
-      `SELECT id, created_at as draw_opened_at FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1 FOR UPDATE`,
+      `SELECT id, created_at as draw_opened_at FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1`,
     );
     if (drawResult.rows.length === 0) throw new Error('No active draw found.');
     const drawId = drawResult.rows[0].id;

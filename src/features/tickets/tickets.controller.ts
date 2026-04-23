@@ -86,6 +86,18 @@ export const submitReceiptEntry = async (req: AuthRequest, res: Response) => {
       return;
     }
 
+    if (transactionDate !== undefined) {
+      if (typeof transactionDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(transactionDate)) {
+        res.status(400).json({ message: 'transactionDate must be in YYYY-MM-DD format' });
+        return;
+      }
+      const parsed = new Date(transactionDate);
+      if (isNaN(parsed.getTime())) {
+        res.status(400).json({ message: 'transactionDate is not a valid date' });
+        return;
+      }
+    }
+
     const result = await ticketService.submitReceiptEntryService(userId, {
       locationId: Number(locationId),
       receiptIdentifier: String(receiptIdentifier).trim(),

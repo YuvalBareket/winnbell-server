@@ -61,14 +61,25 @@ export const sendToUser = async (userId: number, payload: NotificationPayload): 
 
 export const sendToAll = async (payload: NotificationPayload): Promise<void> => {
   const pool = getPool();
-  const result = await pool.query(`SELECT endpoint, p256dh, auth FROM push_subscription`);
+  const BATCH_SIZE = 500;
+  let offset = 0;
 
-  await Promise.allSettled(
-    result.rows.map((sub) =>
-      webpush.sendNotification(
-        { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
-        JSON.stringify(payload),
+  while (true) {
+    const result = await pool.query(
+      `SELECT endpoint, p256dh, auth FROM push_subscription ORDER BY id LIMIT $1 OFFSET $2`,
+      [BATCH_SIZE, offset],
+    );
+    if (result.rows.length === 0) break;
+
+    await Promise.allSettled(
+      result.rows.map((sub) =>
+        webpush.sendNotification(
+          { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
+          JSON.stringify(payload),
+        ),
       ),
-    ),
-  );
+    );
+    offset += result.rows.length;
+    if (result.rows.length < BATCH_SIZE) break;
+  }
 };

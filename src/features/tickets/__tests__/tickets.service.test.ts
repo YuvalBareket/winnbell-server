@@ -1,51 +1,38 @@
 /**
- * QA/Security Tests — tickets.service.ts
+ * QA/Security Tests — tickets.service.ts (PostgreSQL)
  *
- * Strategy: mock getPool and sql so no DB connection is needed.
- * We test:
- *   1. activateTicket — code format guard (controller-level regex)
- *   2. activateTicket — atomic update pattern (WHERE status='Issued')
- *   3. activateFreeTicket — weekly limit enforcement inside transaction
- *   4. generateGlobalUniqueCode — loop cap (max 10 attempts, throws on exhaustion)
+ * Mock pattern: pool.query(sql, params) → { rows, rowCount }
+ *               pool.connect() → client with query / release
  */
 
-// ---- mock the DB module ----
+// ---- mock the DB module before any imports ----
 const mockQuery = jest.fn();
-const mockInput = jest.fn();
-const mockRequest = jest.fn();
-const mockBegin = jest.fn();
-const mockCommit = jest.fn();
-const mockRollback = jest.fn();
+const mockClientQuery = jest.fn();
+const mockRelease = jest.fn();
 
-// Build a chainable request mock
-const buildRequest = () => {
-  const req: Record<string, unknown> = {};
-  req.input = jest.fn().mockReturnValue(req);
-  req.query = mockQuery;
-  return req;
-};
-
-const mockTransactionRequest = jest.fn().mockImplementation(() => buildRequest());
-
-const mockTransaction = {
-  begin: mockBegin,
-  commit: mockCommit,
-  rollback: mockRollback,
-  request: mockTransactionRequest,
-};
-
-const mockPool = {
-  request: jest.fn().mockImplementation(() => buildRequest()),
+const mockClient = {
+  query: mockClientQuery,
+  release: mockRelease,
 };
 
 jest.mock('../../../shared/db/db.js', () => ({
-  getPool: jest.fn().mockReturnValue(mockPool),
-  sql: {
-    Transaction: jest.fn().mockImplementation(() => mockTransaction),
-    VarChar: jest.fn((n: number) => `VarChar(${n})`),
-    Int: 'Int',
-    NVarChar: jest.fn((n?: number) => `NVarChar${n ? `(${n})` : ''}`),
-  },
+  getPool: jest.fn().mockReturnValue({
+    query: mockQuery,
+    connect: jest.fn().mockResolvedValue(mockClient),
+  }),
+}));
+
+// risk / ocr dependencies touch the DB too — stub them out entirely
+jest.mock('../../risk/risk.service.js', () => ({
+  evaluateUserRisk: jest.fn().mockResolvedValue({ delta: 0, totalScore: 0, level: 'low', flags: [] }),
+  updateUserRiskScore: jest.fn().mockResolvedValue(undefined),
+  checkDuplicateReceiptIdentifier: jest.fn().mockResolvedValue({ isDuplicate: false }),
+  countsAgainstCap: jest.fn().mockReturnValue(true),
+  syncUserQuarantineState: jest.fn().mockResolvedValue(undefined),
+}));
+
+jest.mock('../../ocr/ocr.service.js', () => ({
+  validateReceiptAsync: jest.fn(),
 }));
 
 import { activateTicket, activateFreeTicket, generateGlobalUniqueCode } from '../tickets.service';
@@ -54,35 +41,32 @@ import { activateTicket, activateFreeTicket, generateGlobalUniqueCode } from '..
 // Helpers
 // ─────────────────────────────────────────────
 
-/** Build a pool mock that returns specific query results in sequence. */
-const setupPoolQueries = (...responses: Array<{ recordset: unknown[]; rowsAffected?: number[] }>) => {
-  let callIndex = 0;
+/** Sequence of responses for pool.query (non-transaction path). */
+const setupPoolQueries = (...responses: Array<{ rows: unknown[]; rowCount?: number | null }>) => {
+  let i = 0;
   mockQuery.mockImplementation(() => {
-    const resp = responses[callIndex] ?? responses[responses.length - 1];
-    callIndex++;
-    return Promise.resolve(resp);
+    const res = responses[i] ?? responses[responses.length - 1];
+    i++;
+    return Promise.resolve(res);
   });
-  mockTransactionRequest.mockImplementation(() => {
-    const req = buildRequest();
-    (req as any).query = mockQuery;
-    return req;
-  });
-  mockPool.request.mockImplementation(() => {
-    const req = buildRequest();
-    (req as any).query = mockQuery;
-    return req;
+};
+
+/** Sequence of responses for client.query (transaction path). */
+const setupClientQueries = (...responses: Array<{ rows: unknown[]; rowCount?: number | null }>) => {
+  let i = 0;
+  mockClientQuery.mockImplementation(() => {
+    const res = responses[i] ?? responses[responses.length - 1];
+    i++;
+    return Promise.resolve(res);
   });
 };
 
 beforeEach(() => {
   jest.clearAllMocks();
-  mockBegin.mockResolvedValue(undefined);
-  mockCommit.mockResolvedValue(undefined);
-  mockRollback.mockResolvedValue(undefined);
 });
 
 // ─────────────────────────────────────────────
-// 1. Input validation — controller regex (mirrors what controller enforces)
+// 1. Input validation — controller regex
 // ─────────────────────────────────────────────
 describe('Ticket code format validation (controller regex)', () => {
   const CODE_REGEX = /^[A-Z0-9]{6,8}$/;
@@ -99,7 +83,7 @@ describe('Ticket code format validation (controller regex)', () => {
     expect(CODE_REGEX.test('INVALID!!!')).toBe(false);
   });
 
-  test('rejects SQL injection attempt', () => {
+  test('rejects SQL injection attempt in code field', () => {
     expect(CODE_REGEX.test('ABC"; DROP TABLE ticket; --')).toBe(false);
   });
 
@@ -126,55 +110,59 @@ describe('Ticket code format validation (controller regex)', () => {
 describe('activateTicket — atomic update pattern', () => {
   test('throws "Invalid ticket code" when ticket not found', async () => {
     setupPoolQueries(
-      { recordset: [] }, // checkResult — ticket not found
+      { rows: [] }, // ticket SELECT — not found
     );
     await expect(activateTicket('ABC123', 1)).rejects.toThrow('Invalid ticket code.');
   });
 
   test('throws when draw is not Open', async () => {
     setupPoolQueries(
-      { recordset: [{ id: 1, status: 'Issued', draw_status: 'Closed' }] },
+      { rows: [{ id: 1, status: 'Issued', business_id: 5, location_id: 2, draw_status: 'Closed' }] },
     );
     await expect(activateTicket('ABC123', 1)).rejects.toThrow('already closed');
   });
 
+  test('throws "Business owners and managers cannot activate" when owner check hits a row', async () => {
+    setupPoolQueries(
+      { rows: [{ id: 1, status: 'Issued', business_id: 5, location_id: 2, draw_status: 'Open' }] },
+      { rows: [{ '?column?': 1 }] }, // ownerCheck returns a row → owner
+    );
+    await expect(activateTicket('ABC123', 1)).rejects.toThrow('Business owners and managers cannot activate');
+  });
+
   test('throws "already been used" when atomic UPDATE affects 0 rows (race condition guard)', async () => {
     setupPoolQueries(
-      { recordset: [{ id: 1, status: 'Issued', draw_status: 'Open' }] }, // checkResult
-      { recordset: [], rowsAffected: [0] },                              // updateResult — 0 rows
+      { rows: [{ id: 1, status: 'Issued', business_id: 5, location_id: 2, draw_status: 'Open' }] },
+      { rows: [] },          // ownerCheck — not an owner
+      { rows: [], rowCount: 0 }, // UPDATE — 0 rows affected
     );
     await expect(activateTicket('ABC123', 1)).rejects.toThrow('already been used');
   });
 
   test('succeeds when atomic UPDATE affects 1 row', async () => {
     setupPoolQueries(
-      { recordset: [{ id: 1, status: 'Issued', draw_status: 'Open' }] }, // checkResult
-      { recordset: [], rowsAffected: [1] },                              // updateResult — 1 row
+      { rows: [{ id: 1, status: 'Issued', business_id: 5, location_id: 2, draw_status: 'Open' }] },
+      { rows: [] },           // ownerCheck — not an owner
+      { rows: [], rowCount: 1 }, // UPDATE — 1 row affected
     );
     const result = await activateTicket('ABC123', 1);
     expect(result.message).toBe('Ticket activated successfully!');
   });
 
-  test('UPDATE query uses WHERE status=Issued to enforce atomicity', async () => {
-    // Capture the SQL query string
-    const queries: string[] = [];
-    mockPool.request.mockImplementation(() => {
-      const req: Record<string, unknown> = {};
-      req.input = jest.fn().mockReturnValue(req);
-      req.query = jest.fn().mockImplementation((sql: string) => {
-        queries.push(sql);
-        if (queries.length === 1) {
-          return Promise.resolve({ recordset: [{ id: 1, status: 'Issued', draw_status: 'Open' }] });
-        }
-        return Promise.resolve({ recordset: [], rowsAffected: [1] });
-      });
-      return req;
+  test('UPDATE query uses WHERE status = Issued to enforce atomicity', async () => {
+    const capturedSqls: string[] = [];
+    mockQuery.mockImplementation((sql: string) => {
+      capturedSqls.push(sql);
+      const n = capturedSqls.length;
+      if (n === 1) return Promise.resolve({ rows: [{ id: 1, status: 'Issued', business_id: 5, location_id: 2, draw_status: 'Open' }] });
+      if (n === 2) return Promise.resolve({ rows: [] }); // ownerCheck
+      return Promise.resolve({ rows: [], rowCount: 1 });
     });
 
-    await activateTicket('VALID01', 42);
-    const updateQuery = queries.find(q => q.includes('UPDATE'));
-    expect(updateQuery).toBeDefined();
-    expect(updateQuery).toMatch(/WHERE code = @code AND status = 'Issued'/);
+    await activateTicket('VALID001', 42);
+    const updateSql = capturedSqls.find(q => q.includes('UPDATE'));
+    expect(updateSql).toBeDefined();
+    expect(updateSql).toMatch(/status = 'Issued'/);
   });
 });
 
@@ -182,153 +170,132 @@ describe('activateTicket — atomic update pattern', () => {
 // 3. activateFreeTicket — weekly limit enforcement
 // ─────────────────────────────────────────────
 describe('activateFreeTicket — weekly limit enforcement', () => {
-  test('throws "Weekly limit reached" when last usage is within 7 days', async () => {
-    const recentDate = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000); // 2 days ago
+  /**
+   * The service calls client.query in this order:
+   *   0: BEGIN
+   *   1: eligibility SELECT (FOR UPDATE)
+   *   2: draw SELECT
+   *   3: INSERT free_ticket_usage
+   *   4: generateGlobalUniqueCode — SELECT COUNT(*) FROM ticket WHERE code = $1
+   *   5: INSERT ticket RETURNING id
+   *   6: COMMIT
+   */
 
-    mockTransactionRequest.mockImplementation(() => {
-      const req: Record<string, unknown> = {};
-      req.input = jest.fn().mockReturnValue(req);
-      req.query = jest.fn().mockResolvedValue({
-        recordset: [{ activated_at: recentDate.toISOString() }],
-      });
-      return req;
-    });
+  test('throws "Weekly limit reached" when last usage is within the current calendar week', async () => {
+    // A date that is within the current week (today)
+    const recentDate = new Date().toISOString();
 
+    setupClientQueries(
+      { rows: [] },                                   // BEGIN
+      { rows: [{ activated_at: recentDate }] },       // eligibility — used this week
+    );
     await expect(activateFreeTicket(1)).rejects.toThrow('Weekly limit reached');
+    // ROLLBACK must be issued on any thrown error
+    const rollbackCall = mockClientQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql === 'ROLLBACK',
+    );
+    expect(rollbackCall).toBeDefined();
   });
 
-  test('proceeds past eligibility check when last usage is more than 7 days ago', async () => {
-    const oldDate = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000); // 8 days ago
-    let callCount = 0;
+  test('throws "No active draw found" when no open draw exists', async () => {
+    setupClientQueries(
+      { rows: [] },  // BEGIN
+      { rows: [] },  // eligibility — no prior usage
+      { rows: [] },  // draw SELECT — no open draw
+    );
+    await expect(activateFreeTicket(1)).rejects.toThrow('No active draw found');
+  });
 
-    mockTransactionRequest.mockImplementation(() => {
-      const req: Record<string, unknown> = {};
-      req.input = jest.fn().mockReturnValue(req);
-      req.query = jest.fn().mockImplementation(() => {
-        callCount++;
-        if (callCount === 1) {
-          // eligibility check — old usage
-          return Promise.resolve({ recordset: [{ activated_at: oldDate.toISOString() }] });
-        }
-        if (callCount === 2) {
-          // draw lookup
-          return Promise.resolve({ recordset: [{ id: 5 }] });
-        }
-        if (callCount === 3) {
-          // insert free_ticket_usage
-          return Promise.resolve({ recordset: [] });
-        }
-        if (callCount === 4) {
-          // generateGlobalUniqueCode — uniqueness check
-          return Promise.resolve({ recordset: [{ count: 0 }] });
-        }
-        // ticket INSERT
-        return Promise.resolve({ recordset: [{ id: 99 }] });
-      });
-      return req;
-    });
+  test('succeeds when user has never activated a free ticket', async () => {
+    setupClientQueries(
+      { rows: [] },               // BEGIN
+      { rows: [] },               // eligibility — no prior usage
+      { rows: [{ id: 5 }] },     // draw SELECT
+      { rows: [] },               // INSERT free_ticket_usage
+      { rows: [{ count: '0' }] }, // generateGlobalUniqueCode uniqueness check
+      { rows: [{ id: 77 }] },    // INSERT ticket RETURNING id
+      { rows: [] },               // COMMIT
+    );
+    const result = await activateFreeTicket(1);
+    expect(result.success).toBe(true);
+    expect(result.ticketId).toBe(77);
+  });
 
+  test('proceeds when last free ticket was used more than 7 days ago (different calendar week)', async () => {
+    // Use a date guaranteed to be in a prior week: 14 days ago
+    const oldDate = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+    setupClientQueries(
+      { rows: [] },                               // BEGIN
+      { rows: [{ activated_at: oldDate }] },      // eligibility — old, not this week
+      { rows: [{ id: 3 }] },                     // draw SELECT
+      { rows: [] },                               // INSERT free_ticket_usage
+      { rows: [{ count: '0' }] },                // uniqueness check
+      { rows: [{ id: 99 }] },                    // INSERT ticket RETURNING id
+      { rows: [] },                              // COMMIT
+    );
     const result = await activateFreeTicket(1);
     expect(result.success).toBe(true);
     expect(result.ticketId).toBe(99);
   });
 
-  test('allows activation when no previous usage exists', async () => {
-    let callCount = 0;
-
-    mockTransactionRequest.mockImplementation(() => {
-      const req: Record<string, unknown> = {};
-      req.input = jest.fn().mockReturnValue(req);
-      req.query = jest.fn().mockImplementation(() => {
-        callCount++;
-        if (callCount === 1) return Promise.resolve({ recordset: [] }); // no prior usage
-        if (callCount === 2) return Promise.resolve({ recordset: [{ id: 3 }] }); // draw
-        if (callCount === 3) return Promise.resolve({ recordset: [] }); // usage insert
-        if (callCount === 4) return Promise.resolve({ recordset: [{ count: 0 }] }); // code unique
-        return Promise.resolve({ recordset: [{ id: 77 }] }); // ticket insert
-      });
-      return req;
+  test('ROLLBACK is called when an unexpected error occurs mid-transaction', async () => {
+    mockClientQuery.mockImplementation((sql: string) => {
+      if (sql === 'BEGIN') return Promise.resolve({ rows: [] });
+      return Promise.reject(new Error('DB failure'));
     });
-
-    const result = await activateFreeTicket(1);
-    expect(result.success).toBe(true);
-  });
-
-  test('throws when no active draw exists', async () => {
-    let callCount = 0;
-
-    mockTransactionRequest.mockImplementation(() => {
-      const req: Record<string, unknown> = {};
-      req.input = jest.fn().mockReturnValue(req);
-      req.query = jest.fn().mockImplementation(() => {
-        callCount++;
-        if (callCount === 1) return Promise.resolve({ recordset: [] }); // no prior usage
-        return Promise.resolve({ recordset: [] }); // no draw
-      });
-      return req;
-    });
-
-    await expect(activateFreeTicket(1)).rejects.toThrow('No active draw found');
-  });
-
-  test('rollback is called on error', async () => {
-    mockTransactionRequest.mockImplementation(() => {
-      const req: Record<string, unknown> = {};
-      req.input = jest.fn().mockReturnValue(req);
-      req.query = jest.fn().mockRejectedValue(new Error('DB failure'));
-      return req;
-    });
-
     await expect(activateFreeTicket(1)).rejects.toThrow('DB failure');
-    expect(mockRollback).toHaveBeenCalledTimes(1);
+    const rollbackCalls = mockClientQuery.mock.calls.filter(
+      ([sql]: [string]) => sql === 'ROLLBACK',
+    );
+    expect(rollbackCalls.length).toBeGreaterThanOrEqual(1);
+  });
+
+  test('client.release() is always called (finally block)', async () => {
+    setupClientQueries(
+      { rows: [] }, // BEGIN
+      { rows: [] }, // eligibility
+      { rows: [] }, // draw — no open draw → throws
+    );
+    await expect(activateFreeTicket(1)).rejects.toThrow();
+    expect(mockRelease).toHaveBeenCalledTimes(1);
   });
 });
 
 // ─────────────────────────────────────────────
 // 4. generateGlobalUniqueCode — loop cap
 // ─────────────────────────────────────────────
-describe('generateGlobalUniqueCode — loop cap', () => {
+describe('generateGlobalUniqueCode — loop cap and uniqueness', () => {
   test('throws after 10 failed attempts (collision exhaustion)', async () => {
-    // Always return count > 0 so every generated code "collides"
-    mockPool.request.mockImplementation(() => {
-      const req: Record<string, unknown> = {};
-      req.input = jest.fn().mockReturnValue(req);
-      req.query = jest.fn().mockResolvedValue({ recordset: [{ count: 1 }] });
-      return req;
-    });
-
+    // Every uniqueness check returns count > 0 → collision every time
+    mockQuery.mockResolvedValue({ rows: [{ count: '1' }] });
     await expect(generateGlobalUniqueCode()).rejects.toThrow(
       'Failed to generate a unique ticket code',
     );
+    expect(mockQuery).toHaveBeenCalledTimes(10);
   });
 
-  test('returns a code on first unique attempt', async () => {
-    mockPool.request.mockImplementation(() => {
-      const req: Record<string, unknown> = {};
-      req.input = jest.fn().mockReturnValue(req);
-      req.query = jest.fn().mockResolvedValue({ recordset: [{ count: 0 }] });
-      return req;
-    });
-
+  test('returns an 8-char alphanumeric code on first unique attempt', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ count: '0' }] });
     const code = await generateGlobalUniqueCode();
     expect(code).toHaveLength(8);
     expect(/^[A-Z0-9]{8}$/.test(code)).toBe(true);
   });
 
-  test('retries and succeeds on second attempt', async () => {
-    let attempt = 0;
-    mockPool.request.mockImplementation(() => {
-      const req: Record<string, unknown> = {};
-      req.input = jest.fn().mockReturnValue(req);
-      req.query = jest.fn().mockImplementation(() => {
-        attempt++;
-        // First call collides, second is free
-        return Promise.resolve({ recordset: [{ count: attempt === 1 ? 1 : 0 }] });
-      });
-      return req;
-    });
-
+  test('retries and succeeds on second attempt after one collision', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ count: '1' }] }) // collision
+      .mockResolvedValueOnce({ rows: [{ count: '0' }] }); // unique
     const code = await generateGlobalUniqueCode();
     expect(code).toHaveLength(8);
+    expect(mockQuery).toHaveBeenCalledTimes(2);
+  });
+
+  test('uses provided client instead of pool when a client is passed', async () => {
+    const dedicatedClient = { query: jest.fn().mockResolvedValue({ rows: [{ count: '0' }] }) };
+    const code = await generateGlobalUniqueCode(dedicatedClient as any);
+    expect(code).toHaveLength(8);
+    // client.query should have been called, NOT the pool mockQuery
+    expect(dedicatedClient.query).toHaveBeenCalledTimes(1);
+    expect(mockQuery).not.toHaveBeenCalled();
   });
 });

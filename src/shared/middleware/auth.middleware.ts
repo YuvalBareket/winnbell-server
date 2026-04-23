@@ -44,7 +44,7 @@ export const authenticateToken = async (
     // Verify the account is still active in the database (catches banned/deactivated users)
     const pool = getPool();
     const userCheck = await pool.query(
-      `SELECT is_active FROM "user" WHERE id = $1`,
+      `SELECT is_active, role FROM "user" WHERE id = $1`,
       [decoded.id],
     );
     if (!userCheck.rows[0]?.is_active) {
@@ -52,7 +52,7 @@ export const authenticateToken = async (
       return;
     }
 
-    req.user = decoded;
+    req.user = { ...decoded, role: userCheck.rows[0].role };
     next();
   } catch (error) {
     res.status(403).json({ message: 'Invalid or expired token.' });

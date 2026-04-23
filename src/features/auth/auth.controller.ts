@@ -62,12 +62,7 @@ export const syncUser = async (req: Request, res: Response): Promise<void> => {
     const fullName = `${clerkUser.firstName || ''} ${clerkUser.lastName || ''}`.trim();
     const { inviteToken } = req.body;
 
-    // Role is NEVER accepted from the request body — only from Clerk metadata (Business/User only, never Admin).
-    // Admin role can only be assigned directly in the database by an existing admin.
-    const role = (clerkUser.unsafeMetadata?.role as string) || 'User';
-
     const result = await authService.syncExternalUser(payload.sub, email, fullName, {
-      role,
       inviteToken: inviteToken || (clerkUser.unsafeMetadata?.inviteToken as string) || null,
     });
 
@@ -123,7 +118,6 @@ export const handleClerkWebhook = async (req: Request, res: Response): Promise<v
 
     try {
       await authService.syncExternalUser(id, email, fullName, {
-        role: typeof unsafe_metadata?.role === 'string' ? unsafe_metadata.role : undefined,
         inviteToken: typeof unsafe_metadata?.inviteToken === 'string' ? unsafe_metadata.inviteToken : null,
       });
     } catch (dbErr: unknown) {
