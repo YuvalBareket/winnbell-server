@@ -19,6 +19,8 @@ import {
   getPlatformSettingsService,
   updatePlatformSettingsService,
   getDrawBusinessesService,
+  getAdminAnalyticsService,
+  getLocationBreakdownService,
 } from './admin.service.js';
 
 export const getDashboardData = async (req: Request, res: Response) => {
@@ -245,5 +247,48 @@ export const deactivatePromoCode = async (req: Request, res: Response) => {
   } catch (error) {
     console.error('[admin.deactivatePromoCode]', error);
     res.status(500).json({ message: 'Failed to deactivate promo code' });
+  }
+};
+
+export const getAnalytics = async (req: Request, res: Response) => {
+  const rawBiz = req.query.businessId;
+  const businessId = rawBiz ? parseInt(rawBiz as string, 10) : undefined;
+  if (rawBiz !== undefined && (isNaN(businessId!) || businessId! < 1)) {
+    res.status(400).json({ message: 'businessId must be a positive integer' });
+    return;
+  }
+  try {
+    const data = await getAdminAnalyticsService(businessId);
+    res.json(data);
+  } catch (error) {
+    console.error('[admin.getAnalytics]', error);
+    res.status(500).json({ message: 'Failed to fetch analytics' });
+  }
+};
+
+export const getLocationBreakdown = async (req: Request, res: Response) => {
+  const rawBiz = req.query.businessId;
+  const rawPage = req.query.page;
+  const rawLimit = req.query.limit;
+  const search = typeof req.query.search === 'string' ? req.query.search : undefined;
+
+  const businessId = rawBiz ? parseInt(rawBiz as string, 10) : undefined;
+  const page = rawPage ? parseInt(rawPage as string, 10) : 1;
+  const limit = rawLimit ? Math.min(parseInt(rawLimit as string, 10), 100) : 25;
+
+  if (rawBiz !== undefined && (isNaN(businessId!) || businessId! < 1)) {
+    res.status(400).json({ message: 'businessId must be a positive integer' });
+    return;
+  }
+  if (isNaN(page) || page < 1 || isNaN(limit) || limit < 1) {
+    res.status(400).json({ message: 'Invalid page or limit' });
+    return;
+  }
+  try {
+    const data = await getLocationBreakdownService({ businessId, search, page, limit });
+    res.json(data);
+  } catch (error) {
+    console.error('[admin.getLocationBreakdown]', error);
+    res.status(500).json({ message: 'Failed to fetch location breakdown' });
   }
 };

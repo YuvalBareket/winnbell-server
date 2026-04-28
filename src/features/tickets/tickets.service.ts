@@ -217,7 +217,14 @@ export const activateFreeTicket = async (userId: number): Promise<ActivationResu
       weekStart.setDate(now.getDate() - now.getDay());
       weekStart.setHours(0, 0, 0, 0);
       const usedThisWeek = new Date(lastUsage.activated_at) >= weekStart;
-      if (usedThisWeek) throw new Error('Weekly limit reached. Please wait until your next available date.');
+      if (usedThisWeek) {
+        await client.query(
+          `INSERT INTO free_ticket_usage (user_id, status, rejection_reason, entries_created) VALUES ($1, 'rejected', 'weekly_limit_reached', 0)`,
+          [userId]
+        );
+        await client.query('COMMIT');
+        throw new Error('Weekly limit reached. Please wait until your next available date.');
+      }
     }
 
     const drawResult = await client.query(`
@@ -225,15 +232,25 @@ export const activateFreeTicket = async (userId: number): Promise<ActivationResu
     `);
 
     const activeDrawId = drawResult.rows[0]?.id;
-    if (!activeDrawId) throw new Error('No active draw found. Please try again later.');
+    if (!activeDrawId) {
+      await client.query(
+        `INSERT INTO free_ticket_usage (user_id, status, rejection_reason, entries_created) VALUES ($1, 'rejected', 'campaign_ended', 0)`,
+        [userId]
+      );
+      await client.query('COMMIT');
+      throw new Error('No active draw found. Please try again later.');
+    }
 
-    await client.query(`INSERT INTO free_ticket_usage (user_id) VALUES ($1)`, [userId]);
+    await client.query(
+      `INSERT INTO free_ticket_usage (user_id, draw_id, status, entries_created) VALUES ($1, $2, 'approved', 1)`,
+      [userId, activeDrawId]
+    );
 
     const ticketCode = await generateGlobalUniqueCode(client);
 
     const ticketResult = await client.query(`
-      INSERT INTO ticket (code, status, business_id, activated_by_user_id, draw_id, activated_at)
-      VALUES ($1, 'Activated', NULL, $2, $3, NOW())
+      INSERT INTO ticket (code, status, entry_source, business_id, activated_by_user_id, draw_id, activated_at)
+      VALUES ($1, 'Activated', 'free', NULL, $2, $3, NOW())
       RETURNING id
     `, [ticketCode, userId, activeDrawId]);
 
@@ -292,7 +309,7 @@ export const submitReceiptEntryService = async (
        WHERE activated_by_user_id = $1 AND entry_source = 'receipt' AND activated_at >= NOW() - INTERVAL '24 hours'`,
       [userId],
     );
-    if (parseInt(dailyCountResult.rows[0].count, 10) >= 10) {
+    if (parseInt(dailyCountResult.rows[0].count, 10) >= 5) {
       throw new Error('You have reached the daily receipt submission limit. Please try again tomorrow.');
     }
 

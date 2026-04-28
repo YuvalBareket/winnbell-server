@@ -27,4 +27,7 @@ router.get('/promo-codes', adminController.getPromoCodes);
 router.post('/promo-codes', adminController.createPromoCode);
 router.patch('/promo-codes/:id/deactivate', adminController.deactivatePromoCode);
 
+router.get('/analytics', adminController.getAnalytics);
+router.get('/analytics/locations', adminController.getLocationBreakdown);
+
 export default router;

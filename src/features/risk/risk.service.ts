@@ -35,9 +35,14 @@ export interface RiskContext {
  * Also applies weekly decay lazily if no flagged event in the last 7 days.
  *
  * Signals:
- *   - Cross-user duplicate identifier      +6
- *   - Submission velocity ≥7 in 24 h       +4
+ *   - Cross-user duplicate identifier      +2–4 (scaled by risk level)
+ *   - Submission velocity ≥4 in 24 h       +4   (near-cap daily rate)
  *   - Submission velocity ≥3 in 24 h       +2
+ *   - Sustained weekly volume  ≥20 in 7d   +2   (avg 3+/day for a week)
+ *   - Sustained monthly volume ≥60 in 30d  +3   (avg 2+/day for a month)
+ *   - Rapid submission <30 s at same biz   +3
+ *   - Sequential identifier guessing       +4
+ *   - Threshold probing (amount swap)      +4
  *   - Amount >3× business 30-day average   +2
  *   - Typed >4 chars in <800 ms            +3
  */
@@ -84,6 +89,8 @@ export const evaluateUserRisk = async (
     }
 
     // Signal 2: submission velocity (last 24 hours)
+    // Daily hard cap is 5, so the max prior count seen here is 4.
+    // Distribute penalty reduction across 3+ businesses to avoid penalising multi-shop users.
     const velocityResult = await pool.query(
       `SELECT COUNT(*) AS count, COUNT(DISTINCT business_id) AS distinct_businesses FROM ticket
        WHERE activated_by_user_id = $1 AND entry_source = 'receipt' AND activated_at >= NOW() - INTERVAL '24 hours'`,
@@ -93,12 +100,38 @@ export const evaluateUserRisk = async (
     const distinctBusinesses = parseInt(velocityResult.rows[0].distinct_businesses, 10);
     // Only apply full velocity penalty if concentrated at few businesses
     const adjustedCount = distinctBusinesses >= 3 ? Math.floor(recentCount / 2) : recentCount;
-    if (adjustedCount >= 7) {
+    if (adjustedCount >= 4) {
       delta += 4;
       flags.push('high_submission_velocity');
     } else if (adjustedCount >= 3) {
       delta += 2;
       flags.push('elevated_submission_velocity');
+    }
+
+    // Signal 2b: sustained weekly velocity — flags users who max the cap daily for a week
+    const weeklyResult = await pool.query(
+      `SELECT COUNT(*) AS count FROM ticket
+       WHERE activated_by_user_id = $1 AND entry_source = 'receipt' AND activated_at >= NOW() - INTERVAL '7 days'`,
+      [userId],
+    );
+    const weeklyCount = parseInt(weeklyResult.rows[0].count, 10);
+    if (weeklyCount >= 20) {
+      // Averaging 3+ receipts/day for a week — consistent max-cap behaviour
+      delta += 2;
+      flags.push('sustained_weekly_velocity');
+    }
+
+    // Signal 2c: sustained monthly volume — flags heavy systemic exploitation over 30 days
+    const monthlyResult = await pool.query(
+      `SELECT COUNT(*) AS count FROM ticket
+       WHERE activated_by_user_id = $1 AND entry_source = 'receipt' AND activated_at >= NOW() - INTERVAL '30 days'`,
+      [userId],
+    );
+    const monthlyCount = parseInt(monthlyResult.rows[0].count, 10);
+    if (monthlyCount >= 60) {
+      // Averaging 2+ receipts/day for a full month — well beyond natural shopping behaviour
+      delta += 3;
+      flags.push('sustained_monthly_volume');
     }
 
     // Signal: rapid submission — last ticket submitted < 30 seconds ago at same business

@@ -168,9 +168,14 @@ ALTER TABLE draw
 -- ── Free Ticket Usage (weekly free entry tracking) ────────────────────────────
 
 CREATE TABLE free_ticket_usage (
-  id           SERIAL PRIMARY KEY,
-  user_id      INTEGER NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
-  activated_at TIMESTAMP NOT NULL DEFAULT NOW()
+  id               SERIAL PRIMARY KEY,
+  user_id          INTEGER NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+  draw_id          INTEGER NULL REFERENCES draw(id) ON DELETE SET NULL,
+  status           VARCHAR(20) NOT NULL DEFAULT 'approved'
+                     CHECK (status IN ('approved', 'rejected')),
+  rejection_reason VARCHAR(50) NULL,
+  entries_created  SMALLINT NOT NULL DEFAULT 1,
+  activated_at     TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
 
@@ -237,7 +242,7 @@ VALUES (1, NULL);
 
 CREATE TABLE promotional_code (
   id         SERIAL PRIMARY KEY,
-  -- Must start with PROMO_ and be at least 8 characters (enforced in service layer)
+  -- 3-100 chars, letters/numbers/hyphens/underscores only (enforced in service layer)
   code       VARCHAR(100) NOT NULL UNIQUE,
   is_active  BOOLEAN NOT NULL DEFAULT TRUE,
   -- NULL = unlimited redemptions; positive integer = hard cap
@@ -347,6 +352,11 @@ CREATE INDEX idx_draw_entry_draw
 -- Eligibility check: latest usage per user (ORDER BY activated_at DESC LIMIT 1)
 CREATE INDEX idx_ftu_user_time
   ON free_ticket_usage (user_id, activated_at DESC);
+
+-- Analytics: AMOE request rate per draw (approved vs rejected)
+CREATE INDEX idx_ftu_draw_status
+  ON free_ticket_usage (draw_id, status, activated_at)
+  WHERE draw_id IS NOT NULL;
 
 -- ── subscription ──────────────────────────────────────────────────────────────
 

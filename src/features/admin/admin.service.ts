@@ -354,8 +354,11 @@ export const createPromoCodeService = async (
 ): Promise<{ id: number; code: string }> => {
   const pool = getPool();
   const normalized = code.toUpperCase().trim();
-  if (!normalized.startsWith('PROMO_') || normalized.length < 8) {
-    throw new Error('Code must start with PROMO_ and be at least 8 characters.');
+  if (!normalized || normalized.length < 3 || normalized.length > 100) {
+    throw new Error('Code must be between 3 and 100 characters.');
+  }
+  if (!/^[A-Z0-9_-]+$/.test(normalized)) {
+    throw new Error('Code may only contain letters, numbers, hyphens, and underscores.');
   }
   if (maxUses !== undefined && maxUses !== null && (!Number.isInteger(maxUses) || maxUses < 1)) {
     throw new Error('max_uses must be a positive integer or null (unlimited).');
@@ -375,4 +378,229 @@ export const createPromoCodeService = async (
 export const deactivatePromoCodeService = async (id: number): Promise<void> => {
   const pool = getPool();
   await pool.query(`UPDATE promotional_code SET is_active = false WHERE id = $1`, [id]);
+};
+
+export const getAdminAnalyticsService = async (businessId?: number) => {
+  const pool = getPool();
+  // $1 is used as the optional business filter across all filterable queries.
+  // NULL means no filter (all businesses).
+  const biz = businessId ?? null;
+
+  const [
+    entrySrcRes,
+    promoCountRes,
+    amoeRes,
+    fraudRes,
+    quarantineRes,
+    quarantineReasonsRes,
+    repeatRes,
+    userGrowthRes,
+  ] = await Promise.all([
+    pool.query(
+      `SELECT entry_source, COUNT(*) AS count
+       FROM ticket
+       WHERE ($1::int IS NULL OR business_id = $1)
+       GROUP BY entry_source`,
+      [biz],
+    ),
+    // Promo entries live in promotional_entry, not ticket — count separately.
+    // Promo entries have no business_id so only include when no business filter.
+    pool.query(
+      `SELECT COUNT(*) AS count FROM promotional_entry WHERE ($1::int IS NULL)`,
+      [biz],
+    ),
+    // AMOE is platform-wide — not filtered by business
+    pool.query(
+      `SELECT
+         COUNT(*) AS total_requests,
+         SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) AS approved,
+         SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejected,
+         SUM(CASE WHEN rejection_reason = 'weekly_limit_reached' THEN 1 ELSE 0 END) AS weekly_limit_count,
+         SUM(CASE WHEN rejection_reason = 'campaign_ended' THEN 1 ELSE 0 END) AS campaign_ended_count
+       FROM free_ticket_usage`,
+    ),
+    // Fraud is platform-wide — not filtered by business
+    pool.query(
+      `SELECT
+         SUM(CASE WHEN risk_score >= 15 THEN 1 ELSE 0 END) AS high_risk,
+         SUM(CASE WHEN risk_score >= 10 AND risk_score < 15 THEN 1 ELSE 0 END) AS medium_risk,
+         SUM(CASE WHEN risk_score < 10 THEN 1 ELSE 0 END) AS low_risk
+       FROM "user" WHERE role = 'User'`,
+    ),
+    pool.query(
+      `SELECT
+         SUM(CASE WHEN is_quarantined = TRUE THEN 1 ELSE 0 END) AS quarantined,
+         SUM(CASE WHEN is_quarantined = FALSE AND status = 'Activated' THEN 1 ELSE 0 END) AS accepted,
+         COUNT(*) AS total
+       FROM ticket
+       WHERE ($1::int IS NULL OR business_id = $1)`,
+      [biz],
+    ),
+    pool.query(
+      `SELECT quarantine_reason, COUNT(*) AS count
+       FROM ticket
+       WHERE is_quarantined = TRUE AND quarantine_reason IS NOT NULL
+         AND ($1::int IS NULL OR business_id = $1)
+       GROUP BY quarantine_reason
+       ORDER BY count DESC`,
+      [biz],
+    ),
+    pool.query(
+      `SELECT
+         COUNT(*) AS users_with_submissions,
+         ROUND(AVG(submission_count)::numeric, 1) AS avg_submissions_per_user,
+         SUM(CASE WHEN submission_count >= 2 THEN 1 ELSE 0 END) AS users_2_plus,
+         SUM(CASE WHEN business_count >= 2 THEN 1 ELSE 0 END) AS multi_business_users
+       FROM (
+         SELECT activated_by_user_id,
+                COUNT(*) AS submission_count,
+                COUNT(DISTINCT business_id) AS business_count
+         FROM ticket
+         WHERE status = 'Activated' AND activated_by_user_id IS NOT NULL
+           AND ($1::int IS NULL OR business_id = $1)
+         GROUP BY activated_by_user_id
+       ) sub`,
+      [biz],
+    ),
+    // User growth is platform-wide — not filtered by business
+    pool.query(
+      `SELECT
+         SUM(CASE WHEN created_at >= DATE_TRUNC('week', NOW()) THEN 1 ELSE 0 END) AS new_this_week,
+         SUM(CASE WHEN created_at >= DATE_TRUNC('month', NOW()) THEN 1 ELSE 0 END) AS new_this_month,
+         COUNT(*) AS total
+       FROM "user" WHERE role != 'Admin'`,
+    ),
+  ]);
+
+  const entrySrcMap: Record<string, number> = {};
+  for (const row of entrySrcRes.rows) {
+    entrySrcMap[row.entry_source] = parseInt(row.count);
+  }
+  const promoCount = parseInt(promoCountRes.rows[0].count) || 0;
+  // promo entries live in promotional_entry, not ticket — add separately
+  entrySrcMap['promo'] = (entrySrcMap['promo'] ?? 0) + promoCount;
+  const entryTotal = Object.values(entrySrcMap).reduce((a, b) => a + b, 0);
+
+  return {
+    entrySourceMix: {
+      code: entrySrcMap['code'] ?? 0,
+      receipt: entrySrcMap['receipt'] ?? 0,
+      free: entrySrcMap['free'] ?? 0,
+      promo: entrySrcMap['promo'] ?? 0,
+      total: entryTotal,
+    },
+    amoe: {
+      total_requests: parseInt(amoeRes.rows[0].total_requests) || 0,
+      approved: parseInt(amoeRes.rows[0].approved) || 0,
+      rejected: parseInt(amoeRes.rows[0].rejected) || 0,
+      weekly_limit_count: parseInt(amoeRes.rows[0].weekly_limit_count) || 0,
+      campaign_ended_count: parseInt(amoeRes.rows[0].campaign_ended_count) || 0,
+    },
+    fraud: {
+      high_risk: parseInt(fraudRes.rows[0].high_risk) || 0,
+      medium_risk: parseInt(fraudRes.rows[0].medium_risk) || 0,
+      low_risk: parseInt(fraudRes.rows[0].low_risk) || 0,
+    },
+    validation: {
+      quarantined: parseInt(quarantineRes.rows[0].quarantined) || 0,
+      accepted: parseInt(quarantineRes.rows[0].accepted) || 0,
+      total: parseInt(quarantineRes.rows[0].total) || 0,
+      quarantine_reasons: quarantineReasonsRes.rows.map((r) => ({
+        reason: r.quarantine_reason as string,
+        count: parseInt(r.count),
+      })),
+    },
+    repeatBehavior: {
+      users_with_submissions: parseInt(repeatRes.rows[0].users_with_submissions) || 0,
+      avg_submissions_per_user: parseFloat(repeatRes.rows[0].avg_submissions_per_user) || 0,
+      users_2_plus: parseInt(repeatRes.rows[0].users_2_plus) || 0,
+      multi_business_users: parseInt(repeatRes.rows[0].multi_business_users) || 0,
+    },
+    userGrowth: {
+      new_this_week: parseInt(userGrowthRes.rows[0].new_this_week) || 0,
+      new_this_month: parseInt(userGrowthRes.rows[0].new_this_month) || 0,
+      total: parseInt(userGrowthRes.rows[0].total) || 0,
+    },
+  };
+};
+
+export const getLocationBreakdownService = async (params: {
+  businessId?: number;
+  search?: string;
+  page: number;
+  limit: number;
+}) => {
+  const pool = getPool();
+  const { businessId, search, page, limit } = params;
+  const biz = businessId ?? null;
+  const q = search?.trim() || null;
+  const offset = (page - 1) * limit;
+
+  const [rowsRes, countRes] = await Promise.all([
+    pool.query(
+      `SELECT
+         b.id AS business_id,
+         b.name AS business_name,
+         b.entry_cap,
+         b.min_transaction_amount AS threshold,
+         bl.id AS location_id,
+         COALESCE(bl.name, 'Main Location') AS location_name,
+         bl.address,
+         COUNT(t.id) AS total_tickets,
+         SUM(CASE WHEN t.status = 'Activated' THEN 1 ELSE 0 END) AS activated,
+         SUM(CASE WHEN t.is_quarantined = TRUE THEN 1 ELSE 0 END) AS quarantined,
+         SUM(CASE WHEN t.entry_source = 'receipt' THEN 1 ELSE 0 END) AS receipt_tickets,
+         SUM(CASE WHEN t.entry_source = 'code' THEN 1 ELSE 0 END) AS code_tickets,
+         ROUND(AVG(CASE WHEN t.transaction_amount IS NOT NULL THEN t.transaction_amount END)::numeric, 2) AS avg_transaction,
+         ROUND(
+           100.0 * SUM(CASE WHEN t.transaction_amount IS NOT NULL
+             AND b.min_transaction_amount IS NOT NULL
+             AND t.transaction_amount >= b.min_transaction_amount
+             AND t.transaction_amount <= b.min_transaction_amount * 1.2
+             THEN 1 ELSE 0 END) / NULLIF(SUM(CASE WHEN t.entry_source = 'receipt' THEN 1 ELSE 0 END), 0),
+           1
+         ) AS pct_just_above_threshold
+       FROM business b
+       JOIN business_location bl ON bl.business_id = b.id AND bl.is_active = TRUE
+       LEFT JOIN ticket t ON t.location_id = bl.id
+       WHERE ($1::int IS NULL OR b.id = $1)
+         AND ($2::text IS NULL OR b.name ILIKE '%' || $2 || '%' OR bl.name ILIKE '%' || $2 || '%')
+       GROUP BY b.id, b.name, b.entry_cap, b.min_transaction_amount, bl.id, bl.name, bl.address
+       ORDER BY b.name, COALESCE(bl.name, 'Main Location')
+       LIMIT $3 OFFSET $4`,
+      [biz, q, limit, offset],
+    ),
+    pool.query(
+      `SELECT COUNT(*) AS total
+       FROM business b
+       JOIN business_location bl ON bl.business_id = b.id AND bl.is_active = TRUE
+       WHERE ($1::int IS NULL OR b.id = $1)
+         AND ($2::text IS NULL OR b.name ILIKE '%' || $2 || '%' OR bl.name ILIKE '%' || $2 || '%')`,
+      [biz, q],
+    ),
+  ]);
+
+  const total = parseInt(countRes.rows[0].total) || 0;
+  return {
+    rows: rowsRes.rows.map((r) => ({
+      business_id: r.business_id as number,
+      business_name: r.business_name as string,
+      entry_cap: r.entry_cap ? parseInt(r.entry_cap) : null,
+      threshold: r.threshold ? parseFloat(r.threshold) : null,
+      location_id: r.location_id as number,
+      location_name: r.location_name as string,
+      address: r.address as string | null,
+      total_tickets: parseInt(r.total_tickets) || 0,
+      activated: parseInt(r.activated) || 0,
+      quarantined: parseInt(r.quarantined) || 0,
+      receipt_tickets: parseInt(r.receipt_tickets) || 0,
+      code_tickets: parseInt(r.code_tickets) || 0,
+      avg_transaction: r.avg_transaction ? parseFloat(r.avg_transaction) : null,
+      pct_just_above_threshold: r.pct_just_above_threshold ? parseFloat(r.pct_just_above_threshold) : null,
+    })),
+    total,
+    page,
+    limit,
+    totalPages: Math.ceil(total / limit),
+  };
 };
