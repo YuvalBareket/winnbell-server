@@ -26,7 +26,8 @@ export const createCheckout = async (req: Request, res: Response) => {
       return;
     }
 
-    const url = await createCheckoutSession(business.id, business.email, entriesPerLocation);
+    const billingInterval: 'monthly' | 'yearly' = req.body.billing_interval === 'yearly' ? 'yearly' : 'monthly';
+    const url = await createCheckoutSession(business.id, business.email, entriesPerLocation, billingInterval);
     res.json({ url });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : '';

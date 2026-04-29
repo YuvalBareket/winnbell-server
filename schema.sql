@@ -195,6 +195,8 @@ CREATE TABLE subscription (
   fee_at_entry           NUMERIC(10, 2) NULL,
   -- Stripe tier: number of entries the business can earn per location per draw
   entries_per_location   INTEGER NULL CHECK (entries_per_location IS NULL OR entries_per_location > 0),
+  billing_interval       VARCHAR(10) NOT NULL DEFAULT 'monthly'
+                           CHECK (billing_interval IN ('monthly', 'yearly')),
   created_at             TIMESTAMP NOT NULL DEFAULT NOW(),
   updated_at             TIMESTAMP NOT NULL DEFAULT NOW()
 );

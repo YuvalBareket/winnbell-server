@@ -227,10 +227,12 @@ export const syncExternalUser = async (
     await client.query('BEGIN');
 
     const upsertResult = await client.query(
-      `INSERT INTO "user" (external_auth_id, email, full_name, role, is_active)
-       VALUES ($1, $2, $3, $4, true)
+      `INSERT INTO "user" (external_auth_id, email, full_name, role, is_active, is_email_verified)
+       VALUES ($1, $2, $3, $4, true, true)
        ON CONFLICT (email) DO UPDATE
-         SET external_auth_id = EXCLUDED.external_auth_id, updated_at = NOW()
+         SET external_auth_id = EXCLUDED.external_auth_id,
+             is_email_verified = true,
+             updated_at = NOW()
        RETURNING id, role, full_name AS "fullName", email`,
       [externalId, email, fullName, role],
     );

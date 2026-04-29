@@ -426,11 +426,11 @@ export const submitReceiptEntryService = async (
     if (storedScore >= RISK_THRESHOLDS.MEDIUM_MAX + 1) {
       const throttleCheck = await client.query(
         `SELECT COUNT(*) AS count FROM ticket
-         WHERE activated_by_user_id = $1 AND entry_source = 'receipt' AND activated_at >= NOW() - INTERVAL '1 hour'`,
+         WHERE activated_by_user_id = $1 AND entry_source = 'receipt' AND activated_at >= NOW() - INTERVAL '24 hours'`,
         [userId],
       );
       if (parseInt(throttleCheck.rows[0].count, 10) >= 1) {
-        throw new Error("You've reached your hourly entry limit. Please try again in an hour.");
+        throw new Error("You've reached your daily entry limit. Please try again tomorrow.");
       }
     }
 
@@ -514,32 +514,41 @@ export const submitReceiptEntryService = async (
       const quarantinedAt = isQuarantined ? new Date() : null;
 
       const code = await generateGlobalUniqueCode(client);
-      const ticketResult = await client.query(
-        `INSERT INTO ticket
-          (code, status, entry_source, business_id, location_id, draw_id,
-           activated_by_user_id, activated_at,
-           receipt_identifier, transaction_amount, transaction_date, receipt_image_url, risk_score,
-           is_quarantined, quarantine_reason, quarantined_at, image_validation_status, submitter_ip)
-         VALUES ($1, 'Activated', 'receipt', $2, $3, $4, $5, NOW(), $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-         RETURNING id`,
-        [
-          code,
-          business_id,
-          input.locationId,
-          drawId,
-          userId,
-          input.receiptIdentifier,
-          input.transactionAmount,
-          input.transactionDate ?? null,
-          isPrimary ? (input.receiptImageUrl ?? null) : null,
-          riskEval.totalScore,
-          isQuarantined,
-          quarantineReason,
-          quarantinedAt,
-          hasImage ? 'pending' : 'not_required',
-          input.submitterIp ?? null,
-        ],
-      );
+      let ticketResult;
+      try {
+        ticketResult = await client.query(
+          `INSERT INTO ticket
+            (code, status, entry_source, business_id, location_id, draw_id,
+             activated_by_user_id, activated_at,
+             receipt_identifier, transaction_amount, transaction_date, receipt_image_url, risk_score,
+             is_quarantined, quarantine_reason, quarantined_at, image_validation_status, submitter_ip)
+           VALUES ($1, 'Activated', 'receipt', $2, $3, $4, $5, NOW(), $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+           RETURNING id`,
+          [
+            code,
+            business_id,
+            input.locationId,
+            drawId,
+            userId,
+            isPrimary ? input.receiptIdentifier : null,
+            isPrimary ? input.transactionAmount : null,
+            isPrimary ? (input.transactionDate ?? null) : null,
+            isPrimary ? (input.receiptImageUrl ?? null) : null,
+            riskEval.totalScore,
+            isQuarantined,
+            quarantineReason,
+            quarantinedAt,
+            hasImage ? 'pending' : 'not_required',
+            input.submitterIp ?? null,
+          ],
+        );
+      } catch (insertErr: any) {
+        // PostgreSQL unique constraint violation — receipt was already submitted
+        if (insertErr?.code === '23505') {
+          throw new Error('This receipt has already been submitted.');
+        }
+        throw insertErr;
+      }
       if (isPrimary) {
         firstTicketId = ticketResult.rows[0].id;
         firstCode = code;

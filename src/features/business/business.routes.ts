@@ -20,6 +20,7 @@ import {
   updateLogo,
 } from './business.controller.js';
 import { getStats } from './stats.controller.js';
+import { getActivity } from './activity.controller.js';
 import { createCheckout, verifySession, getSubscription, cancelSub, resumeSub } from '../stripe/stripe.controller.js';
 
 const router = Router();
@@ -45,6 +46,7 @@ router.delete('/locations/:locationId', deleteLocation);
 router.post('/locations/:locationId/invite', createInviteLink);
 router.delete('/locations/:locationId/manager', removeManager);
 router.get('/stats', requireRole('Business', 'Admin'), getStats);
+router.get('/activity', requireRole('Business', 'Admin'), getActivity);
 router.post('/subscription/checkout', requireRole('Business'), createCheckout);
 router.post('/subscription/verify-session', requireRole('Business'), verifySession);
 router.get('/subscription', requireRole('Business'), getSubscription);

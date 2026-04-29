@@ -4,6 +4,13 @@ import { getPool } from '../../shared/db/db.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string);
 
+function addMonths(date: Date, months: number): Date {
+  const d = new Date(date);
+  d.setDate(1);
+  d.setMonth(d.getMonth() + months);
+  return d;
+}
+
 // ─── Get Business For Checkout ────────────────────────────────────────────────
 
 export const getBusinessForCheckout = async (userId: number): Promise<{ id: number; email: string } | null> => {
@@ -18,17 +25,20 @@ export const getBusinessForCheckout = async (userId: number): Promise<{ id: numb
 // ─── Tier Price Map ────────────────────────────────────────────────────────────
 // Each tier has its own Stripe price ID (set in .env) and a fixed price per location/month.
 // Quantity sent to Stripe = number of locations (not cap units) — making pricing non-linear.
-export const TIER_PRICE_MAP: Record<number, { envKey: string; pricePerLocation: number }> = {
-  250:  { envKey: 'STRIPE_PRICE_ID_250',  pricePerLocation: 250  },
-  500:  { envKey: 'STRIPE_PRICE_ID_500',  pricePerLocation: 490  },
-  750:  { envKey: 'STRIPE_PRICE_ID_750',  pricePerLocation: 720  },
-  1000: { envKey: 'STRIPE_PRICE_ID_1000', pricePerLocation: 940  },
-  1250: { envKey: 'STRIPE_PRICE_ID_1250', pricePerLocation: 1150 },
-  1500: { envKey: 'STRIPE_PRICE_ID_1500', pricePerLocation: 1350 },
-  1750: { envKey: 'STRIPE_PRICE_ID_1750', pricePerLocation: 1540 },
-  2000: { envKey: 'STRIPE_PRICE_ID_2000', pricePerLocation: 1720 },
-  2250: { envKey: 'STRIPE_PRICE_ID_2250', pricePerLocation: 1890 },
-  2500: { envKey: 'STRIPE_PRICE_ID_2500', pricePerLocation: 2000 },
+export const TIER_PRICE_MAP: Record<number, {
+  monthly: { envKey: string; pricePerLocation: number };
+  yearly:  { envKey: string; pricePerLocation: number };
+}> = {
+  250:  { monthly: { envKey: 'STRIPE_PRICE_ID_250',         pricePerLocation: 250   }, yearly: { envKey: 'STRIPE_PRICE_ID_250_YEARLY',  pricePerLocation: 3000  } },
+  500:  { monthly: { envKey: 'STRIPE_PRICE_ID_500',         pricePerLocation: 490   }, yearly: { envKey: 'STRIPE_PRICE_ID_500_YEARLY',  pricePerLocation: 5880  } },
+  750:  { monthly: { envKey: 'STRIPE_PRICE_ID_750',         pricePerLocation: 720   }, yearly: { envKey: 'STRIPE_PRICE_ID_750_YEARLY',  pricePerLocation: 8640  } },
+  1000: { monthly: { envKey: 'STRIPE_PRICE_ID_1000',        pricePerLocation: 940   }, yearly: { envKey: 'STRIPE_PRICE_ID_1000_YEARLY', pricePerLocation: 11280 } },
+  1250: { monthly: { envKey: 'STRIPE_PRICE_ID_1250',        pricePerLocation: 1150  }, yearly: { envKey: 'STRIPE_PRICE_ID_1250_YEARLY', pricePerLocation: 13800 } },
+  1500: { monthly: { envKey: 'STRIPE_PRICE_ID_1500',        pricePerLocation: 1350  }, yearly: { envKey: 'STRIPE_PRICE_ID_1500_YEARLY', pricePerLocation: 16200 } },
+  1750: { monthly: { envKey: 'STRIPE_PRICE_ID_1750',        pricePerLocation: 1540  }, yearly: { envKey: 'STRIPE_PRICE_ID_1750_YEARLY', pricePerLocation: 18480 } },
+  2000: { monthly: { envKey: 'STRIPE_PRICE_ID_2000',        pricePerLocation: 1720  }, yearly: { envKey: 'STRIPE_PRICE_ID_2000_YEARLY', pricePerLocation: 20640 } },
+  2250: { monthly: { envKey: 'STRIPE_PRICE_ID_2250',        pricePerLocation: 1890  }, yearly: { envKey: 'STRIPE_PRICE_ID_2250_YEARLY', pricePerLocation: 22680 } },
+  2500: { monthly: { envKey: 'STRIPE_PRICE_ID_2500',        pricePerLocation: 2000  }, yearly: { envKey: 'STRIPE_PRICE_ID_2500_YEARLY', pricePerLocation: 24000 } },
 };
 
 // ─── Create Checkout Session ──────────────────────────────────────────────────
@@ -37,22 +47,22 @@ export const createCheckoutSession = async (
   businessId: number,
   userEmail: string,
   entriesPerLocation: number,
+  billingInterval: 'monthly' | 'yearly' = 'monthly',
 ): Promise<string> => {
   const tier = TIER_PRICE_MAP[entriesPerLocation];
   if (!tier) throw new Error('Invalid entries_per_location value');
 
-  const priceId = process.env[tier.envKey];
-  if (!priceId) throw new Error(`${tier.envKey} is not configured`);
+  const tierConfig = tier[billingInterval];
+  const priceId = process.env[tierConfig.envKey];
+  if (!priceId) throw new Error(`${tierConfig.envKey} is not configured`);
 
   const pool = getPool();
   const existing = await pool.query(
     `SELECT id FROM subscription WHERE business_id = $1 AND status != 'Cancelled'`,
     [businessId],
   );
-
   if (existing.rows.length > 0) throw new Error('This business already has an active subscription');
 
-  // Get active location count (minimum 1). Quantity = locationCount — price per location already includes tier discount.
   const locResult = await pool.query(
     `SELECT COUNT(*) AS cnt FROM business_location WHERE business_id = $1 AND is_active = true`,
     [businessId],
@@ -66,8 +76,8 @@ export const createCheckoutSession = async (
     payment_method_types: ['card'],
     customer_email: userEmail,
     line_items: [{ price: priceId, quantity: locationCount }],
-    metadata: { business_id: String(businessId), entries_per_location: String(entriesPerLocation) },
-    subscription_data: { metadata: { business_id: String(businessId), entries_per_location: String(entriesPerLocation) } },
+    metadata: { business_id: String(businessId), entries_per_location: String(entriesPerLocation), billing_interval: billingInterval },
+    subscription_data: { metadata: { business_id: String(businessId), entries_per_location: String(entriesPerLocation), billing_interval: billingInterval } },
     success_url: `${baseUrl}/subscription/success?session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${baseUrl}/subscribe`,
   });
@@ -104,11 +114,14 @@ export const verifyAndActivateSession = async (sessionId: string, userId: number
   const priceItem = subscription.items.data[0];
   const priceId = priceItem?.price.id ?? '';
   const quantity = priceItem?.quantity ?? 1;
-  const monthlyFee = Math.round((priceItem?.price.unit_amount ?? 0) * quantity) / 100;
+  const billingInterval: 'monthly' | 'yearly' =
+    priceItem?.price?.recurring?.interval === 'year' ? 'yearly' : 'monthly';
+  const rawFee = Math.round((priceItem?.price.unit_amount ?? 0) * quantity) / 100;
+  const monthlyEquivalentFee = billingInterval === 'yearly' ? rawFee / 12 : rawFee;
   const currentPeriodEnd = extractPeriodEnd(subscription);
   const entriesPerLocation = Number(session.metadata?.entries_per_location ?? 0);
 
-  await activateBusinessSubscription(pool, businessId, subscription.id, customerId, priceId, currentPeriodEnd, monthlyFee, entriesPerLocation);
+  await activateBusinessSubscription(pool, businessId, subscription.id, customerId, priceId, currentPeriodEnd, monthlyEquivalentFee, entriesPerLocation, billingInterval);
 };
 
 // ─── Handle Webhook ───────────────────────────────────────────────────────────
@@ -141,11 +154,14 @@ export const handleStripeWebhook = async (rawBody: Buffer, signature: string): P
         const priceItem = subscription.items.data[0];
         const priceId = priceItem?.price.id ?? '';
         const quantity = priceItem?.quantity ?? 1;
-        const monthlyFee = Math.round((priceItem?.price.unit_amount ?? 0) * quantity) / 100;
+        const billingInterval: 'monthly' | 'yearly' =
+          (session.metadata?.billing_interval === 'yearly') ? 'yearly' : 'monthly';
+        const rawFee = Math.round((priceItem?.price.unit_amount ?? 0) * quantity) / 100;
+        const monthlyEquivalentFee = billingInterval === 'yearly' ? rawFee / 12 : rawFee;
         const currentPeriodEnd = extractPeriodEnd(subscription);
         const entriesPerLocation = Number(session.metadata?.entries_per_location ?? 0);
 
-        await activateBusinessSubscription(pool, businessId, subscriptionId, customerId, priceId, currentPeriodEnd, monthlyFee, entriesPerLocation);
+        await activateBusinessSubscription(pool, businessId, subscriptionId, customerId, priceId, currentPeriodEnd, monthlyEquivalentFee, entriesPerLocation, billingInterval);
         console.log(`[Stripe] Webhook activated business ${businessId}`);
       } catch (err: any) {
         console.error('[Stripe] ERROR in checkout.session.completed:', err.message);
@@ -177,8 +193,14 @@ export const handleStripeWebhook = async (rawBody: Buffer, signature: string): P
         if (isActive && previousStatus && previousStatus !== 'active') {
           const priceItem = subscription.items.data[0];
           const quantity = priceItem?.quantity ?? 1;
-          const monthlyFee = Math.round((priceItem?.price.unit_amount ?? 0) * quantity) / 100;
-          await handleDrawParticipation(pool, businessId, monthlyFee);
+          const billingInterval: 'monthly' | 'yearly' = priceItem?.price?.recurring?.interval === 'year' ? 'yearly' : 'monthly';
+          const rawFee = Math.round((priceItem?.price.unit_amount ?? 0) * quantity) / 100;
+          const monthlyEquivalentFee = billingInterval === 'yearly' ? rawFee / 12 : rawFee;
+          if (billingInterval === 'yearly') {
+            await handleYearlyDrawParticipation(pool, businessId, monthlyEquivalentFee);
+          } else {
+            await handleDrawParticipation(pool, businessId, monthlyEquivalentFee);
+          }
         }
       } catch (err: any) {
         console.error('[Stripe] ERROR in customer.subscription.updated:', err.message);
@@ -221,9 +243,15 @@ export const handleStripeWebhook = async (rawBody: Buffer, signature: string): P
 
         const priceItem = subscription.items.data[0];
         const quantity = priceItem?.quantity ?? 1;
-        const monthlyFee = Math.round((priceItem?.price.unit_amount ?? 0) * quantity) / 100;
+        const billingInterval: 'monthly' | 'yearly' = priceItem?.price?.recurring?.interval === 'year' ? 'yearly' : 'monthly';
+        const rawFee = Math.round((priceItem?.price.unit_amount ?? 0) * quantity) / 100;
+        const monthlyEquivalentFee = billingInterval === 'yearly' ? rawFee / 12 : rawFee;
 
-        await handleDrawParticipation(pool, businessId, monthlyFee);
+        if (billingInterval === 'yearly') {
+          await handleYearlyDrawParticipation(pool, businessId, monthlyEquivalentFee);
+        } else {
+          await handleDrawParticipation(pool, businessId, monthlyEquivalentFee);
+        }
         console.log(`[Stripe] Renewal draw participation updated for business ${businessId}`);
       } catch (err: any) {
         console.error('[Stripe] ERROR in invoice.payment_succeeded:', err.message);
@@ -260,38 +288,58 @@ async function activateBusinessSubscription(
   customerId: string,
   priceId: string,
   currentPeriodEnd: Date,
-  monthlyFee: number,
+  monthlyEquivalentFee: number,
   entriesPerLocation: number,
+  billingInterval: 'monthly' | 'yearly' = 'monthly',
 ): Promise<void> {
   console.log(`[Stripe] Activating business ${businessId} — entries/location: ${entriesPerLocation}...`);
 
-  // Set entry_cap per location on business
-  const updateResult = await pool.query(
-    `UPDATE business SET is_subscribed = true, entry_cap = $2 WHERE id = $1`,
-    [businessId, entriesPerLocation || null],
-  );
-  console.log(`[Stripe] business.is_subscribed updated, rows affected: ${updateResult.rowCount}`);
-
-  // Upsert subscription using ON CONFLICT
-  await pool.query(`
-    INSERT INTO subscription
-      (business_id, stripe_customer_id, stripe_subscription_id, stripe_price_id, status, current_period_end, cancel_at_period_end, fee_at_entry, entries_per_location)
-    VALUES ($1, $2, $3, $4, 'Active', $5, false, $6, $7)
-    ON CONFLICT (business_id) DO UPDATE
-      SET stripe_customer_id     = EXCLUDED.stripe_customer_id,
-          stripe_subscription_id = EXCLUDED.stripe_subscription_id,
-          stripe_price_id        = EXCLUDED.stripe_price_id,
-          status                 = 'Active',
-          current_period_end     = EXCLUDED.current_period_end,
-          cancel_at_period_end   = false,
-          fee_at_entry           = EXCLUDED.fee_at_entry,
-          entries_per_location   = EXCLUDED.entries_per_location,
-          updated_at             = NOW()
-  `, [businessId, customerId, subscriptionId, priceId, currentPeriodEnd, monthlyFee, entriesPerLocation || null]);
-  console.log(`[Stripe] subscription row upserted for business ${businessId}`);
-
+  // Both the business UPDATE and subscription INSERT must succeed or both must roll back.
+  // If the subscription row fails to insert after the business is marked subscribed,
+  // the business would appear active with no subscription record — money taken, no subscription.
+  const client = await pool.connect();
   try {
-    await handleDrawParticipation(pool, businessId, monthlyFee);
+    await client.query('BEGIN');
+
+    const updateResult = await client.query(
+      `UPDATE business SET is_subscribed = true, entry_cap = $2 WHERE id = $1`,
+      [businessId, entriesPerLocation || null],
+    );
+    console.log(`[Stripe] business.is_subscribed updated, rows affected: ${updateResult.rowCount}`);
+
+    await client.query(`
+      INSERT INTO subscription
+        (business_id, stripe_customer_id, stripe_subscription_id, stripe_price_id, status, current_period_end, cancel_at_period_end, fee_at_entry, entries_per_location, billing_interval)
+      VALUES ($1, $2, $3, $4, 'Active', $5, false, $6, $7, $8)
+      ON CONFLICT (business_id) DO UPDATE
+        SET stripe_customer_id     = EXCLUDED.stripe_customer_id,
+            stripe_subscription_id = EXCLUDED.stripe_subscription_id,
+            stripe_price_id        = EXCLUDED.stripe_price_id,
+            status                 = 'Active',
+            current_period_end     = EXCLUDED.current_period_end,
+            cancel_at_period_end   = false,
+            fee_at_entry           = EXCLUDED.fee_at_entry,
+            entries_per_location   = EXCLUDED.entries_per_location,
+            billing_interval       = EXCLUDED.billing_interval,
+            updated_at             = NOW()
+    `, [businessId, customerId, subscriptionId, priceId, currentPeriodEnd, monthlyEquivalentFee, entriesPerLocation || null, billingInterval]);
+
+    await client.query('COMMIT');
+    console.log(`[Stripe] subscription row upserted for business ${businessId}`);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  // Draw participation runs outside the transaction — it's non-fatal and has its own transaction.
+  try {
+    if (billingInterval === 'yearly') {
+      await handleYearlyDrawParticipation(pool, businessId, monthlyEquivalentFee);
+    } else {
+      await handleDrawParticipation(pool, businessId, monthlyEquivalentFee);
+    }
   } catch (err: any) {
     console.error(`[Stripe] Draw participation failed for business ${businessId} (non-fatal):`, err.message);
   }
@@ -299,18 +347,31 @@ async function activateBusinessSubscription(
 
 // ─── Draw Participation ───────────────────────────────────────────────────────
 
-async function handleDrawParticipation(pool: Pool, businessId: number, monthlyFee: number): Promise<void> {
+async function handleDrawParticipation(
+  pool: Pool,
+  businessId: number,
+  monthlyFee: number,
+  targetDate?: Date,
+  skipEnrollOthers = false,
+): Promise<void> {
+  // Default to next month. Normalise to 1st of month to avoid day-of-month overflow.
+  const target = targetDate ?? addMonths(new Date(), 1);
+  const targetMonth = target.getMonth() + 1; // 1-based
+  const targetYear  = target.getFullYear();
+  // ISO string for first-of-month — used as a TIMESTAMP parameter in draw creation SQL
+  const targetIso = new Date(targetYear, targetMonth - 1, 1).toISOString();
+
   const client = await pool.connect();
   await client.query('BEGIN');
 
   try {
     const drawResult = await client.query(`
       SELECT id, prize_percentage FROM draw
-      WHERE EXTRACT(MONTH FROM draw_date) = EXTRACT(MONTH FROM NOW() + INTERVAL '1 month')
-        AND EXTRACT(YEAR FROM draw_date)  = EXTRACT(YEAR FROM NOW() + INTERVAL '1 month')
+      WHERE EXTRACT(MONTH FROM draw_date) = $1
+        AND EXTRACT(YEAR FROM draw_date)  = $2
         AND status = 'Upcoming'
       LIMIT 1
-    `);
+    `, [targetMonth, targetYear]);
 
     const existingDraw = drawResult.rows[0] as { id: number; prize_percentage: number } | undefined;
 
@@ -335,55 +396,54 @@ async function handleDrawParticipation(pool: Pool, businessId: number, monthlyFe
         `UPDATE draw SET prize_pool = prize_pool + $1 WHERE id = $2`,
         [contribution, existingDraw.id],
       );
-
-      console.log(`[Draw] Business ${businessId} entered draw ${existingDraw.id} — fee $${monthlyFee}, contribution $${contribution} (${existingDraw.prize_percentage}%)`);
+      console.log(`[Draw] Business ${businessId} entered draw ${existingDraw.id} (${targetYear}-${targetMonth}) — fee $${monthlyFee}, contribution $${contribution}`);
     } else {
       const DEFAULT_PRIZE_PCT = 80.00;
 
-      // Create draw with prize_pool = 0 first, then sum all contributions
       const newDrawResult = await client.query(`
         INSERT INTO draw (name, prize_pool, prize_percentage, draw_date, status)
         VALUES (
-          TRIM(TO_CHAR(NOW() + INTERVAL '1 month', 'Month')) || ' ' || TO_CHAR(NOW() + INTERVAL '1 month', 'YYYY') || ' Monthly Draw',
+          TRIM(TO_CHAR($1::TIMESTAMP, 'Month')) || ' ' || TO_CHAR($1::TIMESTAMP, 'YYYY') || ' Monthly Draw',
           0,
-          $1,
-          DATE_TRUNC('month', NOW() + INTERVAL '1 month') + INTERVAL '1 month' - INTERVAL '1 day',
+          $2,
+          DATE_TRUNC('month', $1::TIMESTAMP) + INTERVAL '1 month' - INTERVAL '1 day',
           'Upcoming'
         )
         RETURNING id, prize_percentage
-      `, [DEFAULT_PRIZE_PCT]);
+      `, [targetIso, DEFAULT_PRIZE_PCT]);
 
       const newDraw = newDrawResult.rows[0] as { id: number; prize_percentage: number };
-
-      // Enroll the triggering business
       const triggerContribution = parseFloat((monthlyFee * DEFAULT_PRIZE_PCT / 100).toFixed(2));
+
       await client.query(
         `INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, contribution_amount) VALUES ($1, $2, $3, $4)`,
         [newDraw.id, businessId, monthlyFee, triggerContribution],
       );
       let totalPrizePool = triggerContribution;
 
-      // Enroll all other currently subscribed businesses
-      const otherSubsResult = await client.query(`
-        SELECT b.id AS business_id, COALESCE(s.fee_at_entry, 0) AS monthly_fee
-        FROM business b
-        JOIN subscription s ON s.business_id = b.id
-        WHERE b.is_subscribed = true AND s.status = 'Active' AND b.id != $1
-      `, [businessId]);
+      // Only catch up other businesses when creating the immediate next-month draw.
+      // For future months (yearly pre-enrollment) each business will enroll via their own renewal.
+      if (!skipEnrollOthers) {
+        const otherSubsResult = await client.query(`
+          SELECT b.id AS business_id, COALESCE(s.fee_at_entry, 0) AS monthly_fee
+          FROM business b
+          JOIN subscription s ON s.business_id = b.id
+          WHERE b.is_subscribed = true AND s.status = 'Active' AND b.id != $1
+        `, [businessId]);
 
-      for (const sub of otherSubsResult.rows) {
-        const contribution = parseFloat((sub.monthly_fee * DEFAULT_PRIZE_PCT / 100).toFixed(2));
-        await client.query(
-          `INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, contribution_amount) VALUES ($1, $2, $3, $4)
-           ON CONFLICT (draw_id, business_id) DO NOTHING`,
-          [newDraw.id, sub.business_id, sub.monthly_fee, contribution],
-        );
-        totalPrizePool += contribution;
+        for (const sub of otherSubsResult.rows) {
+          const contribution = parseFloat((sub.monthly_fee * DEFAULT_PRIZE_PCT / 100).toFixed(2));
+          await client.query(
+            `INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, contribution_amount) VALUES ($1, $2, $3, $4)
+             ON CONFLICT (draw_id, business_id) DO NOTHING`,
+            [newDraw.id, sub.business_id, sub.monthly_fee, contribution],
+          );
+          totalPrizePool += contribution;
+        }
       }
 
       await client.query(`UPDATE draw SET prize_pool = $1 WHERE id = $2`, [totalPrizePool, newDraw.id]);
-
-      console.log(`[Draw] Created new draw ${newDraw.id} with ${1 + otherSubsResult.rows.length} businesses — total pool $${totalPrizePool}`);
+      console.log(`[Draw] Created new draw ${newDraw.id} for ${targetYear}-${targetMonth} with ${skipEnrollOthers ? 1 : 'all'} businesses — pool $${totalPrizePool}`);
     }
 
     await client.query('COMMIT');
@@ -395,6 +455,19 @@ async function handleDrawParticipation(pool: Pool, businessId: number, monthlyFe
   }
 }
 
+async function handleYearlyDrawParticipation(pool: Pool, businessId: number, monthlyEquivalent: number): Promise<void> {
+  for (let offset = 1; offset <= 12; offset++) {
+    const target = addMonths(new Date(), offset);
+    try {
+      // Only enroll other businesses for the next-month draw (offset === 1).
+      // Future months will be populated naturally as each business renews.
+      await handleDrawParticipation(pool, businessId, monthlyEquivalent, target, offset > 1);
+    } catch (err: any) {
+      console.error(`[Draw] Yearly enrollment failed for business ${businessId} at month offset +${offset}:`, err.message);
+    }
+  }
+}
+
 // ─── Get Subscription Details ─────────────────────────────────────────────────
 
 export const getSubscriptionDetails = async (userId: number) => {
@@ -403,7 +476,7 @@ export const getSubscriptionDetails = async (userId: number) => {
   const result = await pool.query(`
     SELECT
       s.id, s.status, s.current_period_end, s.cancel_at_period_end,
-      s.stripe_subscription_id, s.stripe_price_id,
+      s.stripe_subscription_id, s.stripe_price_id, s.billing_interval,
       d.id        AS draw_id,
       d.name      AS draw_name,
       d.draw_date AS draw_date,
@@ -451,11 +524,18 @@ export const resumeSubscription = async (userId: number): Promise<void> => {
   );
 
   const stripeSubscription = await stripe.subscriptions.retrieve(sub.stripe_subscription_id, { expand: ['items'] });
+  const billingInterval: 'monthly' | 'yearly' =
+    stripeSubscription.items.data[0]?.price?.recurring?.interval === 'year' ? 'yearly' : 'monthly';
   const resumeItem = stripeSubscription.items.data[0];
-  const monthlyFee = Math.round((resumeItem?.price.unit_amount ?? 0) * (resumeItem?.quantity ?? 1)) / 100;
+  const rawFee = Math.round((resumeItem?.price.unit_amount ?? 0) * (resumeItem?.quantity ?? 1)) / 100;
+  const monthlyEquivalentFee = billingInterval === 'yearly' ? rawFee / 12 : rawFee;
 
   try {
-    await handleDrawParticipation(pool, sub.business_id, monthlyFee);
+    if (billingInterval === 'yearly') {
+      await handleYearlyDrawParticipation(pool, sub.business_id, monthlyEquivalentFee);
+    } else {
+      await handleDrawParticipation(pool, sub.business_id, monthlyEquivalentFee);
+    }
   } catch (err: any) {
     console.error(`[Stripe] Draw re-participation failed for business ${sub.business_id} (non-fatal):`, err.message);
   }
