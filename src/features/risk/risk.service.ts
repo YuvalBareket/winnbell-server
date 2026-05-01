@@ -93,7 +93,9 @@ export const evaluateUserRisk = async (
     // Distribute penalty reduction across 3+ businesses to avoid penalising multi-shop users.
     const velocityResult = await pool.query(
       `SELECT COUNT(*) AS count, COUNT(DISTINCT business_id) AS distinct_businesses FROM ticket
-       WHERE activated_by_user_id = $1 AND entry_source = 'receipt' AND activated_at >= NOW() - INTERVAL '24 hours'`,
+       WHERE activated_by_user_id = $1 AND entry_source = 'receipt'
+         AND receipt_identifier IS NOT NULL
+         AND activated_at >= NOW() - INTERVAL '24 hours'`,
       [userId],
     );
     const recentCount = parseInt(velocityResult.rows[0].count, 10);
@@ -111,7 +113,9 @@ export const evaluateUserRisk = async (
     // Signal 2b: sustained weekly velocity — flags users who max the cap daily for a week
     const weeklyResult = await pool.query(
       `SELECT COUNT(*) AS count FROM ticket
-       WHERE activated_by_user_id = $1 AND entry_source = 'receipt' AND activated_at >= NOW() - INTERVAL '7 days'`,
+       WHERE activated_by_user_id = $1 AND entry_source = 'receipt'
+         AND receipt_identifier IS NOT NULL
+         AND activated_at >= NOW() - INTERVAL '7 days'`,
       [userId],
     );
     const weeklyCount = parseInt(weeklyResult.rows[0].count, 10);
@@ -124,7 +128,9 @@ export const evaluateUserRisk = async (
     // Signal 2c: sustained monthly volume — flags heavy systemic exploitation over 30 days
     const monthlyResult = await pool.query(
       `SELECT COUNT(*) AS count FROM ticket
-       WHERE activated_by_user_id = $1 AND entry_source = 'receipt' AND activated_at >= NOW() - INTERVAL '30 days'`,
+       WHERE activated_by_user_id = $1 AND entry_source = 'receipt'
+         AND receipt_identifier IS NOT NULL
+         AND activated_at >= NOW() - INTERVAL '30 days'`,
       [userId],
     );
     const monthlyCount = parseInt(monthlyResult.rows[0].count, 10);

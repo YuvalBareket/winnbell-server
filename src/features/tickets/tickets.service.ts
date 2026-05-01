@@ -272,7 +272,7 @@ export const activateFreeTicket = async (userId: number): Promise<ActivationResu
 export const submitReceiptEntryService = async (
   userId: number,
   input: ReceiptEntryInput,
-): Promise<{ ticketId: number; code: string }> => {
+): Promise<{ ticketId: number; code: string; entries_earned: number }> => {
   const pool = getPool();
   const client = await pool.connect();
   let drawId: number = 0;
@@ -305,10 +305,13 @@ export const submitReceiptEntryService = async (
     const { business_id, business_name, min_transaction_amount: minTransactionAmount } = bizResult.rows[0];
 
     // Hard daily submission cap — prevents velocity spam regardless of risk score.
-    // High-risk users are also throttled per-hour by the gate below; this is an absolute ceiling.
+    // Count distinct submissions (receipt_identifier IS NOT NULL = primary ticket only),
+    // NOT total tickets, so multi-entry receipts don't eat multiple cap slots.
     const dailyCountResult = await client.query(
       `SELECT COUNT(*) AS count FROM ticket
-       WHERE activated_by_user_id = $1 AND entry_source = 'receipt' AND activated_at >= NOW() - INTERVAL '24 hours'`,
+       WHERE activated_by_user_id = $1 AND entry_source = 'receipt'
+         AND receipt_identifier IS NOT NULL
+         AND activated_at >= NOW() - INTERVAL '24 hours'`,
       [userId],
     );
     if (parseInt(dailyCountResult.rows[0].count, 10) >= 5) {
@@ -428,7 +431,9 @@ export const submitReceiptEntryService = async (
     if (storedScore >= RISK_THRESHOLDS.MEDIUM_MAX + 1) {
       const throttleCheck = await client.query(
         `SELECT COUNT(*) AS count FROM ticket
-         WHERE activated_by_user_id = $1 AND entry_source = 'receipt' AND activated_at >= NOW() - INTERVAL '24 hours'`,
+         WHERE activated_by_user_id = $1 AND entry_source = 'receipt'
+           AND receipt_identifier IS NOT NULL
+           AND activated_at >= NOW() - INTERVAL '24 hours'`,
         [userId],
       );
       if (parseInt(throttleCheck.rows[0].count, 10) >= 1) {
@@ -581,7 +586,7 @@ export const submitReceiptEntryService = async (
       );
     }
 
-    return { ticketId: firstTicketId, code: firstCode };
+    return { ticketId: firstTicketId, code: firstCode, entries_earned: entriesEarned };
   } catch (err) {
     await client.query('ROLLBACK');
     // Apply same-user duplicate penalty now that the client lock is released.

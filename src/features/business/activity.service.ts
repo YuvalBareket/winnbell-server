@@ -14,6 +14,7 @@ export interface ActivityItem {
   entry_source: string;
   status: 'active' | 'under_review';
   quarantine_reason: string | null;
+  entries_earned: number;
   created_at: string;
 }
 
@@ -85,8 +86,15 @@ export const getBusinessActivity = async (
   };
 
   // ── Activity feed with cursor-based pagination ──
+  // Only show primary receipt tickets (receipt_identifier IS NOT NULL) to avoid
+  // showing blank secondary rows from multi-entry submissions.
+  // Non-receipt tickets (code/free/promo) always have receipt_identifier = NULL,
+  // so we exclude only receipt-source secondaries.
   const feedParams: unknown[] = [businessId];
-  const conditions: string[] = ['bl.business_id = $1'];
+  const conditions: string[] = [
+    'bl.business_id = $1',
+    "NOT (t.entry_source = 'receipt' AND t.receipt_identifier IS NULL)",
+  ];
 
   if (dateRange === 'today') {
     conditions.push("t.created_at >= CURRENT_DATE");
@@ -119,7 +127,15 @@ export const getBusinessActivity = async (
       t.entry_source,
       t.is_quarantined,
       t.quarantine_reason,
-      t.created_at
+      t.created_at,
+      -- Count all tickets from the same receipt submission (same user, business, draw, activated_at)
+      -- NOW() is stable within a transaction so all multi-entry rows share the exact same activated_at.
+      (SELECT COUNT(*) FROM ticket t2
+       WHERE t2.activated_by_user_id = t.activated_by_user_id
+         AND t2.business_id = t.business_id
+         AND t2.draw_id = t.draw_id
+         AND t2.activated_at = t.activated_at
+         AND t2.entry_source = 'receipt') AS entries_earned
     FROM ticket t
     JOIN business_location bl ON bl.id = t.location_id
     WHERE ${conditions.join(' AND ')}
@@ -139,6 +155,7 @@ export const getBusinessActivity = async (
     entry_source: r.entry_source ?? 'receipt',
     status: r.is_quarantined ? 'under_review' : 'active',
     quarantine_reason: r.quarantine_reason ?? null,
+    entries_earned: Number(r.entries_earned) || 1,
     created_at: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
   }));
 
@@ -186,11 +203,20 @@ export const setTicketQualification = async (
 
   const { quarantine_reason } = authRes.rows[0];
 
+  // Apply to all tickets from the same submission (primary + all secondary multi-entry rows).
+  // They share the same activated_by_user_id, business_id, draw_id, and activated_at.
+  const groupClause = `
+    WHERE activated_by_user_id = (SELECT activated_by_user_id FROM ticket WHERE id = $1)
+      AND business_id           = (SELECT business_id           FROM ticket WHERE id = $1)
+      AND draw_id               = (SELECT draw_id               FROM ticket WHERE id = $1)
+      AND activated_at          = (SELECT activated_at          FROM ticket WHERE id = $1)
+      AND entry_source = 'receipt'
+  `;
+
   if (disqualify) {
     await pool.query(
-      `UPDATE ticket
-       SET is_quarantined = TRUE, quarantine_reason = 'business_review', quarantined_at = NOW()
-       WHERE id = $1`,
+      `UPDATE ticket SET is_quarantined = TRUE, quarantine_reason = 'business_review', quarantined_at = NOW()
+       ${groupClause}`,
       [ticketId],
     );
   } else {
@@ -199,9 +225,8 @@ export const setTicketQualification = async (
       throw Object.assign(new Error('This entry was flagged by the system and cannot be restored here.'), { status: 400 });
     }
     await pool.query(
-      `UPDATE ticket
-       SET is_quarantined = FALSE, quarantine_reason = NULL, quarantined_at = NULL
-       WHERE id = $1`,
+      `UPDATE ticket SET is_quarantined = FALSE, quarantine_reason = NULL, quarantined_at = NULL
+       ${groupClause} AND quarantine_reason = 'business_review'`,
       [ticketId],
     );
   }

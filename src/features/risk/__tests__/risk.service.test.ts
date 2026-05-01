@@ -3,17 +3,20 @@
  *
  * Covers: sequential guessing, rapid submission, cross-user duplicate multiplier,
  * accidental double-tap (same-user dup), trash-picker (velocity + rapid),
- * weekly decay, and amount outlier.
+ * weekly decay, amount outlier, and sustained velocity signals.
  *
  * DB is mocked via jest.mock so no real connection is needed.
  *
  * Query order for evaluateUserRisk (with full context):
  *   1. user SELECT (risk_score, risk_last_flagged_at)
- *   2. velocity SELECT (tickets in 24 h)
- *   3. rapid SELECT (tickets in 30 s at same business)
- *   4. sequential SELECT (recent identifiers)
- *   5. threshold probe SELECT (same identifier, different amount)
- *   6. amount avg SELECT
+ *   2. [optional] decay UPDATE (only when score > 0 and lastFlagged >= 7 days ago)
+ *   3. velocity 24h SELECT (submissions — receipt_identifier IS NOT NULL)
+ *   4. weekly 7d SELECT (sustained weekly velocity)
+ *   5. monthly 30d SELECT (sustained monthly volume)
+ *   6. rapid SELECT (tickets in 30 s at same business)
+ *   7. sequential SELECT (recent identifiers)
+ *   8. threshold probe SELECT (same identifier, different amount)
+ *   9. amount avg SELECT
  */
 
 const mockQuery = jest.fn();
@@ -40,8 +43,18 @@ const setupQueries = (responses: Array<{ rows: unknown[] }>) => {
 };
 
 /**
- * Convenience: build the standard 6-query sequence for a clean submission
+ * Convenience: build the standard 8-query sequence for a clean submission
  * with no flags, given a starting stored score and last-flagged date.
+ *
+ * Query order (no decay):
+ *   0: user SELECT
+ *   1: velocity 24h SELECT
+ *   2: weekly 7d SELECT
+ *   3: monthly 30d SELECT
+ *   4: rapid SELECT
+ *   5: sequential SELECT
+ *   6: threshold probe SELECT
+ *   7: avg amount SELECT
  */
 const cleanSequence = (
   storedScore: number,
@@ -52,11 +65,13 @@ const cleanSequence = (
   avgAmount: number,
 ): Array<{ rows: unknown[] }> => [
   { rows: [{ risk_score: storedScore, risk_last_flagged_at: lastFlagged }] },
-  { rows: [{ count: String(velocityCount), distinct_businesses: '1' }] },
-  { rows: [{ count: String(rapidCount) }] },
-  { rows: seqRows },
-  { rows: [{ count: '0' }] }, // threshold probe — none
-  { rows: [{ avg_amount: String(avgAmount) }] },
+  { rows: [{ count: String(velocityCount), distinct_businesses: '1' }] }, // 24h
+  { rows: [{ count: '0' }] },                                              // 7d
+  { rows: [{ count: '0' }] },                                              // 30d
+  { rows: [{ count: String(rapidCount) }] },                               // rapid
+  { rows: seqRows },                                                        // sequential
+  { rows: [{ count: '0' }] },                                              // threshold probe
+  { rows: [{ avg_amount: String(avgAmount) }] },                           // avg
 ];
 
 beforeEach(() => {
@@ -71,8 +86,10 @@ describe('Sequential Scammer — sequential_guessing flag', () => {
   test('fires sequential_guessing when 3+ recent identifiers are within 5 of current', async () => {
     setupQueries([
       { rows: [{ risk_score: 0, risk_last_flagged_at: null }] },
-      { rows: [{ count: '2', distinct_businesses: '1' }] },
-      { rows: [{ count: '0' }] },
+      { rows: [{ count: '2', distinct_businesses: '1' }] }, // 24h velocity
+      { rows: [{ count: '0' }] },                            // 7d
+      { rows: [{ count: '0' }] },                            // 30d
+      { rows: [{ count: '0' }] },                            // rapid
       // 3 neighbors close to RCPT105 (100, 101, 102 — all within 5)
       {
         rows: [
@@ -99,8 +116,10 @@ describe('Sequential Scammer — sequential_guessing flag', () => {
   test('does NOT fire sequential_guessing when only 2 close neighbors exist (threshold is 3)', async () => {
     setupQueries([
       { rows: [{ risk_score: 0, risk_last_flagged_at: null }] },
-      { rows: [{ count: '1', distinct_businesses: '1' }] },
-      { rows: [{ count: '0' }] },
+      { rows: [{ count: '1', distinct_businesses: '1' }] }, // 24h
+      { rows: [{ count: '0' }] },                            // 7d
+      { rows: [{ count: '0' }] },                            // 30d
+      { rows: [{ count: '0' }] },                            // rapid
       // Only 2 neighbors close to RCPT103
       { rows: [{ receipt_identifier: 'RCPT102' }, { receipt_identifier: 'RCPT101' }] },
       { rows: [{ count: '0' }] }, // threshold probe
@@ -125,10 +144,12 @@ describe('Rapid Submission — rapid_submission flag', () => {
   test('fires rapid_submission when a ticket at same business exists within 30 seconds', async () => {
     setupQueries([
       { rows: [{ risk_score: 0, risk_last_flagged_at: null }] },
-      { rows: [{ count: '1', distinct_businesses: '1' }] },
-      { rows: [{ count: '1' }] }, // rapid — 1 in last 30 s
-      { rows: [{ receipt_identifier: 'RCPT200' }] }, // only 1 row — too few for seq check
-      { rows: [{ count: '0' }] }, // threshold probe
+      { rows: [{ count: '1', distinct_businesses: '1' }] }, // 24h
+      { rows: [{ count: '0' }] },                            // 7d
+      { rows: [{ count: '0' }] },                            // 30d
+      { rows: [{ count: '1' }] },                            // rapid — 1 in last 30 s
+      { rows: [{ receipt_identifier: 'RCPT200' }] },         // only 1 row — too few for seq check
+      { rows: [{ count: '0' }] },                            // threshold probe
       { rows: [{ avg_amount: '40' }] },
     ]);
 
@@ -146,10 +167,12 @@ describe('Rapid Submission — rapid_submission flag', () => {
   test('does NOT fire rapid_submission when no ticket within 30 seconds', async () => {
     setupQueries([
       { rows: [{ risk_score: 0, risk_last_flagged_at: null }] },
-      { rows: [{ count: '0', distinct_businesses: '0' }] },
-      { rows: [{ count: '0' }] }, // rapid — 0
-      { rows: [] },
-      { rows: [{ count: '0' }] }, // threshold probe
+      { rows: [{ count: '0', distinct_businesses: '0' }] }, // 24h
+      { rows: [{ count: '0' }] },                            // 7d
+      { rows: [{ count: '0' }] },                            // 30d
+      { rows: [{ count: '0' }] },                            // rapid — 0
+      { rows: [] },                                           // sequential
+      { rows: [{ count: '0' }] },                            // threshold probe
       { rows: [{ avg_amount: '40' }] },
     ]);
 
@@ -175,10 +198,12 @@ describe('Cross-user duplicate — scaled multiplier', () => {
   const runWithScore = async (storedScore: number) => {
     setupQueries([
       { rows: [{ risk_score: storedScore, risk_last_flagged_at: new Date() }] },
-      { rows: [{ count: '0', distinct_businesses: '0' }] },
-      { rows: [{ count: '0' }] },
-      { rows: [] },
-      { rows: [{ count: '0' }] }, // threshold probe
+      { rows: [{ count: '0', distinct_businesses: '0' }] }, // 24h
+      { rows: [{ count: '0' }] },                            // 7d
+      { rows: [{ count: '0' }] },                            // 30d
+      { rows: [{ count: '0' }] },                            // rapid
+      { rows: [] },                                           // sequential
+      { rows: [{ count: '0' }] },                            // threshold probe
       { rows: [{ avg_amount: '50' }] },
     ]);
 
@@ -238,7 +263,9 @@ describe('Trash Picker — velocity + rapid both fire', () => {
   test('fires high_submission_velocity and rapid_submission together for delta ≥ 7', async () => {
     setupQueries([
       { rows: [{ risk_score: 5, risk_last_flagged_at: new Date() }] },
-      { rows: [{ count: '8', distinct_businesses: '1' }] }, // velocity ≥ 7 at 1 biz → full penalty
+      { rows: [{ count: '8', distinct_businesses: '1' }] }, // 24h velocity ≥ 7 at 1 biz → full penalty
+      { rows: [{ count: '0' }] },                            // 7d (not ≥20, no flag)
+      { rows: [{ count: '0' }] },                            // 30d (not ≥60, no flag)
       { rows: [{ count: '1' }] },                            // rapid
       { rows: [{ receipt_identifier: 'RCPT600' }] },         // only 1 seq row
       { rows: [{ count: '0' }] },                            // threshold probe
@@ -265,15 +292,16 @@ describe('Trash Picker — velocity + rapid both fire', () => {
 describe('Weekly decay — score decremented when no flag in 7+ days', () => {
   test('applies decay so totalScore = (storedScore - 1) + delta on clean submission', async () => {
     const eightDaysAgo = new Date(Date.now() - 8 * 24 * 60 * 60 * 1000);
-    // Second call is the UPDATE for decay — mock it too
     mockQuery
       .mockResolvedValueOnce({ rows: [{ risk_score: 5, risk_last_flagged_at: eightDaysAgo }] }) // user SELECT
-      .mockResolvedValueOnce({ rows: [] })  // decay UPDATE
-      .mockResolvedValueOnce({ rows: [{ count: '0', distinct_businesses: '0' }] }) // velocity
-      .mockResolvedValueOnce({ rows: [{ count: '0' }] }) // rapid
-      .mockResolvedValueOnce({ rows: [] })               // sequential
-      .mockResolvedValueOnce({ rows: [{ count: '0' }] }) // threshold probe
-      .mockResolvedValueOnce({ rows: [{ avg_amount: '10' }] }); // avg
+      .mockResolvedValueOnce({ rows: [] })                                                        // decay UPDATE
+      .mockResolvedValueOnce({ rows: [{ count: '0', distinct_businesses: '0' }] })               // 24h velocity
+      .mockResolvedValueOnce({ rows: [{ count: '0' }] })                                         // 7d
+      .mockResolvedValueOnce({ rows: [{ count: '0' }] })                                         // 30d
+      .mockResolvedValueOnce({ rows: [{ count: '0' }] })                                         // rapid
+      .mockResolvedValueOnce({ rows: [] })                                                        // sequential
+      .mockResolvedValueOnce({ rows: [{ count: '0' }] })                                         // threshold probe
+      .mockResolvedValueOnce({ rows: [{ avg_amount: '10' }] });                                  // avg
 
     const result = await evaluateUserRisk(6, {
       businessId: 10,
@@ -291,10 +319,12 @@ describe('Weekly decay — score decremented when no flag in 7+ days', () => {
     const yesterday = new Date(Date.now() - 1 * 24 * 60 * 60 * 1000);
     setupQueries([
       { rows: [{ risk_score: 5, risk_last_flagged_at: yesterday }] },
-      { rows: [{ count: '0', distinct_businesses: '0' }] },
-      { rows: [{ count: '0' }] },
-      { rows: [] },
-      { rows: [{ count: '0' }] },
+      { rows: [{ count: '0', distinct_businesses: '0' }] }, // 24h
+      { rows: [{ count: '0' }] },                            // 7d
+      { rows: [{ count: '0' }] },                            // 30d
+      { rows: [{ count: '0' }] },                            // rapid
+      { rows: [] },                                           // sequential
+      { rows: [{ count: '0' }] },                            // threshold probe
       { rows: [{ avg_amount: '10' }] },
     ]);
 
@@ -318,11 +348,13 @@ describe('Amount outlier flag', () => {
   test('fires amount_outlier when transaction is more than 3× the 30-day business average', async () => {
     setupQueries([
       { rows: [{ risk_score: 0, risk_last_flagged_at: null }] },
-      { rows: [{ count: '0', distinct_businesses: '0' }] },
-      { rows: [{ count: '0' }] },
-      { rows: [] },
-      { rows: [{ count: '0' }] }, // threshold probe
-      { rows: [{ avg_amount: '20' }] }, // avg = 20, amount = 100 → 100 > 60
+      { rows: [{ count: '0', distinct_businesses: '0' }] }, // 24h
+      { rows: [{ count: '0' }] },                            // 7d
+      { rows: [{ count: '0' }] },                            // 30d
+      { rows: [{ count: '0' }] },                            // rapid
+      { rows: [] },                                           // sequential
+      { rows: [{ count: '0' }] },                            // threshold probe
+      { rows: [{ avg_amount: '20' }] },                      // avg = 20, amount = 100 → 100 > 60
     ]);
 
     const result = await evaluateUserRisk(7, {
@@ -339,11 +371,13 @@ describe('Amount outlier flag', () => {
   test('does NOT fire amount_outlier when transaction is within 3× the average', async () => {
     setupQueries([
       { rows: [{ risk_score: 0, risk_last_flagged_at: null }] },
-      { rows: [{ count: '0', distinct_businesses: '0' }] },
-      { rows: [{ count: '0' }] },
-      { rows: [] },
-      { rows: [{ count: '0' }] }, // threshold probe
-      { rows: [{ avg_amount: '50' }] }, // avg = 50, amount = 55 → well within 3×
+      { rows: [{ count: '0', distinct_businesses: '0' }] }, // 24h
+      { rows: [{ count: '0' }] },                            // 7d
+      { rows: [{ count: '0' }] },                            // 30d
+      { rows: [{ count: '0' }] },                            // rapid
+      { rows: [] },                                           // sequential
+      { rows: [{ count: '0' }] },                            // threshold probe
+      { rows: [{ avg_amount: '50' }] },                      // avg = 50, amount = 55 → well within 3×
     ]);
 
     const result = await evaluateUserRisk(7, {
@@ -377,10 +411,12 @@ describe('Suspiciously fast typing — suspiciously_fast_input flag', () => {
   test('fires when identifier > 4 chars, method is typed, and typingDurationMs < 800', async () => {
     setupQueries([
       { rows: [{ risk_score: 0, risk_last_flagged_at: null }] },
-      { rows: [{ count: '0', distinct_businesses: '0' }] },
-      { rows: [{ count: '0' }] },
-      { rows: [] },
-      { rows: [{ count: '0' }] }, // threshold probe
+      { rows: [{ count: '0', distinct_businesses: '0' }] }, // 24h
+      { rows: [{ count: '0' }] },                            // 7d
+      { rows: [{ count: '0' }] },                            // 30d
+      { rows: [{ count: '0' }] },                            // rapid
+      { rows: [] },                                           // sequential
+      { rows: [{ count: '0' }] },                            // threshold probe
       { rows: [{ avg_amount: '30' }] },
     ]);
 
@@ -400,10 +436,12 @@ describe('Suspiciously fast typing — suspiciously_fast_input flag', () => {
   test('does NOT fire when identifier was pasted (method is pasted)', async () => {
     setupQueries([
       { rows: [{ risk_score: 0, risk_last_flagged_at: null }] },
-      { rows: [{ count: '0', distinct_businesses: '0' }] },
-      { rows: [{ count: '0' }] },
-      { rows: [] },
-      { rows: [{ count: '0' }] }, // threshold probe
+      { rows: [{ count: '0', distinct_businesses: '0' }] }, // 24h
+      { rows: [{ count: '0' }] },                            // 7d
+      { rows: [{ count: '0' }] },                            // 30d
+      { rows: [{ count: '0' }] },                            // rapid
+      { rows: [] },                                           // sequential
+      { rows: [{ count: '0' }] },                            // threshold probe
       { rows: [{ avg_amount: '30' }] },
     ]);
 
@@ -417,5 +455,79 @@ describe('Suspiciously fast typing — suspiciously_fast_input flag', () => {
     });
 
     expect(result.flags).not.toContain('suspiciously_fast_input');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 10. Sustained velocity signals — weekly and monthly
+// ─────────────────────────────────────────────────────────────────────────────
+describe('Sustained velocity signals', () => {
+  test('fires sustained_weekly_velocity when ≥20 submissions in 7 days', async () => {
+    setupQueries([
+      { rows: [{ risk_score: 0, risk_last_flagged_at: null }] },
+      { rows: [{ count: '2', distinct_businesses: '1' }] }, // 24h — not enough for daily flag
+      { rows: [{ count: '20' }] },                           // 7d — exactly threshold
+      { rows: [{ count: '0' }] },                            // 30d
+      { rows: [{ count: '0' }] },                            // rapid
+      { rows: [] },                                           // sequential
+      { rows: [{ count: '0' }] },                            // threshold probe
+      { rows: [{ avg_amount: '30' }] },
+    ]);
+
+    const result = await evaluateUserRisk(10, {
+      businessId: 10,
+      receiptIdentifier: 'RCPT-W1',
+      transactionAmount: 30,
+      isDuplicateCrossUser: false,
+    });
+
+    expect(result.flags).toContain('sustained_weekly_velocity');
+    expect(result.delta).toBeGreaterThanOrEqual(2);
+  });
+
+  test('fires sustained_monthly_volume when ≥60 submissions in 30 days', async () => {
+    setupQueries([
+      { rows: [{ risk_score: 0, risk_last_flagged_at: null }] },
+      { rows: [{ count: '2', distinct_businesses: '1' }] }, // 24h
+      { rows: [{ count: '0' }] },                            // 7d
+      { rows: [{ count: '60' }] },                           // 30d — exactly threshold
+      { rows: [{ count: '0' }] },                            // rapid
+      { rows: [] },                                           // sequential
+      { rows: [{ count: '0' }] },                            // threshold probe
+      { rows: [{ avg_amount: '30' }] },
+    ]);
+
+    const result = await evaluateUserRisk(10, {
+      businessId: 10,
+      receiptIdentifier: 'RCPT-M1',
+      transactionAmount: 30,
+      isDuplicateCrossUser: false,
+    });
+
+    expect(result.flags).toContain('sustained_monthly_volume');
+    expect(result.delta).toBeGreaterThanOrEqual(3);
+  });
+
+  test('does NOT fire sustained signals when counts are below thresholds', async () => {
+    setupQueries([
+      { rows: [{ risk_score: 0, risk_last_flagged_at: null }] },
+      { rows: [{ count: '2', distinct_businesses: '1' }] }, // 24h
+      { rows: [{ count: '19' }] },                           // 7d — just under threshold
+      { rows: [{ count: '59' }] },                           // 30d — just under threshold
+      { rows: [{ count: '0' }] },                            // rapid
+      { rows: [] },                                           // sequential
+      { rows: [{ count: '0' }] },                            // threshold probe
+      { rows: [{ avg_amount: '30' }] },
+    ]);
+
+    const result = await evaluateUserRisk(10, {
+      businessId: 10,
+      receiptIdentifier: 'RCPT-CLEAN',
+      transactionAmount: 30,
+      isDuplicateCrossUser: false,
+    });
+
+    expect(result.flags).not.toContain('sustained_weekly_velocity');
+    expect(result.flags).not.toContain('sustained_monthly_volume');
   });
 });
