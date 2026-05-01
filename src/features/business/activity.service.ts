@@ -13,6 +13,7 @@ export interface ActivityItem {
   receipt_identifier_masked: string | null;
   entry_source: string;
   status: 'active' | 'under_review';
+  quarantine_reason: string | null;
   created_at: string;
 }
 
@@ -117,6 +118,7 @@ export const getBusinessActivity = async (
       t.receipt_identifier,
       t.entry_source,
       t.is_quarantined,
+      t.quarantine_reason,
       t.created_at
     FROM ticket t
     JOIN business_location bl ON bl.id = t.location_id
@@ -136,6 +138,7 @@ export const getBusinessActivity = async (
     receipt_identifier_masked: maskReceiptId(r.receipt_identifier),
     entry_source: r.entry_source ?? 'receipt',
     status: r.is_quarantined ? 'under_review' : 'active',
+    quarantine_reason: r.quarantine_reason ?? null,
     created_at: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
   }));
 
@@ -144,4 +147,62 @@ export const getBusinessActivity = async (
     items,
     next_cursor: hasMore ? items[items.length - 1].ticket_id : null,
   };
+};
+
+/**
+ * Business owner or location manager manually disqualifies (or restores) a receipt entry.
+ *
+ * Rules:
+ *  - disqualify=true  → quarantine with reason 'business_review' (frees cap slot)
+ *  - disqualify=false → only clears quarantine if reason is 'business_review';
+ *                       system/admin quarantines are left untouched
+ *  - Ownership: business owner matches via business_id; manager matches via location_id
+ */
+export const setTicketQualification = async (
+  ticketId: number,
+  userId: number,
+  jwtLocationId: number | null | undefined,
+  disqualify: boolean,
+): Promise<void> => {
+  const pool = getPool();
+
+  // Verify the caller owns this ticket (owner via business, manager via location)
+  const authRes = await pool.query(
+    `SELECT t.id, t.quarantine_reason
+     FROM ticket t
+     JOIN business_location bl ON bl.id = t.location_id
+     JOIN business b ON b.id = bl.business_id
+     WHERE t.id = $1
+       AND (
+         b.user_id = $2
+         OR (bl.manager_user_id = $2 AND ($3::int IS NULL OR bl.id = $3))
+       )`,
+    [ticketId, userId, jwtLocationId ?? null],
+  );
+
+  if (authRes.rows.length === 0) {
+    throw Object.assign(new Error('Ticket not found or access denied'), { status: 403 });
+  }
+
+  const { quarantine_reason } = authRes.rows[0];
+
+  if (disqualify) {
+    await pool.query(
+      `UPDATE ticket
+       SET is_quarantined = TRUE, quarantine_reason = 'business_review', quarantined_at = NOW()
+       WHERE id = $1`,
+      [ticketId],
+    );
+  } else {
+    // Only restore tickets the business itself disqualified — never override system/admin quarantines
+    if (quarantine_reason !== 'business_review') {
+      throw Object.assign(new Error('This entry was flagged by the system and cannot be restored here.'), { status: 400 });
+    }
+    await pool.query(
+      `UPDATE ticket
+       SET is_quarantined = FALSE, quarantine_reason = NULL, quarantined_at = NULL
+       WHERE id = $1`,
+      [ticketId],
+    );
+  }
 };

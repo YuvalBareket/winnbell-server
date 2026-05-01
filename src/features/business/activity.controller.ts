@@ -1,6 +1,6 @@
 import { Response } from 'express';
 import { AuthRequest } from '../../shared/middleware/auth.middleware.js';
-import { getBusinessActivity } from './activity.service.js';
+import { getBusinessActivity, setTicketQualification } from './activity.service.js';
 
 export const getActivity = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
@@ -22,5 +22,28 @@ export const getActivity = async (req: AuthRequest, res: Response): Promise<void
     res.json(data);
   } catch (err: any) {
     res.status(500).json({ message: err.message || 'Failed to load activity' });
+  }
+};
+
+export const qualifyTicket = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.id;
+    const jwtLocationId = req.user!.location_id ?? null;
+    const ticketId = parseInt(req.params['ticketId'] as string, 10);
+    const { disqualify } = req.body;
+
+    if (isNaN(ticketId)) {
+      res.status(400).json({ message: 'Invalid ticket ID' });
+      return;
+    }
+    if (typeof disqualify !== 'boolean') {
+      res.status(400).json({ message: 'disqualify must be a boolean' });
+      return;
+    }
+
+    await setTicketQualification(ticketId, userId, jwtLocationId, disqualify);
+    res.status(200).json({ success: true });
+  } catch (err: any) {
+    res.status(err.status ?? 500).json({ message: err.message || 'Failed to update ticket' });
   }
 };

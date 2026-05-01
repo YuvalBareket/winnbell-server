@@ -3,28 +3,34 @@ import { getPool } from '../../shared/db/db.js';
 export interface DrawBreakdown {
   draw_id: number;
   draw_name: string;
-  prize_amount: number;
   draw_date: string;
   draw_status: string;
-  issued: number;
-  activated: number;
+  entries: number;
+  revenue: number;
+}
+
+export interface CustomerGrowthPoint {
+  month: string;
+  new_customers: number;
+  total_customers: number;
 }
 
 export interface StatsResult {
   summary: {
-    total_issued: number;
-    total_activated: number;
-    activation_rate: number;
+    total_entries: number;
+    total_revenue: number;
+    avg_transaction: number;
   };
-  daily: Array<{ date: string; issued: number; activated: number }>;
-  monthly: Array<{ month: string; issued: number; activated: number }>;
+  daily: Array<{ date: string; entries: number; revenue: number }>;
+  monthly: Array<{ month: string; entries: number; revenue: number }>;
   locations: Array<{
     location_id: number;
     location_name: string;
-    issued: number;
-    activated: number;
+    entries: number;
+    revenue: number;
   }>;
   draws: DrawBreakdown[];
+  customer_growth: CustomerGrowthPoint[];
 }
 
 export const getBusinessStats = async (
@@ -66,24 +72,25 @@ export const getBusinessStats = async (
   // --- Summary KPIs ---
   const summaryRes = await pool.query(`
     SELECT
-      COUNT(*) AS total_issued,
-      SUM(CASE WHEN status = 'Activated' THEN 1 ELSE 0 END) AS total_activated
+      COUNT(*) AS total_entries,
+      COALESCE(SUM(transaction_amount), 0) AS total_revenue,
+      COALESCE(AVG(transaction_amount), 0) AS avg_transaction
     FROM ticket
     WHERE business_id = $1 ${locationClause} ${drawClause}
+      AND entry_source = 'receipt'
   `, baseParams);
 
-  const { total_issued = 0, total_activated = 0 } = summaryRes.rows[0] ?? {};
-  const activation_rate =
-    total_issued > 0 ? Math.round((total_activated / total_issued) * 100) : 0;
+  const { total_entries = 0, total_revenue = 0, avg_transaction = 0 } = summaryRes.rows[0] ?? {};
 
   // --- Daily breakdown (last 30 days) ---
   const dailyRes = await pool.query(`
     SELECT
       TO_CHAR(created_at, 'YYYY-MM-DD') AS date,
-      COUNT(*) AS issued,
-      SUM(CASE WHEN status = 'Activated' THEN 1 ELSE 0 END) AS activated
+      COUNT(*) AS entries,
+      COALESCE(SUM(transaction_amount), 0) AS revenue
     FROM ticket
     WHERE business_id = $1 ${locationClause} ${drawClause}
+      AND entry_source = 'receipt'
       AND created_at >= NOW() - INTERVAL '30 days'
     GROUP BY TO_CHAR(created_at, 'YYYY-MM-DD')
     ORDER BY date
@@ -93,10 +100,11 @@ export const getBusinessStats = async (
   const monthlyRes = await pool.query(`
     SELECT
       TO_CHAR(created_at, 'YYYY-MM') AS month,
-      COUNT(*) AS issued,
-      SUM(CASE WHEN status = 'Activated' THEN 1 ELSE 0 END) AS activated
+      COUNT(*) AS entries,
+      COALESCE(SUM(transaction_amount), 0) AS revenue
     FROM ticket
     WHERE business_id = $1 ${locationClause} ${drawClause}
+      AND entry_source = 'receipt'
       AND created_at >= NOW() - INTERVAL '12 months'
     GROUP BY TO_CHAR(created_at, 'YYYY-MM')
     ORDER BY month
@@ -111,16 +119,17 @@ export const getBusinessStats = async (
     SELECT
       bl.id AS location_id,
       bl.name AS location_name,
-      COUNT(t.id) AS issued,
-      SUM(CASE WHEN t.status = 'Activated' THEN 1 ELSE 0 END) AS activated
+      COUNT(t.id) AS entries,
+      COALESCE(SUM(t.transaction_amount), 0) AS revenue
     FROM business_location bl
     LEFT JOIN ticket t ON t.location_id = bl.id
       AND t.business_id = $1
+      AND t.entry_source = 'receipt'
       ${locDrawParam ? `AND t.draw_id = $${locDrawParam}` : ''}
     WHERE bl.business_id = $1
       ${locLocParam ? `AND bl.id = $${locLocParam}` : ''}
     GROUP BY bl.id, bl.name
-    ORDER BY issued DESC
+    ORDER BY entries DESC
   `, locParams);
 
   // --- Per-draw breakdown ---
@@ -131,25 +140,78 @@ export const getBusinessStats = async (
     SELECT
       d.id AS draw_id,
       d.name AS draw_name,
-      d.prize_pool AS prize_amount,
       TO_CHAR(d.draw_date, 'YYYY-MM-DD') AS draw_date,
       d.status AS draw_status,
-      COUNT(t.id) AS issued,
-      SUM(CASE WHEN t.status = 'Activated' THEN 1 ELSE 0 END) AS activated
+      COUNT(t.id) AS entries,
+      COALESCE(SUM(t.transaction_amount), 0) AS revenue
     FROM draw d
     LEFT JOIN ticket t ON t.draw_id = d.id
       AND t.business_id = $1
+      AND t.entry_source = 'receipt'
       ${drawsLocParam ? `AND t.location_id = $${drawsLocParam}` : ''}
     WHERE UPPER(d.status) IN ('OPEN', 'CLOSED')
-    GROUP BY d.id, d.name, d.prize_pool, d.draw_date, d.status
+    GROUP BY d.id, d.name, d.draw_date, d.status
     ORDER BY d.draw_date DESC
   `, drawsParams);
 
+  // --- Customer growth (new unique customers per month, last 12 months) ---
+  // "new customer" = first time this user submitted a receipt for this business
+  const growthParams: unknown[] = [businessId];
+  const growthLocParam = scopedLocationId ? (growthParams.push(scopedLocationId), growthParams.length) : null;
+
+  const growthRes = await pool.query(`
+    SELECT
+      TO_CHAR(DATE_TRUNC('month', first_submission), 'YYYY-MM') AS month,
+      COUNT(*) AS new_customers,
+      SUM(COUNT(*)) OVER (ORDER BY DATE_TRUNC('month', first_submission)) AS total_customers
+    FROM (
+      SELECT activated_by_user_id, MIN(created_at) AS first_submission
+      FROM ticket
+      WHERE business_id = $1
+        AND entry_source = 'receipt'
+        AND activated_by_user_id IS NOT NULL
+        ${growthLocParam ? `AND location_id = $${growthLocParam}` : ''}
+      GROUP BY activated_by_user_id
+    ) first_subs
+    WHERE DATE_TRUNC('month', first_submission) >= DATE_TRUNC('month', NOW() - INTERVAL '11 months')
+    GROUP BY DATE_TRUNC('month', first_submission)
+    ORDER BY month
+  `, growthParams);
+
   return {
-    summary: { total_issued, total_activated, activation_rate },
-    daily: dailyRes.rows,
-    monthly: monthlyRes.rows,
-    locations: locRes.rows,
-    draws: drawsRes.rows,
+    summary: {
+      total_entries: Number(total_entries),
+      total_revenue: parseFloat(total_revenue),
+      avg_transaction: parseFloat(avg_transaction),
+    },
+    daily: dailyRes.rows.map(r => ({
+      date: r.date,
+      entries: Number(r.entries),
+      revenue: parseFloat(r.revenue),
+    })),
+    monthly: monthlyRes.rows.map(r => ({
+      month: r.month,
+      entries: Number(r.entries),
+      revenue: parseFloat(r.revenue),
+    })),
+    locations: locRes.rows.map(r => ({
+      location_id: r.location_id,
+      location_name: r.location_name,
+      entries: Number(r.entries),
+      revenue: parseFloat(r.revenue),
+    })),
+    draws: drawsRes.rows.map(r => ({
+      draw_id: r.draw_id,
+      draw_name: r.draw_name,
+      draw_date: r.draw_date,
+      draw_status: r.draw_status,
+      entries: Number(r.entries),
+      revenue: parseFloat(r.revenue),
+    })),
+    customer_growth: growthRes.rows.map(r => ({
+      month: r.month,
+      new_customers: Number(r.new_customers),
+      total_customers: Number(r.total_customers),
+    })),
   };
 };

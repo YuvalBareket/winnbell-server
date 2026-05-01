@@ -208,7 +208,7 @@ export const createManagerInviteLink = async (locationId: number, ownerUserId: n
     [tokenHash, locationId],
   );
 
-  const baseUrl = process.env.CLIENT_URL || 'http://localhost:8081';
+  const baseUrl = (process.env.CLIENT_URL || 'http://localhost:8081').split(',')[0].trim();
   return `${baseUrl}/register/Location?token=${token}`;
 };
 

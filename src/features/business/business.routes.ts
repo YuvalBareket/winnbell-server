@@ -20,7 +20,7 @@ import {
   updateLogo,
 } from './business.controller.js';
 import { getStats } from './stats.controller.js';
-import { getActivity } from './activity.controller.js';
+import { getActivity, qualifyTicket } from './activity.controller.js';
 import { createCheckout, verifySession, getSubscription, cancelSub, resumeSub } from '../stripe/stripe.controller.js';
 
 const router = Router();
@@ -36,17 +36,18 @@ router.post('/address', getAddressController);
 // /setup requires the user to already have role 'Business' (assigned at registration via invite or sign-up flow)
 router.post('/setup', requireRole('Business'), setupBusiness);
 router.get('/my-business', getMyBusiness);
-router.patch('/', updateBusiness);
-router.patch('/campaign-settings', updateCampaignSettingsController);
-router.get('/upload-url', getUploadUrl);
-router.patch('/logo', updateLogo);
-router.post('/locations', addLocation);
-router.patch('/locations/:locationId', updateLocation);
-router.delete('/locations/:locationId', deleteLocation);
-router.post('/locations/:locationId/invite', createInviteLink);
-router.delete('/locations/:locationId/manager', removeManager);
-router.get('/stats', requireRole('Business', 'Admin'), getStats);
-router.get('/activity', requireRole('Business', 'Admin'), getActivity);
+router.patch('/', requireRole('Business'), updateBusiness);
+router.patch('/campaign-settings', requireRole('Business'), updateCampaignSettingsController);
+router.get('/upload-url', requireRole('Business'), getUploadUrl);
+router.patch('/logo', requireRole('Business'), updateLogo);
+router.post('/locations', requireRole('Business'), addLocation);
+router.patch('/locations/:locationId', requireRole('Business'), updateLocation);
+router.delete('/locations/:locationId', requireRole('Business'), deleteLocation);
+router.post('/locations/:locationId/invite', requireRole('Business'), createInviteLink);
+router.delete('/locations/:locationId/manager', requireRole('Business'), removeManager);
+router.get('/stats', requireRole('Business'), getStats);
+router.get('/activity', requireRole('Business'), getActivity);
+router.patch('/tickets/:ticketId/qualify', requireRole('Business'), qualifyTicket);
 router.post('/subscription/checkout', requireRole('Business'), createCheckout);
 router.post('/subscription/verify-session', requireRole('Business'), verifySession);
 router.get('/subscription', requireRole('Business'), getSubscription);

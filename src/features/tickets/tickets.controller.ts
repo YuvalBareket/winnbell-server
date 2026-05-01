@@ -146,7 +146,9 @@ export const generateTicket = async (req: AuthRequest, res: Response) => {
 
     res.status(201).json({ success: true, code: result.code });
   } catch (error: unknown) {
-    res.status(500).json({ message: error instanceof Error ? error.message : 'Failed to generate ticket' });
+    const msg = error instanceof Error ? error.message : 'Failed to generate ticket';
+    const status = msg.includes('Unauthorized') || msg.includes('cannot') ? 403 : 400;
+    res.status(status).json({ message: msg });
   }
 };
 

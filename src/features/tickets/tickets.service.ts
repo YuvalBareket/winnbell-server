@@ -275,6 +275,8 @@ export const submitReceiptEntryService = async (
 ): Promise<{ ticketId: number; code: string }> => {
   const pool = getPool();
   const client = await pool.connect();
+  let drawId: number = 0;
+  let duplicatePenalty = false;
 
   try {
     await client.query('BEGIN');
@@ -339,7 +341,7 @@ export const submitReceiptEntryService = async (
       `SELECT id, created_at as draw_opened_at FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1`,
     );
     if (drawResult.rows.length === 0) throw new Error('No active draw found.');
-    const drawId = drawResult.rows[0].id;
+    drawId = drawResult.rows[0].id;
 
     // Multi-entry calculation: floor(amount / threshold), capped at 10 per receipt
     const entriesEarned = minTransactionAmount
@@ -455,8 +457,9 @@ export const submitReceiptEntryService = async (
     // Block cross-user duplicate and immediately quarantine the original submitter's ticket.
     // Any second-user attempt on the same receipt is a sharing signal regardless of intent.
     // The original ticket is held for manual review — if legitimate, an admin can release it.
+    // IMPORTANT: use pool (not client) so the quarantine persists after the transaction rollback.
     if (dupCheck.isDuplicate) {
-      await client.query(
+      await pool.query(
         `UPDATE ticket
          SET is_quarantined = TRUE, quarantine_reason = 'shared_receipt_suspected', quarantined_at = NOW()
          WHERE business_id = $1 AND receipt_identifier = $2 AND is_quarantined = FALSE`,
@@ -466,14 +469,16 @@ export const submitReceiptEntryService = async (
     }
 
     // Block same-user re-submit — penalty for trying.
-    // Uses pool directly so the +4 penalty persists even though this throw causes a ROLLBACK.
+    // IMPORTANT: do NOT call updateUserRiskScore/syncUserQuarantineState here via pool while
+    // client holds the user row lock (from the updateUserRiskScore call above using client).
+    // Doing so deadlocks: client waits for pool, pool waits for client's row lock.
+    // Instead, signal the penalty via a variable and apply it in the catch block after ROLLBACK.
     const existingEntry = await client.query(
       `SELECT id FROM ticket WHERE business_id = $1 AND receipt_identifier = $2`,
       [business_id, input.receiptIdentifier],
     );
     if (existingEntry.rows.length > 0) {
-      await updateUserRiskScore(userId, 4);
-      await syncUserQuarantineState(userId, drawId);
+      duplicatePenalty = true;
       throw new Error('This receipt identifier has already been used.');
     }
 
@@ -579,6 +584,15 @@ export const submitReceiptEntryService = async (
     return { ticketId: firstTicketId, code: firstCode };
   } catch (err) {
     await client.query('ROLLBACK');
+    // Apply same-user duplicate penalty now that the client lock is released.
+    if (duplicatePenalty) {
+      try {
+        await updateUserRiskScore(userId, 4);
+        await syncUserQuarantineState(userId, drawId);
+      } catch (penaltyErr) {
+        console.error('[submitReceiptEntryService] Failed to apply duplicate penalty:', penaltyErr);
+      }
+    }
     throw err;
   } finally {
     client.release();

@@ -160,7 +160,8 @@ export const evaluateUserRisk = async (
       [userId, businessId],
     );
     if (seqResult.rows.length >= 2) {
-      const trailingNum = (s: string): number | null => {
+      const trailingNum = (s: string | null | undefined): number | null => {
+        if (!s) return null;
         const m = s.match(/(\d+)$/);
         return m ? parseInt(m[1], 10) : null;
       };

@@ -25,6 +25,10 @@ export const register = async (
       res.status(409).json({ message: 'User already exists' });
       return;
     }
+    if (error instanceof Error && error.message.includes('invitation')) {
+      res.status(400).json({ message: error.message });
+      return;
+    }
     res.status(500).json({ message: 'Server error' });
   }
 };
