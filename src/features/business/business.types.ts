@@ -18,6 +18,7 @@ export interface NearbyBusiness {
   name: string;
   sector: string;
   logo_url: string | null;
+  receipt_example_image_url: string | null;
   distance_km: number;
 }
 
@@ -44,6 +45,7 @@ export interface MyBusinessData {
   description: string;
   terms_text: string;
   logo_url: string | null;
+  receipt_example_image_url: string | null;
   is_subscribed: boolean;
   is_participating: boolean;
   entry_mode: EntryMode;
@@ -58,6 +60,7 @@ export interface MyBusinessData {
 
 export interface UpdateCampaignSettingsInput {
   min_transaction_amount: number | null;
+  receipt_example_image_url?: string | null;
 }
 
 /** @deprecated Use NearbyBusiness instead */
@@ -82,6 +85,7 @@ export interface ParticipatingLocation {
   sector: string;
   logo_url: string | null;
   min_transaction_amount: number | null;
+  receipt_example_image_url: string | null;
 }
 
 export type AddressSuggestion = {

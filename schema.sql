@@ -41,6 +41,7 @@ CREATE TABLE business (
   description            TEXT,
   terms_text             TEXT,
   logo_url               TEXT,
+  receipt_example_image_url TEXT,
   is_subscribed          BOOLEAN NOT NULL DEFAULT FALSE,
   is_participating       BOOLEAN NOT NULL DEFAULT FALSE,
   -- entry_mode: 'receipt' = user submits receipt; 'code' = business generates codes

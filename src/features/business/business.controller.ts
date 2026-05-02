@@ -141,9 +141,19 @@ export const updateBusiness = async (req: AuthRequest, res: Response): Promise<v
 
 export const updateCampaignSettingsController = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const { min_transaction_amount } = req.body as { min_transaction_amount: number | null };
+    const { min_transaction_amount, receipt_example_image_url } = req.body as {
+      min_transaction_amount: number | null;
+      receipt_example_image_url?: string | null;
+    };
 
-    await updateCampaignSettings(req.user!.id, { min_transaction_amount });
+    const data: { min_transaction_amount: number | null; receipt_example_image_url?: string | null } = {
+      min_transaction_amount,
+    };
+    if ('receipt_example_image_url' in req.body) {
+      data.receipt_example_image_url = receipt_example_image_url ?? null;
+    }
+
+    await updateCampaignSettings(req.user!.id, data);
     res.status(204).send();
   } catch (error: unknown) {
     if (error instanceof Error && error.message === 'BUSINESS_NOT_FOUND') {

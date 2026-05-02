@@ -34,6 +34,7 @@ export const getNearbyBusinessesService = async (
       b.name,
       b.sector,
       b.logo_url,
+      b.receipt_example_image_url,
       (6371 * acos(
         LEAST(1.0, GREATEST(-1.0,
           cos($1 * 0.0174532925) * cos(loc.latitude * 0.0174532925) * cos((loc.longitude * 0.0174532925) - ($2 * 0.0174532925)) +
@@ -145,6 +146,7 @@ export const getMyBusinessData = async (userId: number): Promise<MyBusinessData 
         b.description,
         b.terms_text,
         b.logo_url,
+        b.receipt_example_image_url,
         b.is_subscribed,
         b.is_participating,
         b.entry_mode,
@@ -355,7 +357,8 @@ export const searchParticipatingLocationsService = async (query: string): Promis
       b.name AS business_name,
       b.sector,
       b.logo_url,
-      b.min_transaction_amount
+      b.min_transaction_amount,
+      b.receipt_example_image_url
     FROM business_location bl
     JOIN business b ON bl.business_id = b.id
     WHERE bl.is_active = true AND b.is_subscribed = true AND b.is_participating = true
@@ -376,9 +379,20 @@ export const updateCampaignSettings = async (
   data: UpdateCampaignSettingsInput,
 ): Promise<void> => {
   const pool = getPool();
+  // receipt_example_image_url: if key present in data (even null) → update it;
+  // if absent → leave existing value untouched via COALESCE pattern
+  const updateExampleImage = 'receipt_example_image_url' in data;
   const result = await pool.query(
-    `UPDATE business SET min_transaction_amount = $1 WHERE user_id = $2`,
-    [data.min_transaction_amount, ownerUserId],
+    `UPDATE business
+     SET min_transaction_amount   = $1,
+         receipt_example_image_url = CASE WHEN $2 THEN $3 ELSE receipt_example_image_url END
+     WHERE user_id = $4`,
+    [
+      data.min_transaction_amount,
+      updateExampleImage,
+      data.receipt_example_image_url ?? null,
+      ownerUserId,
+    ],
   );
   if (result.rowCount === 0) throw new Error('BUSINESS_NOT_FOUND');
 };
