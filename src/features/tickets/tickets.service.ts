@@ -272,7 +272,7 @@ export const activateFreeTicket = async (userId: number): Promise<ActivationResu
 export const submitReceiptEntryService = async (
   userId: number,
   input: ReceiptEntryInput,
-): Promise<{ ticketId: number; code: string; entries_earned: number }> => {
+): Promise<{ ticketId: number; code: string }> => {
   const pool = getPool();
   const client = await pool.connect();
   let drawId: number = 0;
@@ -346,12 +346,8 @@ export const submitReceiptEntryService = async (
     if (drawResult.rows.length === 0) throw new Error('No active draw found.');
     drawId = drawResult.rows[0].id;
 
-    // Multi-entry calculation: floor(amount / threshold), capped at 10 per receipt
-    const entriesEarned = minTransactionAmount
-      ? Math.min(Math.floor(input.transactionAmount / minTransactionAmount), 10)
-      : 1;
-
-    if (entriesEarned < 1) {
+    // Minimum transaction amount check
+    if (minTransactionAmount && input.transactionAmount < minTransactionAmount) {
       // Always penalise below-threshold submissions — prevents free threshold probing.
       // Use pool directly so this persists even though the enclosing transaction rolls back on throw.
       await updateUserRiskScore(userId, 1);
@@ -488,7 +484,6 @@ export const submitReceiptEntryService = async (
     }
 
     // Entry cap enforcement — quarantined tickets do not consume the cap
-    // Account for all N entries atomically
     if (entry_cap !== null && countsAgainstCap(riskEval, dupCheck.isDuplicate)) {
       const capCheck = await client.query(
         `SELECT COUNT(*) AS count FROM ticket
@@ -496,84 +491,67 @@ export const submitReceiptEntryService = async (
         [business_id, drawId],
       );
       const currentCount = parseInt(capCheck.rows[0].count, 10);
-      if (currentCount + entriesEarned > entry_cap) {
+      if (currentCount + 1 > entry_cap) {
         throw new Error('This business has reached its entry cap for the current draw.');
       }
     }
 
     const isHighRisk = riskEval.totalScore > RISK_THRESHOLDS.MEDIUM_MAX;
-    // Medium-risk users' primary receipt ticket is held quarantined until OCR passes.
-    // This prevents medium-risk users from benefiting from a receipt before it is verified.
+    // Medium-risk users' ticket is held quarantined until OCR passes.
     const isMediumRisk = riskEval.totalScore > RISK_THRESHOLDS.LOW_MAX && !isHighRisk;
+    const hasImage = !!input.receiptImageUrl;
+    const isOcrPending = isMediumRisk && hasImage;
+    const isQuarantined = isHighRisk || isOcrPending;
+    const quarantineReason = isHighRisk ? 'high_risk_user' : isOcrPending ? 'ocr_pending' : null;
+    const quarantinedAt = isQuarantined ? new Date() : null;
 
-    // Insert one ticket row per entry earned (multi-entry support)
-    // Only the first ticket carries the receipt fields; subsequent entries share the receipt identifier
-    let firstTicketId: number = 0;
-    let firstCode = '';
-    for (let i = 0; i < entriesEarned; i++) {
-      const isPrimary = i === 0;
-      const hasImage = isPrimary && !!input.receiptImageUrl;
-
-      // Determine quarantine state for this row
-      // - High risk: always quarantined
-      // - Medium risk + primary entry with image: quarantined as ocr_pending until OCR passes
-      // - All others: not quarantined
-      const isOcrPending = isMediumRisk && hasImage;
-      const isQuarantined = isHighRisk || isOcrPending;
-      const quarantineReason = isHighRisk ? 'high_risk_user' : isOcrPending ? 'ocr_pending' : null;
-      const quarantinedAt = isQuarantined ? new Date() : null;
-
-      const code = await generateGlobalUniqueCode(client);
-      let ticketResult;
-      try {
-        ticketResult = await client.query(
-          `INSERT INTO ticket
-            (code, status, entry_source, business_id, location_id, draw_id,
-             activated_by_user_id, activated_at,
-             receipt_identifier, transaction_amount, transaction_date, receipt_image_url, risk_score,
-             is_quarantined, quarantine_reason, quarantined_at, image_validation_status, submitter_ip)
-           VALUES ($1, 'Activated', 'receipt', $2, $3, $4, $5, NOW(), $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-           RETURNING id`,
-          [
-            code,
-            business_id,
-            input.locationId,
-            drawId,
-            userId,
-            isPrimary ? input.receiptIdentifier : null,
-            isPrimary ? input.transactionAmount : null,
-            isPrimary ? (input.transactionDate ?? null) : null,
-            isPrimary ? (input.receiptImageUrl ?? null) : null,
-            riskEval.totalScore,
-            isQuarantined,
-            quarantineReason,
-            quarantinedAt,
-            hasImage ? 'pending' : 'not_required',
-            input.submitterIp ?? null,
-          ],
-        );
-      } catch (insertErr: any) {
-        // PostgreSQL unique constraint violation — receipt was already submitted
-        if (insertErr?.code === '23505') {
-          throw new Error('This receipt has already been submitted.');
-        }
-        throw insertErr;
+    const code = await generateGlobalUniqueCode(client);
+    let ticketResult;
+    try {
+      ticketResult = await client.query(
+        `INSERT INTO ticket
+          (code, status, entry_source, business_id, location_id, draw_id,
+           activated_by_user_id, activated_at,
+           receipt_identifier, transaction_amount, transaction_date, receipt_image_url, risk_score,
+           is_quarantined, quarantine_reason, quarantined_at, image_validation_status, submitter_ip)
+         VALUES ($1, 'Activated', 'receipt', $2, $3, $4, $5, NOW(), $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+         RETURNING id`,
+        [
+          code,
+          business_id,
+          input.locationId,
+          drawId,
+          userId,
+          input.receiptIdentifier,
+          input.transactionAmount,
+          input.transactionDate ?? null,
+          input.receiptImageUrl ?? null,
+          riskEval.totalScore,
+          isQuarantined,
+          quarantineReason,
+          quarantinedAt,
+          hasImage ? 'pending' : 'not_required',
+          input.submitterIp ?? null,
+        ],
+      );
+    } catch (insertErr: any) {
+      // PostgreSQL unique constraint violation — receipt was already submitted
+      if (insertErr?.code === '23505') {
+        throw new Error('This receipt has already been submitted.');
       }
-      if (isPrimary) {
-        firstTicketId = ticketResult.rows[0].id;
-        firstCode = code;
-      }
+      throw insertErr;
     }
+    const ticketId = ticketResult.rows[0].id;
 
     // Sync quarantine in case score decayed below 15 after the clean-entry update above
     await syncUserQuarantineState(userId, drawId, client);
 
     await client.query('COMMIT');
 
-    // Trigger async OCR validation on the first ticket — runs after commit, never blocks the response
+    // Trigger async OCR validation — runs after commit, never blocks the response
     if (input.receiptImageUrl) {
       validateReceiptAsync(
-        firstTicketId,
+        ticketId,
         userId,
         drawId,
         input.receiptImageUrl,
@@ -586,7 +564,7 @@ export const submitReceiptEntryService = async (
       );
     }
 
-    return { ticketId: firstTicketId, code: firstCode, entries_earned: entriesEarned };
+    return { ticketId, code };
   } catch (err) {
     await client.query('ROLLBACK');
     // Apply same-user duplicate penalty now that the client lock is released.
