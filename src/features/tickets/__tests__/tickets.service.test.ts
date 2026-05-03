@@ -133,8 +133,9 @@ describe('activateTicket — atomic update pattern', () => {
   test('throws "already been used" when atomic UPDATE affects 0 rows (race condition guard)', async () => {
     setupPoolQueries(
       { rows: [{ id: 1, status: 'Issued', business_id: 5, location_id: 2, draw_status: 'Open' }] },
-      { rows: [] },          // ownerCheck — not an owner
-      { rows: [], rowCount: 0 }, // UPDATE — 0 rows affected
+      { rows: [] },                // ownerCheck — not an owner
+      { rows: [{ count: '0' }] }, // draw cap check — under limit
+      { rows: [], rowCount: 0 },  // UPDATE — 0 rows affected
     );
     await expect(activateTicket('ABC123', 1)).rejects.toThrow('already been used');
   });
@@ -142,8 +143,9 @@ describe('activateTicket — atomic update pattern', () => {
   test('succeeds when atomic UPDATE affects 1 row', async () => {
     setupPoolQueries(
       { rows: [{ id: 1, status: 'Issued', business_id: 5, location_id: 2, draw_status: 'Open' }] },
-      { rows: [] },           // ownerCheck — not an owner
-      { rows: [], rowCount: 1 }, // UPDATE — 1 row affected
+      { rows: [] },                // ownerCheck — not an owner
+      { rows: [{ count: '0' }] }, // draw cap check — under limit
+      { rows: [], rowCount: 1 },  // UPDATE — 1 row affected
     );
     const result = await activateTicket('ABC123', 1);
     expect(result.message).toBe('Ticket activated successfully!');
@@ -156,6 +158,7 @@ describe('activateTicket — atomic update pattern', () => {
       const n = capturedSqls.length;
       if (n === 1) return Promise.resolve({ rows: [{ id: 1, status: 'Issued', business_id: 5, location_id: 2, draw_status: 'Open' }] });
       if (n === 2) return Promise.resolve({ rows: [] }); // ownerCheck
+      if (n === 3) return Promise.resolve({ rows: [{ count: '0' }] }); // draw cap check
       return Promise.resolve({ rows: [], rowCount: 1 });
     });
 
@@ -175,10 +178,11 @@ describe('activateFreeTicket — weekly limit enforcement', () => {
    *   0: BEGIN
    *   1: eligibility SELECT (FOR UPDATE)
    *   2: draw SELECT
-   *   3: INSERT free_ticket_usage
-   *   4: generateGlobalUniqueCode — SELECT COUNT(*) FROM ticket WHERE code = $1
-   *   5: INSERT ticket RETURNING id
-   *   6: COMMIT
+   *   3: draw cap SELECT (COUNT tickets for user in draw)
+   *   4: INSERT free_ticket_usage
+   *   5: generateGlobalUniqueCode — SELECT COUNT(*) FROM ticket WHERE code = $1
+   *   6: INSERT ticket RETURNING id
+   *   7: COMMIT
    */
 
   test('throws "Weekly limit reached" when last usage is within the current calendar week', async () => {
@@ -208,13 +212,14 @@ describe('activateFreeTicket — weekly limit enforcement', () => {
 
   test('succeeds when user has never activated a free ticket', async () => {
     setupClientQueries(
-      { rows: [] },               // BEGIN
-      { rows: [] },               // eligibility — no prior usage
-      { rows: [{ id: 5 }] },     // draw SELECT
-      { rows: [] },               // INSERT free_ticket_usage
-      { rows: [{ count: '0' }] }, // generateGlobalUniqueCode uniqueness check
-      { rows: [{ id: 77 }] },    // INSERT ticket RETURNING id
-      { rows: [] },               // COMMIT
+      { rows: [] },                 // BEGIN
+      { rows: [] },                 // eligibility — no prior usage
+      { rows: [{ id: 5 }] },       // draw SELECT
+      { rows: [{ count: '0' }] },  // draw cap check — under limit
+      { rows: [] },                 // INSERT free_ticket_usage
+      { rows: [{ count: '0' }] },  // generateGlobalUniqueCode uniqueness check
+      { rows: [{ id: 77 }] },      // INSERT ticket RETURNING id
+      { rows: [] },                 // COMMIT
     );
     const result = await activateFreeTicket(1);
     expect(result.success).toBe(true);
@@ -227,11 +232,12 @@ describe('activateFreeTicket — weekly limit enforcement', () => {
     setupClientQueries(
       { rows: [] },                               // BEGIN
       { rows: [{ activated_at: oldDate }] },      // eligibility — old, not this week
-      { rows: [{ id: 3 }] },                     // draw SELECT
+      { rows: [{ id: 3 }] },                      // draw SELECT
+      { rows: [{ count: '0' }] },                 // draw cap check — under limit
       { rows: [] },                               // INSERT free_ticket_usage
-      { rows: [{ count: '0' }] },                // uniqueness check
-      { rows: [{ id: 99 }] },                    // INSERT ticket RETURNING id
-      { rows: [] },                              // COMMIT
+      { rows: [{ count: '0' }] },                 // uniqueness check
+      { rows: [{ id: 99 }] },                     // INSERT ticket RETURNING id
+      { rows: [] },                               // COMMIT
     );
     const result = await activateFreeTicket(1);
     expect(result.success).toBe(true);
@@ -258,6 +264,30 @@ describe('activateFreeTicket — weekly limit enforcement', () => {
     );
     await expect(activateFreeTicket(1)).rejects.toThrow();
     expect(mockRelease).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ─────────────────────────────────────────────
+// 3b. Per-draw 30-entry cap
+// ─────────────────────────────────────────────
+describe('Per-draw 30-entry cap enforcement', () => {
+  test('activateTicket throws "maximum of 30 entries" when user is at cap', async () => {
+    setupPoolQueries(
+      { rows: [{ id: 1, status: 'Issued', business_id: 5, location_id: 2, draw_status: 'Open' }] },
+      { rows: [] },                 // ownerCheck — not an owner
+      { rows: [{ count: '30' }] }, // draw cap check — at limit
+    );
+    await expect(activateTicket('ABC123', 1)).rejects.toThrow('maximum of 30 entries');
+  });
+
+  test('activateFreeTicket throws "maximum of 30 entries" when user is at cap', async () => {
+    setupClientQueries(
+      { rows: [] },                 // BEGIN
+      { rows: [] },                 // eligibility — no prior usage
+      { rows: [{ id: 5 }] },       // draw SELECT
+      { rows: [{ count: '30' }] }, // draw cap check — at limit
+    );
+    await expect(activateFreeTicket(1)).rejects.toThrow('maximum of 30 entries');
   });
 });
 

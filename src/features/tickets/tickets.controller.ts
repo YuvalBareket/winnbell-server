@@ -203,9 +203,18 @@ export const getMyRiskLevel = async (req: AuthRequest, res: Response) => {
       isThrottled = parseInt(recentResult.rows[0].count, 10) >= 1;
     }
 
+    const drawCountResult = await pool.query(
+      `SELECT COUNT(*) AS count FROM ticket t
+       JOIN draw d ON t.draw_id = d.id
+       WHERE t.activated_by_user_id = $1 AND d.status = 'Open' AND t.is_quarantined = FALSE`,
+      [userId],
+    );
+    const drawEntryCount = parseInt(drawCountResult.rows[0]?.count ?? '0', 10);
+
     res.json({
       requiresImage: score > 9,
       isThrottled,
+      drawEntryCount,
     });
   } catch {
     res.status(500).json({ message: 'Failed to fetch risk level.' });

@@ -20,7 +20,7 @@ export const activateTicket = async (code: string, userId: number) => {
   const pool = getPool();
 
   const checkResult = await pool.query(`
-    SELECT t.id, t.status, t.business_id, t.location_id, d.status as draw_status
+    SELECT t.id, t.status, t.business_id, t.location_id, t.draw_id, d.status as draw_status
     FROM ticket t
     LEFT JOIN draw d ON t.draw_id = d.id
     WHERE t.code = $1
@@ -38,6 +38,16 @@ export const activateTicket = async (code: string, userId: number) => {
   `, [ticket.business_id, userId, ticket.location_id]);
   if (ownerCheck.rows.length > 0) {
     throw new Error('Business owners and managers cannot activate tickets for their own business.');
+  }
+
+  // Per-draw per-user ticket cap — use ticket.draw_id (already resolved above)
+  const drawCapResult = await pool.query(
+    `SELECT COUNT(*) AS count FROM ticket
+     WHERE activated_by_user_id = $1 AND draw_id = $2 AND is_quarantined = FALSE`,
+    [userId, ticket.draw_id],
+  );
+  if (parseInt(drawCapResult.rows[0].count, 10) >= 30) {
+    throw new Error('You have reached the maximum of 30 entries for this draw.');
   }
 
   const updateResult = await pool.query(`
@@ -241,6 +251,21 @@ export const activateFreeTicket = async (userId: number): Promise<ActivationResu
       throw new Error('No active draw found. Please try again later.');
     }
 
+    // Per-draw per-user ticket cap
+    const drawCapResult = await client.query(
+      `SELECT COUNT(*) AS count FROM ticket
+       WHERE activated_by_user_id = $1 AND draw_id = $2 AND is_quarantined = FALSE`,
+      [userId, activeDrawId],
+    );
+    if (parseInt(drawCapResult.rows[0].count, 10) >= 30) {
+      await client.query(
+        `INSERT INTO free_ticket_usage (user_id, draw_id, status, rejection_reason, entries_created) VALUES ($1, $2, 'rejected', 'draw_cap_reached', 0)`,
+        [userId, activeDrawId],
+      );
+      await client.query('COMMIT');
+      throw new Error('You have reached the maximum of 30 entries for this draw.');
+    }
+
     await client.query(
       `INSERT INTO free_ticket_usage (user_id, draw_id, status, entries_created) VALUES ($1, $2, 'approved', 1)`,
       [userId, activeDrawId]
@@ -345,6 +370,16 @@ export const submitReceiptEntryService = async (
     );
     if (drawResult.rows.length === 0) throw new Error('No active draw found.');
     drawId = drawResult.rows[0].id;
+
+    // Per-draw per-user ticket cap (30 total, non-quarantined)
+    const drawCapResult = await client.query(
+      `SELECT COUNT(*) AS count FROM ticket
+       WHERE activated_by_user_id = $1 AND draw_id = $2 AND is_quarantined = FALSE`,
+      [userId, drawId],
+    );
+    if (parseInt(drawCapResult.rows[0].count, 10) >= 30) {
+      throw new Error('You have reached the maximum of 30 entries for this draw.');
+    }
 
     // Minimum transaction amount check
     if (minTransactionAmount && input.transactionAmount < minTransactionAmount) {
