@@ -3,6 +3,24 @@ import { getPool } from '../../shared/db/db.js';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 
+// ── Bot / throwaway-email protection ──────────────────────────────────────────
+
+const DISPOSABLE_EMAIL_DOMAINS = new Set([
+  'mailinator.com', 'guerrillamail.com', 'guerrillamail.org', 'guerrillamail.net',
+  'guerrillamail.de', 'guerrillamail.biz', 'guerrillamail.info',
+  'tempmail.com', 'temp-mail.org', 'throwam.com', 'yopmail.com',
+  '10minutemail.com', '10minutemail.net', 'trashmail.com', 'trashmail.me',
+  'maildrop.cc', 'dispostable.com', 'spamgourmet.com', 'getairmail.com',
+  'sharklasers.com', 'grr.la', 'spam4.me', 'mailnull.com', 'nada.email',
+  'tempr.email', 'discard.email', 'fakeinbox.com', 'mailnesia.com',
+  'anonbox.net', 'binkmail.com', 'bob.email', 'trashmail.at', 'trashmail.io',
+]);
+
+const isDisposableEmail = (email: string): boolean => {
+  const domain = email.split('@')[1]?.toLowerCase();
+  return domain ? DISPOSABLE_EMAIL_DOMAINS.has(domain) : false;
+};
+
 interface ManagerInvitePayload {
   type: 'MANAGER_INVITE';
   locationId: number;
@@ -15,7 +33,12 @@ export const registerUser = async (
   password: string,
   _roleIgnored: string, // role from request body is NEVER trusted — always defaulted to 'User'
   inviteToken?: string,
+  registrationIp?: string,
 ) => {
+  if (isDisposableEmail(email)) {
+    throw new Error('Registration with disposable email addresses is not allowed.');
+  }
+
   const pool = getPool();
   const client = await pool.connect();
   let locationId: number | null = null;
@@ -35,10 +58,10 @@ export const registerUser = async (
     // All self-registered users start as 'User'. Role can only be elevated to 'Business'
     // via a valid invite token, never by client-supplied input.
     const result = await client.query(
-      `INSERT INTO "user" (full_name, email, password_hash, role)
-       VALUES ($1, $2, $3, 'User')
+      `INSERT INTO "user" (full_name, email, password_hash, role, registration_ip)
+       VALUES ($1, $2, $3, 'User', $4)
        RETURNING id, role, full_name, email`,
-      [fullName, email, passwordHash],
+      [fullName, email, passwordHash, registrationIp ?? null],
     );
     const newUser = result.rows[0];
 

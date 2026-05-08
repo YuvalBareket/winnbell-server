@@ -18,11 +18,15 @@ export const register = async (
       return;
     }
 
-    const result = await authService.registerUser(fullName, email, password, role, inviteToken);
+    const result = await authService.registerUser(fullName, email, password, role, inviteToken, req.ip);
     res.status(201).json(result);
   } catch (error: unknown) {
     if (error instanceof Error && error.message === 'User already exists') {
       res.status(409).json({ message: 'User already exists' });
+      return;
+    }
+    if (error instanceof Error && error.message.includes('disposable')) {
+      res.status(400).json({ message: error.message });
       return;
     }
     if (error instanceof Error && error.message.includes('invitation')) {

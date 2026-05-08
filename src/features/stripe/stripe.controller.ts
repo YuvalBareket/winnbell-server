@@ -35,6 +35,10 @@ export const createCheckout = async (req: Request, res: Response) => {
       res.status(409).json({ error: 'This business already has an active subscription.' });
       return;
     }
+    if (msg.includes('CAMPAIGN_CUTOFF:')) {
+      res.status(409).json({ error: msg.replace('CAMPAIGN_CUTOFF:', '') });
+      return;
+    }
     console.error('[stripe.createCheckout]', err);
     res.status(500).json({ error: 'Subscription setup failed. Please try again.' });
   }

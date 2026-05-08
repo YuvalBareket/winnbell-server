@@ -220,6 +220,99 @@ describe('createDrawService', () => {
 });
 
 // ─────────────────────────────────────────────
+// createDrawService — draw_date normalisation
+// ─────────────────────────────────────────────
+
+describe('createDrawService — date normalisation', () => {
+  /**
+   * The service normalises draw_date to the last day of the month in NY timezone:
+   *
+   *   const nyDateStr = new Date(data.draw_date).toLocaleDateString('en-US', {
+   *     timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit'
+   *   });
+   *   const [month, , year] = nyDateStr.split('/').map(Number);
+   *   const lastDay = new Date(Date.UTC(year, month, 0, 4, 0, 0));
+   *
+   * We grab the 3rd INSERT parameter (index 2) from the INSERT INTO draw call and
+   * inspect its UTC month and day to verify normalisation occurred correctly.
+   */
+
+  const getInsertDateParam = (): Date => {
+    const insertCall = mockClientQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO draw'),
+    );
+    expect(insertCall).toBeDefined();
+    // params array is the second argument; draw_date is $3 → index 2
+    const params: unknown[] = insertCall![1];
+    expect(params[2]).toBeInstanceOf(Date);
+    return params[2] as Date;
+  };
+
+  test('should normalise a mid-month date to the last day of that month (May 15 → May 31)', async () => {
+    setupClientQueries(
+      { rows: [] },                                           // BEGIN
+      { rows: [{ id: 1, name: 'Test', prize_pool: 500, draw_date: '2026-05-31', status: 'Upcoming' }] }, // INSERT draw
+      { rows: [] },                                           // SELECT subscriptions
+      { rows: [] },                                           // COMMIT
+    );
+
+    await createDrawService({ name: 'May Draw', prize_amount: 500, draw_date: '2026-05-15' });
+
+    const date = getInsertDateParam();
+    // UTC month: May = 4 (0-based), day = 31
+    expect(date.getUTCMonth()).toBe(4);   // May
+    expect(date.getUTCDate()).toBe(31);
+  });
+
+  test('should leave an already-last-day date unchanged (May 31 → May 31)', async () => {
+    setupClientQueries(
+      { rows: [] },
+      { rows: [{ id: 1, name: 'Test', prize_pool: 500, draw_date: '2026-05-31', status: 'Upcoming' }] },
+      { rows: [] },
+      { rows: [] },
+    );
+
+    await createDrawService({ name: 'May Draw', prize_amount: 500, draw_date: '2026-05-31' });
+
+    const date = getInsertDateParam();
+    expect(date.getUTCMonth()).toBe(4);   // May
+    expect(date.getUTCDate()).toBe(31);
+  });
+
+  test('should normalise February date to Feb 28 in a non-leap year (2026-02-10 → Feb 28)', async () => {
+    setupClientQueries(
+      { rows: [] },
+      { rows: [{ id: 2, name: 'Feb Draw', prize_pool: 500, draw_date: '2026-02-28', status: 'Upcoming' }] },
+      { rows: [] },
+      { rows: [] },
+    );
+
+    await createDrawService({ name: 'Feb Draw', prize_amount: 500, draw_date: '2026-02-10' });
+
+    const date = getInsertDateParam();
+    // UTC month: February = 1 (0-based), day = 28 (2026 is not a leap year)
+    expect(date.getUTCMonth()).toBe(1);   // February
+    expect(date.getUTCDate()).toBe(28);
+  });
+
+  test('should normalise a 30-day month to the 30th (June 10 → June 30)', async () => {
+    setupClientQueries(
+      { rows: [] },
+      { rows: [{ id: 3, name: 'Jun Draw', prize_pool: 500, draw_date: '2026-06-30', status: 'Upcoming' }] },
+      { rows: [] },
+      { rows: [] },
+    );
+
+    await createDrawService({ name: 'Jun Draw', prize_amount: 500, draw_date: '2026-06-10' });
+
+    const date = getInsertDateParam();
+    // UTC month: June = 5 (0-based), day = 30
+    expect(date.getUTCMonth()).toBe(5);   // June
+    expect(date.getUTCDate()).toBe(30);
+  });
+});
+
+// ─────────────────────────────────────────────
 // Controller validation behaviour
 // ─────────────────────────────────────────────
 describe('createDraw controller — prize_amount validation', () => {

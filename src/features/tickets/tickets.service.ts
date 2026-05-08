@@ -214,7 +214,7 @@ export const generateGlobalUniqueCode = async (client?: PoolClient): Promise<str
   throw new Error('Failed to generate a unique ticket code. Please try again.');
 };
 
-export const activateFreeTicket = async (userId: number): Promise<ActivationResult> => {
+export const activateFreeTicket = async (userId: number, claimIp?: string): Promise<ActivationResult> => {
   const pool = getPool();
   const client = await pool.connect();
 
@@ -225,9 +225,11 @@ export const activateFreeTicket = async (userId: number): Promise<ActivationResu
     // Lock is acquired atomically within the same query as the eligibility check to avoid an
     // extra round-trip. LEFT JOIN ensures one row is always returned (activated_at = NULL when
     // no prior usage exists), which is equivalent to the original behaviour.
+    // Also loads account age and email-verification status in the same round-trip.
     const eligibilityResult = await client.query(`
-      SELECT u.activated_at
+      SELECT u.activated_at, usr.is_email_verified, usr.created_at AS account_created_at
       FROM (SELECT pg_advisory_xact_lock($1)) AS _lock
+      CROSS JOIN (SELECT is_email_verified, created_at FROM "user" WHERE id = $1) AS usr
       LEFT JOIN LATERAL (
         SELECT activated_at FROM free_ticket_usage WHERE user_id = $1
         ORDER BY activated_at DESC LIMIT 1
@@ -235,7 +237,32 @@ export const activateFreeTicket = async (userId: number): Promise<ActivationResu
     `, [userId]);
 
     const lastUsage = eligibilityResult.rows[0];
-    if (lastUsage) {
+
+    // Guard 1: email must be verified (blocks throwaway email accounts)
+    if (lastUsage && !lastUsage.is_email_verified) {
+      await client.query(
+        `INSERT INTO free_ticket_usage (user_id, status, rejection_reason, entries_created) VALUES ($1, 'rejected', 'email_not_verified', 0)`,
+        [userId]
+      );
+      await client.query('COMMIT');
+      throw new Error('Please verify your email address before claiming a free entry.');
+    }
+
+    // Guard 2: account must be at least 24 hours old (blocks freshly-created bot accounts)
+    if (lastUsage?.account_created_at) {
+      const accountAgeMs = Date.now() - new Date(lastUsage.account_created_at).getTime();
+      if (accountAgeMs < 24 * 60 * 60 * 1000) {
+        await client.query(
+          `INSERT INTO free_ticket_usage (user_id, status, rejection_reason, entries_created) VALUES ($1, 'rejected', 'account_too_new', 0)`,
+          [userId]
+        );
+        await client.query('COMMIT');
+        throw new Error('New accounts must be at least 24 hours old before claiming a free entry.');
+      }
+    }
+
+    // Guard 3: weekly usage check (1 free entry per user per week)
+    if (lastUsage?.activated_at) {
       const now = new Date();
       const weekStart = new Date(now);
       weekStart.setDate(now.getDate() - now.getDay());
@@ -248,6 +275,24 @@ export const activateFreeTicket = async (userId: number): Promise<ActivationResu
         );
         await client.query('COMMIT');
         throw new Error('Weekly limit reached. Please wait until your next available date.');
+      }
+    }
+
+    // Guard 4: IP-based cap — max 3 distinct users per IP per week (allows households, blocks bot farms)
+    if (claimIp) {
+      const ipCapResult = await client.query(
+        `SELECT COUNT(DISTINCT user_id) AS cnt FROM free_ticket_usage
+         WHERE claim_ip = $1 AND status = 'approved'
+           AND activated_at >= date_trunc('week', NOW())`,
+        [claimIp],
+      );
+      if (parseInt(ipCapResult.rows[0].cnt, 10) >= 3) {
+        await client.query(
+          `INSERT INTO free_ticket_usage (user_id, claim_ip, status, rejection_reason, entries_created) VALUES ($1, $2, 'rejected', 'ip_free_entry_limit', 0)`,
+          [userId, claimIp]
+        );
+        await client.query('COMMIT');
+        throw new Error('Free entry limit reached for your network this week.');
       }
     }
 
@@ -283,8 +328,8 @@ export const activateFreeTicket = async (userId: number): Promise<ActivationResu
     }
 
     await client.query(
-      `INSERT INTO free_ticket_usage (user_id, draw_id, status, entries_created) VALUES ($1, $2, 'approved', 1)`,
-      [userId, activeDrawId]
+      `INSERT INTO free_ticket_usage (user_id, draw_id, claim_ip, status, entries_created) VALUES ($1, $2, $3, 'approved', 1)`,
+      [userId, activeDrawId, claimIp ?? null]
     );
 
     const ticketCode = await generateGlobalUniqueCode(client);

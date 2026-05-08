@@ -49,6 +49,16 @@ const authLimiter = rateLimit({
   message: { message: 'Too many requests, please try again later.' },
 });
 
+// Stricter limiter applied only to account registration — prevents bot farms
+// from mass-creating accounts from a single IP (5 new accounts per hour per IP)
+const registrationLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: 'Too many registration attempts from this IP. Please try again later.' },
+});
+
 const redeemLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
   max: 15,
@@ -74,6 +84,8 @@ app.post('/auth/webhooks', express.raw({ type: 'application/json' }), handleCler
 app.use(express.json());
 
 // ── Public routes (no auth required) ──
+// Registration gets its own tighter limiter stacked on top of the general auth limiter
+app.use('/auth/register', registrationLimiter);
 app.use('/auth', authLimiter, authRoutes);
 
 // Public business discovery endpoints — accessible without login (e.g. browsing the map)

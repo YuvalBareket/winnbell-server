@@ -188,10 +188,11 @@ describe('activateFreeTicket — weekly limit enforcement', () => {
   test('throws "Weekly limit reached" when last usage is within the current calendar week', async () => {
     // A date that is within the current week (today)
     const recentDate = new Date().toISOString();
+    const oldAccountDate = new Date(Date.now() - 2 * 24 * 60 * 60 * 1000).toISOString();
 
     setupClientQueries(
       { rows: [] },                                   // BEGIN
-      { rows: [{ activated_at: recentDate }] },       // eligibility — used this week
+      { rows: [{ activated_at: recentDate, is_email_verified: true, account_created_at: oldAccountDate }] }, // eligibility — used this week
     );
     await expect(activateFreeTicket(1)).rejects.toThrow('Weekly limit reached');
     // ROLLBACK must be issued on any thrown error
@@ -229,9 +230,10 @@ describe('activateFreeTicket — weekly limit enforcement', () => {
   test('proceeds when last free ticket was used more than 7 days ago (different calendar week)', async () => {
     // Use a date guaranteed to be in a prior week: 14 days ago
     const oldDate = new Date(Date.now() - 14 * 24 * 60 * 60 * 1000).toISOString();
+    const oldAccountDate = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
     setupClientQueries(
       { rows: [] },                               // BEGIN
-      { rows: [{ activated_at: oldDate }] },      // eligibility — old, not this week
+      { rows: [{ activated_at: oldDate, is_email_verified: true, account_created_at: oldAccountDate }] }, // eligibility — old, not this week
       { rows: [{ id: 3 }] },                      // draw SELECT
       { rows: [{ count: '0' }] },                 // draw cap check — under limit
       { rows: [] },                               // INSERT free_ticket_usage

@@ -457,17 +457,19 @@ async function runTests(ids) {
     }
   }
 
-  // If we only reached 29 (because receipt #28 was daily-capped), use a promo to get to 30 first
-  const countBeforePromoBlock = await getEffectiveCount(capId, openDrawId);
-  if (countBeforePromoBlock < 30) {
-    const fillCode = `RISKFILL-${Date.now()}`;
+  // Fill up to exactly 30 using promo codes if we fell short
+  // (because receipt #28 and/or free entry may have been blocked by daily/age guards)
+  let fillCount = await getEffectiveCount(capId, openDrawId);
+  while (fillCount < 30) {
+    const fillCode = `RISKFILL-${Date.now()}-${fillCount}`;
     const cr = await api('POST', '/admin/promo-codes', { code: fillCode, maxUses: 10 }, adminToken);
-    if (cr.status === 201) {
-      const use = await api('POST', '/tickets/activate-promotional', { code: fillCode }, capToken);
-      if (use.status === 201) {
-        info(`  Filled to 30 via extra promo code`);
-      }
-    }
+    if (cr.status !== 201) break;
+    const use = await api('POST', '/tickets/activate-promotional', { code: fillCode }, capToken);
+    if (use.status !== 201) break;
+    fillCount = await getEffectiveCount(capId, openDrawId);
+  }
+  if (fillCount === 30) {
+    info(`  Filled to exactly 30 via promo codes (effectiveCount=${fillCount})`);
   }
 
   const countAt30Final = await getEffectiveCount(capId, openDrawId);

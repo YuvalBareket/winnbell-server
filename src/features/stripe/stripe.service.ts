@@ -1,6 +1,7 @@
 import Stripe from 'stripe';
 import { Pool } from 'pg';
 import { getPool } from '../../shared/db/db.js';
+import { sendSubscriptionConfirmationEmail } from '../../shared/email/email.service.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string);
 
@@ -62,6 +63,18 @@ export const createCheckoutSession = async (
     [businessId],
   );
   if (existing.rows.length > 0) throw new Error('This business already has an active subscription');
+
+  // Block new subscriptions within 7 days of the next campaign start (1st of next month, NY time).
+  // New businesses joining this close to a campaign draw would only be in the campaign briefly,
+  // creating an unfair onboarding window. They must wait until the new campaign opens.
+  const nowNY = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
+  const nextCampaignStart = new Date(nowNY.getFullYear(), nowNY.getMonth() + 1, 1); // 1st of next month NY
+  const msUntilNext = nextCampaignStart.getTime() - nowNY.getTime();
+  const daysUntilNext = msUntilNext / (1000 * 60 * 60 * 24);
+  if (daysUntilNext <= CAMPAIGN_ONBOARDING_CUTOFF_DAYS) {
+    const formatted = nextCampaignStart.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
+    throw new Error(`CAMPAIGN_CUTOFF:New subscriptions are paused until the current campaign ends. New signups open on ${formatted}.`);
+  }
 
   const locResult = await pool.query(
     `SELECT COUNT(*) AS cnt FROM business_location WHERE business_id = $1 AND is_active = true`,
@@ -343,6 +356,30 @@ async function activateBusinessSubscription(
   } catch (err: any) {
     console.error(`[Stripe] Draw participation failed for business ${businessId} (non-fatal):`, err.message);
   }
+
+  // Send confirmation email — non-fatal
+  try {
+    const bizResult = await pool.query(
+      `SELECT b.name, u.email, s.entries_per_location, s.billing_interval, s.fee_at_entry,
+              (SELECT COUNT(*) FROM business_location WHERE business_id = b.id AND is_active = true) AS location_count
+       FROM business b
+       JOIN "user" u ON u.id = b.user_id
+       JOIN subscription s ON s.business_id = b.id
+       WHERE b.id = $1`,
+      [businessId],
+    );
+    const biz = bizResult.rows[0];
+    if (biz?.email) {
+      await sendSubscriptionConfirmationEmail(biz.email, biz.name, {
+        entriesPerLocation: biz.entries_per_location,
+        billingInterval: biz.billing_interval,
+        monthlyFee: biz.fee_at_entry,
+        locationCount: Math.max(1, Number(biz.location_count)),
+      });
+    }
+  } catch (err: any) {
+    console.error(`[Stripe] Confirmation email failed for business ${businessId} (non-fatal):`, err.message);
+  }
 }
 
 // ─── Draw Participation ───────────────────────────────────────────────────────
@@ -530,6 +567,7 @@ export const resumeSubscription = async (userId: number): Promise<void> => {
 // ─── Cancel Subscription ──────────────────────────────────────────────────────
 
 const ONBOARDING_CUTOFF_DAYS = 7;
+const CAMPAIGN_ONBOARDING_CUTOFF_DAYS = 7; // days before the 1st of next month where new signups are blocked
 
 export type CancelRefundType = 'full' | 'partial_40' | 'none';
 

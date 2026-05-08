@@ -58,7 +58,7 @@ export const getStatus = async (req: AuthRequest, res: Response) => {
 export const activate = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
-    const result = await ticketService.activateFreeTicket(userId);
+    const result = await ticketService.activateFreeTicket(userId, req.ip);
     res.status(201).json(result);
   } catch (error: unknown) {
     res.status(400).json({ message: error instanceof Error ? error.message : 'Activation failed' });

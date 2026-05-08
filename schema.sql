@@ -22,7 +22,8 @@ CREATE TABLE "user" (
                          CHECK (role IN ('User', 'Business', 'Admin')),
   is_active            BOOLEAN NOT NULL DEFAULT TRUE,
   is_email_verified    BOOLEAN NOT NULL DEFAULT FALSE,
-  -- Fraud risk scoring: 0–9 = low, 10–14 = medium (image required), 15+ = high (throttled + quarantined)
+  registration_ip      INET NULL,
+  -- Fraud risk scoring: 0–9 = low, 10–19 = medium (image required), 20+ = high (throttled + quarantined)
   risk_score           INTEGER NOT NULL DEFAULT 0 CHECK (risk_score >= 0),
   risk_clean_entries   INTEGER NOT NULL DEFAULT 0 CHECK (risk_clean_entries >= 0),
   risk_last_flagged_at TIMESTAMP NULL,
@@ -176,6 +177,7 @@ CREATE TABLE free_ticket_usage (
                      CHECK (status IN ('approved', 'rejected')),
   rejection_reason VARCHAR(50) NULL,
   entries_created  SMALLINT NOT NULL DEFAULT 1,
+  claim_ip         INET NULL,
   activated_at     TIMESTAMP NOT NULL DEFAULT NOW()
 );
 

@@ -100,6 +100,14 @@ export const createDrawService = async (data: {
   prize_amount: number;
   draw_date: string;
 }) => {
+  // Campaigns must end on the last day of a month (00:00 NY time → last day 24:00 NY time).
+  // Normalise the provided date to the last day of its month in NY timezone.
+  const nyDateStr = new Date(data.draw_date).toLocaleDateString('en-US', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' });
+  const [month, , year] = nyDateStr.split('/').map(Number);
+  // Last day of that month in NY time
+  const lastDay = new Date(Date.UTC(year, month, 0, 4, 0, 0)); // month=next month, day=0 → last day; +4h offset = midnight NY (UTC-4/UTC-5)
+  const drawDate = lastDay;
+
   const pool = getPool();
   const client = await pool.connect();
 
@@ -110,7 +118,7 @@ export const createDrawService = async (data: {
       INSERT INTO draw (name, prize_pool, draw_date, status)
       VALUES ($1, $2, $3, 'Upcoming')
       RETURNING *
-    `, [data.name, data.prize_amount, new Date(data.draw_date)]);
+    `, [data.name, data.prize_amount, drawDate]);
 
     const draw = drawResult.rows[0];
 

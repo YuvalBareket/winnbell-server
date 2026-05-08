@@ -24,13 +24,15 @@ export const getDrawHistoryService = async () => {
       wt.code AS winning_ticket_code,
       u.full_name AS winner_name,
       b.name AS winner_business_name,
-      bl.name AS winner_location_name
+      bl.name AS winner_location_name,
+      COUNT(t.id) AS entry_count
     FROM draw d
     LEFT JOIN ticket wt ON wt.id = d.winner_ticket_id
     LEFT JOIN "user" u ON wt.activated_by_user_id = u.id
     LEFT JOIN business b ON wt.business_id = b.id
     LEFT JOIN business_location bl ON wt.location_id = bl.id
-    WHERE d.status = 'Closed'
+    LEFT JOIN ticket t ON t.draw_id = d.id
+    GROUP BY d.id, wt.id, u.id, b.id, bl.id
     ORDER BY d.draw_date DESC
   `);
   return result.rows;
