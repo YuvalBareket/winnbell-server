@@ -13,6 +13,7 @@ router.get('/draws-all', adminController.getAllDraws);
 router.get('/users', adminController.getUsers);
 router.patch('/users/:userId/role', adminController.updateUserRole);
 router.patch('/users/:userId/active', adminController.toggleUserActive);
+router.patch('/users/:userId/risk', adminController.setUserRisk);
 router.post('/generate-tickets', adminController.createTickets);
 router.post('/business', adminController.createBusiness);
 router.post('/draw', adminController.createDraw);

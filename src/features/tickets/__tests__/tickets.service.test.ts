@@ -207,7 +207,7 @@ describe('activateFreeTicket — weekly limit enforcement', () => {
       { rows: [] },  // eligibility — no prior usage
       { rows: [] },  // draw SELECT — no open draw
     );
-    await expect(activateFreeTicket(1)).rejects.toThrow('No active draw found');
+    await expect(activateFreeTicket(1)).rejects.toThrow('No active campaign found');
   });
 
   test('succeeds when user has never activated a free ticket', async () => {
@@ -282,10 +282,10 @@ describe('Per-draw 30-entry cap enforcement', () => {
 
   test('activateFreeTicket throws "maximum of 30 entries" when user is at cap', async () => {
     setupClientQueries(
-      { rows: [] },                 // BEGIN
-      { rows: [] },                 // eligibility — no prior usage
-      { rows: [{ id: 5 }] },       // draw SELECT
-      { rows: [{ count: '30' }] }, // draw cap check — at limit
+      { rows: [] },                          // BEGIN
+      { rows: [] },                          // eligibility — no prior usage
+      { rows: [{ id: 5 }] },                // draw SELECT
+      { rows: [{ total_count: '30' }] },    // draw cap check — at limit
     );
     await expect(activateFreeTicket(1)).rejects.toThrow('maximum of 30 entries');
   });

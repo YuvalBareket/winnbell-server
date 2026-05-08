@@ -35,6 +35,7 @@ export const getNearbyBusinessesService = async (
       b.sector,
       b.logo_url,
       b.receipt_example_image_url,
+      b.min_transaction_amount,
       (6371 * acos(
         LEAST(1.0, GREATEST(-1.0,
           cos($1 * 0.0174532925) * cos(loc.latitude * 0.0174532925) * cos((loc.longitude * 0.0174532925) - ($2 * 0.0174532925)) +

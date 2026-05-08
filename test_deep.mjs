@@ -752,14 +752,14 @@ async function runTests(ids) {
   const quarantined = abuser1Tickets.filter(t => t.is_quarantined);
   info(`abuser1 tickets: total=${abuser1Tickets.length}, quarantined=${quarantined.length}`);
 
-  if (abuser1Row[0]?.risk_score >= 15) {
+  if (abuser1Row[0]?.risk_score >= 20) {
     if (quarantined.length > 0) {
       pass(`High-risk user (score=${abuser1Row[0]?.risk_score}) has ${quarantined.length} quarantined tickets`);
     } else if (abuser1Tickets.length > 0) {
       fail(`High-risk user (score=${abuser1Row[0]?.risk_score}) has NO quarantined tickets — quarantine mechanism broken!`, '');
     }
   } else {
-    info(`abuser1 risk_score=${abuser1Row[0]?.risk_score} (< 15, not yet HIGH risk — no quarantine expected)`);
+    info(`abuser1 risk_score=${abuser1Row[0]?.risk_score} (< 20, not yet HIGH risk — no quarantine expected)`);
     pass(`Risk system correctly keeping abuser1 at score=${abuser1Row[0]?.risk_score} (not yet HIGH)`);
   }
 

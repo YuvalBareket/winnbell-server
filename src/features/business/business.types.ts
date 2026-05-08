@@ -19,6 +19,7 @@ export interface NearbyBusiness {
   sector: string;
   logo_url: string | null;
   receipt_example_image_url: string | null;
+  min_transaction_amount: number | null;
   distance_km: number;
 }
 

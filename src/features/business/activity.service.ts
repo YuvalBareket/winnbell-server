@@ -15,6 +15,7 @@ export interface ActivityItem {
   status: 'active' | 'under_review';
   quarantine_reason: string | null;
   created_at: string;
+  entry_count: number;
 }
 
 export interface ActivityResult {
@@ -68,9 +69,15 @@ export const getBusinessActivity = async (
 
   const summaryRes = await pool.query(`
     SELECT
-      COUNT(*)                                                    AS receipts_today,
-      COALESCE(SUM(t.transaction_amount), 0)                     AS revenue_today,
-      COUNT(*) FILTER (WHERE t.activated_at IS NOT NULL)         AS entries_today
+      -- receipts = distinct receipt submissions (anchor only); code/free/promo each count as 1
+      COUNT(*) FILTER (WHERE t.entry_source != 'receipt' OR t.receipt_identifier IS NOT NULL)
+                                                                  AS receipts_today,
+      -- revenue = only anchor rows to avoid double-counting multi-entry amounts
+      COALESCE(SUM(t.transaction_amount) FILTER (
+        WHERE t.entry_source != 'receipt' OR t.receipt_identifier IS NOT NULL
+      ), 0)                                                        AS revenue_today,
+      -- entries = every ticket row, including bonus entries from multi-entry receipts
+      COUNT(*)                                                     AS entries_today
     FROM ticket t
     JOIN business_location bl ON bl.id = t.location_id
     WHERE bl.business_id = $1
@@ -125,10 +132,21 @@ export const getBusinessActivity = async (
       t.entry_source,
       t.is_quarantined,
       t.quarantine_reason,
-      t.created_at
+      t.created_at,
+      -- Count all tickets (anchor + bonus) for the same submission
+      (
+        SELECT COUNT(*)
+        FROM ticket t2
+        WHERE t2.activated_by_user_id = t.activated_by_user_id
+          AND t2.business_id = t.business_id
+          AND t2.draw_id = t.draw_id
+          AND t2.activated_at = t.activated_at
+          AND t2.entry_source = 'receipt'
+      )                                         AS entry_count
     FROM ticket t
     JOIN business_location bl ON bl.id = t.location_id
     WHERE ${conditions.join(' AND ')}
+      AND (t.entry_source != 'receipt' OR t.receipt_identifier IS NOT NULL)
     ORDER BY t.id DESC
     LIMIT $${limitParam}
   `, feedParams);
@@ -146,6 +164,7 @@ export const getBusinessActivity = async (
     status: r.is_quarantined ? 'under_review' : 'active',
     quarantine_reason: r.quarantine_reason ?? null,
     created_at: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+    entry_count: Number(r.entry_count ?? 1),
   }));
 
   return {

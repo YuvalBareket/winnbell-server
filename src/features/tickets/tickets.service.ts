@@ -6,12 +6,15 @@ import {
   ITicket,
   ReceiptEntryInput,
 } from './tickets.types.js';
+
+const MAX_ENTRIES_PER_RECEIPT = 10;
 import {
   evaluateUserRisk,
   updateUserRiskScore,
   checkDuplicateReceiptIdentifier,
   countsAgainstCap,
   syncUserQuarantineState,
+  type PreFetchedUserRisk,
 } from '../risk/risk.service.js';
 import { RISK_THRESHOLDS } from '../risk/risk.types.js';
 import { validateReceiptAsync } from '../ocr/ocr.service.js';
@@ -104,7 +107,18 @@ export const getUserTicketsService = async (userId: number, drawId: number) => {
 
     ORDER BY activated_at DESC
   `, [userId, drawId]);
-  return result.rows;
+
+  // Effective count: non-quarantined receipt/free/code tickets + all promo entries
+  const countResult = await pool.query(
+    `SELECT (
+       (SELECT COUNT(*)::int FROM ticket WHERE activated_by_user_id = $1 AND draw_id = $2 AND is_quarantined = FALSE)
+       + (SELECT COUNT(*)::int FROM promotional_entry WHERE user_id = $1 AND draw_id = $2)
+     ) AS effective_count`,
+    [userId, drawId],
+  );
+  const effectiveCount: number = Number(countResult.rows[0]?.effective_count ?? 0);
+
+  return { tickets: result.rows, effectiveCount };
 };
 
 export const getBusinessTicketsService = async (userId: number, drawId: number) => {
@@ -248,16 +262,18 @@ export const activateFreeTicket = async (userId: number): Promise<ActivationResu
         [userId]
       );
       await client.query('COMMIT');
-      throw new Error('No active draw found. Please try again later.');
+      throw new Error('No active campaign found. Please try again later.');
     }
 
-    // Per-draw per-user ticket cap
+    // Per-draw per-user cap — counts non-quarantined tickets + all promo entries
     const drawCapResult = await client.query(
-      `SELECT COUNT(*) AS count FROM ticket
-       WHERE activated_by_user_id = $1 AND draw_id = $2 AND is_quarantined = FALSE`,
+      `SELECT (
+         (SELECT COUNT(*)::int FROM ticket WHERE activated_by_user_id = $1 AND draw_id = $2 AND is_quarantined = FALSE)
+         + (SELECT COUNT(*)::int FROM promotional_entry WHERE user_id = $1 AND draw_id = $2)
+       ) AS total_count`,
       [userId, activeDrawId],
     );
-    if (parseInt(drawCapResult.rows[0].count, 10) >= 30) {
+    if (parseInt(drawCapResult.rows[0].total_count, 10) >= 30) {
       await client.query(
         `INSERT INTO free_ticket_usage (user_id, draw_id, status, rejection_reason, entries_created) VALUES ($1, $2, 'rejected', 'draw_cap_reached', 0)`,
         [userId, activeDrawId],
@@ -297,7 +313,7 @@ export const activateFreeTicket = async (userId: number): Promise<ActivationResu
 export const submitReceiptEntryService = async (
   userId: number,
   input: ReceiptEntryInput,
-): Promise<{ ticketId: number; code: string }> => {
+): Promise<{ tickets: Array<{ ticketId: number; code: string }>; entryCount: number }> => {
   const pool = getPool();
   const client = await pool.connect();
   let drawId: number = 0;
@@ -306,78 +322,87 @@ export const submitReceiptEntryService = async (
   try {
     await client.query('BEGIN');
 
-    // Email verification gate — unverified accounts cannot submit entries
-    const verifiedResult = await client.query(
-      `SELECT is_email_verified FROM "user" WHERE id = $1`,
-      [userId],
+    // Single pre-flight query: replaces 7 sequential round trips with 1
+    const preflightRes = await client.query(
+      `WITH
+        biz AS (
+          SELECT b.id AS business_id, b.name AS business_name, b.min_transaction_amount
+          FROM business_location bl JOIN business b ON bl.business_id = b.id
+          WHERE bl.id = $2 AND bl.is_active = true
+            AND b.is_subscribed = true AND b.is_participating = true
+          LIMIT 1
+        ),
+        od AS (
+          SELECT id AS draw_id, created_at AS draw_opened_at
+          FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1
+        )
+      SELECT
+        (SELECT is_email_verified                FROM "user" WHERE id = $1)  AS is_email_verified,
+        (SELECT risk_score                       FROM "user" WHERE id = $1)  AS risk_score,
+        (SELECT risk_last_flagged_at             FROM "user" WHERE id = $1)  AS risk_last_flagged_at,
+        (SELECT business_id                      FROM biz)                   AS business_id,
+        (SELECT business_name                    FROM biz)                   AS business_name,
+        (SELECT min_transaction_amount           FROM biz)                   AS min_transaction_amount,
+        (SELECT draw_id                          FROM od)                    AS draw_id,
+        (SELECT draw_opened_at                   FROM od)                    AS draw_opened_at,
+        (SELECT EXISTS(SELECT 1 FROM platform_settings WHERE id = 1))        AS settings_exists,
+        (SELECT global_entry_cap FROM platform_settings WHERE id = 1)        AS global_entry_cap,
+        EXISTS (
+          SELECT 1 FROM business bx
+          LEFT JOIN business_location blx ON blx.business_id = bx.id AND blx.id = $2
+          WHERE bx.id = (SELECT business_id FROM biz)
+            AND (bx.user_id = $1 OR blx.manager_user_id = $1)
+        )                                                                     AS has_conflict,
+        (
+          SELECT COUNT(DISTINCT receipt_identifier)::int FROM ticket
+          WHERE activated_by_user_id = $1 AND entry_source = 'receipt'
+            AND receipt_identifier IS NOT NULL
+            AND activated_at >= NOW() - INTERVAL '24 hours'
+        )                                                                     AS daily_count,
+        COALESCE((
+          SELECT (
+            (SELECT COUNT(*)::int FROM ticket WHERE activated_by_user_id = $1 AND draw_id = (SELECT draw_id FROM od) AND is_quarantined = FALSE)
+            + (SELECT COUNT(*)::int FROM promotional_entry WHERE user_id = $1 AND draw_id = (SELECT draw_id FROM od))
+          )
+        ), 0)                                                                 AS draw_count`,
+      [userId, input.locationId],
     );
-    if (!verifiedResult.rows[0]?.is_email_verified) {
+
+    const pf = preflightRes.rows[0];
+
+    if (!pf.is_email_verified) {
       throw new Error('Please verify your email address before submitting entries.');
     }
-
-    // Resolve business from location and verify it is active + participating
-    const bizResult = await client.query(
-      `SELECT b.id AS business_id, b.name AS business_name, b.entry_cap, b.min_transaction_amount
-       FROM business_location bl
-       JOIN business b ON bl.business_id = b.id
-       WHERE bl.id = $1 AND bl.is_active = true
-         AND b.is_subscribed = true AND b.is_participating = true`,
-      [input.locationId],
-    );
-    if (bizResult.rows.length === 0) {
+    if (!pf.business_id) {
       throw new Error('Location is not currently participating in a draw.');
     }
-    const { business_id, business_name, min_transaction_amount: minTransactionAmount } = bizResult.rows[0];
-
-    // Hard daily submission cap — prevents velocity spam regardless of risk score.
-    // Count distinct submissions (receipt_identifier IS NOT NULL = primary ticket only),
-    // NOT total tickets, so multi-entry receipts don't eat multiple cap slots.
-    const dailyCountResult = await client.query(
-      `SELECT COUNT(*) AS count FROM ticket
-       WHERE activated_by_user_id = $1 AND entry_source = 'receipt'
-         AND receipt_identifier IS NOT NULL
-         AND activated_at >= NOW() - INTERVAL '24 hours'`,
-      [userId],
-    );
-    if (parseInt(dailyCountResult.rows[0].count, 10) >= 5) {
+    if (pf.has_conflict) {
+      throw new Error('Business owners and managers cannot submit entries for their own business.');
+    }
+    if (!pf.draw_id) {
+      throw new Error('No active campaign found.');
+    }
+    if (pf.daily_count >= 5) {
       throw new Error('You have reached the daily receipt submission limit. Please try again tomorrow.');
     }
 
-    // Cap is set globally by admin only
-    // If the settings row is missing entirely, fall back to a safe default of 500 rather
-    // than null (which would mean unlimited and could be exploited if the row is deleted).
-    const settingsResult = await client.query(
-      `SELECT global_entry_cap FROM platform_settings WHERE id = 1`,
-    );
-    const entry_cap: number | null =
-      settingsResult.rows.length > 0 ? settingsResult.rows[0].global_entry_cap : 500;
+    const business_id: number = pf.business_id;
+    const business_name: string = pf.business_name;
+    const minTransactionAmount: number | null = pf.min_transaction_amount
+      ? parseFloat(pf.min_transaction_amount)
+      : null;
+    drawId = pf.draw_id;
+    const draw_opened_at: Date = pf.draw_opened_at;
+    // If settings row missing, fall back to 500; if row exists with NULL, treat as unlimited
+    const entry_cap: number | null = pf.settings_exists ? pf.global_entry_cap : 500;
 
-    // Conflict-of-interest guard: business owners and managers cannot submit entries for their own business
-    const conflictResult = await client.query(
-      `SELECT 1 FROM business b
-       LEFT JOIN business_location bl ON bl.business_id = b.id AND bl.id = $2
-       WHERE b.id = $1 AND (b.user_id = $3 OR bl.manager_user_id = $3)
-       LIMIT 1`,
-      [business_id, input.locationId, userId],
-    );
-    if (conflictResult.rows.length > 0) {
-      throw new Error('Business owners and managers cannot submit entries for their own business.');
-    }
+    const entryCount = minTransactionAmount && minTransactionAmount > 0
+      ? Math.min(Math.floor(input.transactionAmount / minTransactionAmount), MAX_ENTRIES_PER_RECEIPT)
+      : 1;
 
-    // Find open draw early so drawId is available for quarantine syncs below
-    const drawResult = await client.query(
-      `SELECT id, created_at as draw_opened_at FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1`,
-    );
-    if (drawResult.rows.length === 0) throw new Error('No active draw found.');
-    drawId = drawResult.rows[0].id;
-
-    // Per-draw per-user ticket cap (30 total, non-quarantined)
-    const drawCapResult = await client.query(
-      `SELECT COUNT(*) AS count FROM ticket
-       WHERE activated_by_user_id = $1 AND draw_id = $2 AND is_quarantined = FALSE`,
-      [userId, drawId],
-    );
-    if (parseInt(drawCapResult.rows[0].count, 10) >= 30) {
+    const currentDrawCount = Number(pf.draw_count);
+    const remainingDrawEntries = 30 - currentDrawCount;
+    if (remainingDrawEntries <= 0) {
       throw new Error('You have reached the maximum of 30 entries for this draw.');
     }
 
@@ -410,7 +435,7 @@ export const submitReceiptEntryService = async (
     // Transaction date validation
     if (input.transactionDate) {
       const txDate = new Date(input.transactionDate);
-      const drawOpenedAt = new Date(drawResult.rows[0].draw_opened_at);
+      const drawOpenedAt = new Date(draw_opened_at);
       const now = new Date();
       const sevenDaysAgo = new Date(now);
       sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
@@ -443,7 +468,11 @@ export const submitReceiptEntryService = async (
       client,
     );
 
-    // Evaluate risk for this submission
+    // Evaluate risk — pass pre-fetched user score to skip the extra SELECT
+    const preFetchedRisk: PreFetchedUserRisk = {
+      storedScore: Number(pf.risk_score ?? 0),
+      lastFlaggedAt: pf.risk_last_flagged_at ? new Date(pf.risk_last_flagged_at) : null,
+    };
     const riskEval = await evaluateUserRisk(userId, {
       businessId: business_id,
       receiptIdentifier: input.receiptIdentifier,
@@ -451,17 +480,17 @@ export const submitReceiptEntryService = async (
       isDuplicateCrossUser: dupCheck.isDuplicate,
       typingDurationMs: input.typingDurationMs,
       receiptInputMethod: input.receiptInputMethod,
-    });
+    }, preFetchedRisk);
 
     // Progressive controls use the stored score (before this submission's delta).
     // Score is NOT updated yet — "image required" and throttle are gates, not penalties.
     // Updating the score before these checks would punish the user for retrying.
     const storedScore = riskEval.totalScore - riskEval.delta;
 
-    // High risk (stored >=15): throttle to 1 submission per 24 hours
+    // High risk (stored >=15): throttle to 1 submission per 24 hours (distinct receipts)
     if (storedScore >= RISK_THRESHOLDS.MEDIUM_MAX + 1) {
       const throttleCheck = await client.query(
-        `SELECT COUNT(*) AS count FROM ticket
+        `SELECT COUNT(DISTINCT receipt_identifier) AS count FROM ticket
          WHERE activated_by_user_id = $1 AND entry_source = 'receipt'
            AND receipt_identifier IS NOT NULL
            AND activated_at >= NOW() - INTERVAL '24 hours'`,
@@ -518,18 +547,29 @@ export const submitReceiptEntryService = async (
       throw new Error('This receipt identifier has already been used.');
     }
 
+    // Start batch size from what the amount earns, then narrow by each cap
+    let batchSize = entryCount;
+
+    // Narrow by user draw cap
+    batchSize = Math.min(batchSize, remainingDrawEntries);
+
     // Entry cap enforcement — quarantined tickets do not consume the cap
     if (entry_cap !== null && countsAgainstCap(riskEval, dupCheck.isDuplicate)) {
-      const capCheck = await client.query(
+      const bizCapCheck = await client.query(
         `SELECT COUNT(*) AS count FROM ticket
          WHERE business_id = $1 AND draw_id = $2 AND is_quarantined = FALSE`,
         [business_id, drawId],
       );
-      const currentCount = parseInt(capCheck.rows[0].count, 10);
-      if (currentCount + 1 > entry_cap) {
+      const bizCurrentCount = parseInt(bizCapCheck.rows[0].count, 10);
+      const remainingBizEntries = entry_cap - bizCurrentCount;
+      if (remainingBizEntries <= 0) {
         throw new Error('This business has reached its entry cap for the current draw.');
       }
+      batchSize = Math.min(batchSize, remainingBizEntries);
     }
+
+    // Always insert at least 1 if we passed all checks
+    batchSize = Math.max(batchSize, 1);
 
     const isHighRisk = riskEval.totalScore > RISK_THRESHOLDS.MEDIUM_MAX;
     // Medium-risk users' ticket is held quarantined until OCR passes.
@@ -540,53 +580,70 @@ export const submitReceiptEntryService = async (
     const quarantineReason = isHighRisk ? 'high_risk_user' : isOcrPending ? 'ocr_pending' : null;
     const quarantinedAt = isQuarantined ? new Date() : null;
 
-    const code = await generateGlobalUniqueCode(client);
-    let ticketResult;
-    try {
-      ticketResult = await client.query(
-        `INSERT INTO ticket
-          (code, status, entry_source, business_id, location_id, draw_id,
-           activated_by_user_id, activated_at,
-           receipt_identifier, transaction_amount, transaction_date, receipt_image_url, risk_score,
-           is_quarantined, quarantine_reason, quarantined_at, image_validation_status, submitter_ip)
-         VALUES ($1, 'Activated', 'receipt', $2, $3, $4, $5, NOW(), $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
-         RETURNING id`,
-        [
-          code,
-          business_id,
-          input.locationId,
-          drawId,
-          userId,
-          input.receiptIdentifier,
-          input.transactionAmount,
-          input.transactionDate ?? null,
-          input.receiptImageUrl ?? null,
-          riskEval.totalScore,
-          isQuarantined,
-          quarantineReason,
-          quarantinedAt,
-          hasImage ? 'pending' : 'not_required',
-          input.submitterIp ?? null,
-        ],
-      );
-    } catch (insertErr: any) {
-      // PostgreSQL unique constraint violation — receipt was already submitted
-      if (insertErr?.code === '23505') {
-        throw new Error('This receipt has already been submitted.');
-      }
-      throw insertErr;
+    // Generate all codes at once and check uniqueness in one query (saves batchSize-1 round trips)
+    const candidateCodes: string[] = [];
+    for (let i = 0; i < batchSize; i++) {
+      let c = '';
+      for (let j = 0; j < 8; j++) c += CODE_CHARS[crypto.randomInt(0, CODE_CHARS.length)];
+      candidateCodes.push(c);
     }
-    const ticketId = ticketResult.rows[0].id;
+    const conflictRes = await client.query(
+      `SELECT code FROM ticket WHERE code = ANY($1::text[])`,
+      [candidateCodes],
+    );
+    const conflicting = new Set<string>(conflictRes.rows.map((r: any) => r.code as string));
+    const uniqueCodes: string[] = [];
+    for (const c of candidateCodes) {
+      uniqueCodes.push(conflicting.has(c) ? await generateGlobalUniqueCode(client) : c);
+    }
 
-    // Sync quarantine in case score decayed below 15 after the clean-entry update above
-    await syncUserQuarantineState(userId, drawId, client);
+    const insertedTickets: Array<{ ticketId: number; code: string }> = [];
+    for (let i = 0; i < batchSize; i++) {
+      const ticketCode = uniqueCodes[i];
+      let ticketInsert;
+      try {
+        ticketInsert = await client.query(
+          `INSERT INTO ticket
+            (code, status, entry_source, business_id, location_id, draw_id,
+             activated_by_user_id, activated_at,
+             receipt_identifier, transaction_amount, transaction_date, receipt_image_url, risk_score,
+             is_quarantined, quarantine_reason, quarantined_at, image_validation_status, submitter_ip)
+           VALUES ($1, 'Activated', 'receipt', $2, $3, $4, $5, NOW(), $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+           RETURNING id`,
+          [
+            ticketCode,
+            business_id,
+            input.locationId,
+            drawId,
+            userId,
+            i === 0 ? input.receiptIdentifier : null, // only first ticket holds the identifier (UNIQUE index constraint)
+            input.transactionAmount,
+            input.transactionDate ?? null,
+            i === 0 ? (input.receiptImageUrl ?? null) : null, // image only on anchor ticket
+            riskEval.totalScore,
+            isQuarantined,
+            quarantineReason,
+            quarantinedAt,
+            i === 0 && hasImage ? 'pending' : 'not_required',
+            input.submitterIp ?? null,
+          ],
+        );
+      } catch (insertErr: any) {
+        // PostgreSQL unique constraint violation — receipt was already submitted
+        if (insertErr?.code === '23505') {
+          throw new Error('This receipt has already been submitted.');
+        }
+        throw insertErr;
+      }
+      insertedTickets.push({ ticketId: ticketInsert.rows[0].id, code: ticketCode });
+    }
 
     await client.query('COMMIT');
 
     // Trigger async OCR validation — runs after commit, never blocks the response
     if (input.receiptImageUrl) {
       validateReceiptAsync(
-        ticketId,
+        insertedTickets[0].ticketId,
         userId,
         drawId,
         input.receiptImageUrl,
@@ -599,7 +656,7 @@ export const submitReceiptEntryService = async (
       );
     }
 
-    return { ticketId, code };
+    return { tickets: insertedTickets, entryCount: batchSize };
   } catch (err) {
     await client.query('ROLLBACK');
     // Apply same-user duplicate penalty now that the client lock is released.
@@ -659,9 +716,21 @@ export const activatePromotionalEntry = async (
       `SELECT id, name FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1`,
     );
     if (drawResult.rows.length === 0) {
-      throw new Error('There is no active draw at the moment. Please try again later.');
+      throw new Error('There is no active campaign at the moment. Please try again later.');
     }
     const draw = drawResult.rows[0];
+
+    // Per-draw per-user cap — counts non-quarantined tickets + all promo entries
+    const capResult = await client.query(
+      `SELECT (
+         (SELECT COUNT(*)::int FROM ticket WHERE activated_by_user_id = $1 AND draw_id = $2 AND is_quarantined = FALSE)
+         + (SELECT COUNT(*)::int FROM promotional_entry WHERE user_id = $1 AND draw_id = $2)
+       ) AS total_count`,
+      [userId, draw.id],
+    );
+    if (parseInt(capResult.rows[0].total_count, 10) >= 30) {
+      throw new Error('You have reached the maximum of 30 entries for this campaign.');
+    }
 
     // Insert — the UNIQUE(code, user_id) constraint rejects duplicate use per account
     let result;
@@ -717,7 +786,7 @@ export const generateTicketService = async (user_id: number, location_id: number
       SELECT id FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1
     `);
 
-    if (drawInfo.rows.length === 0) throw new Error('No active draw found. Please contact admin.');
+    if (drawInfo.rows.length === 0) throw new Error('No active campaign found. Please contact admin.');
     const drawId = drawInfo.rows[0].id;
 
     // Entry cap enforcement — NULL cap means unlimited (MVP default)

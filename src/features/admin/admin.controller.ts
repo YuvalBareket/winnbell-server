@@ -21,6 +21,7 @@ import {
   getDrawBusinessesService,
   getAdminAnalyticsService,
   getLocationBreakdownService,
+  adminSetUserRiskService,
 } from './admin.service.js';
 
 export const getDashboardData = async (req: Request, res: Response) => {
@@ -39,7 +40,7 @@ export const getDraws = async (req: Request, res: Response) => {
     res.status(200).json(draws);
   } catch (error) {
     console.error('[admin.getDraws]', error);
-    res.status(500).json({ message: 'Error fetching draws' });
+    res.status(500).json({ message: 'Error fetching campaigns' });
   }
 };
 
@@ -59,10 +60,10 @@ export const createTickets = async (req: Request, res: Response) => {
     const result = await generateBatchTickets(businessId, drawId, quantity);
     res
       .status(201)
-      .json({ message: 'Tickets generated successfully', ...result });
+      .json({ message: 'Entries generated successfully', ...result });
   } catch (error) {
     console.error('[admin.createTickets]', error);
-    res.status(500).json({ message: 'Failed to generate tickets' });
+    res.status(500).json({ message: 'Failed to generate entries' });
   }
 };
 export const createBusiness = async (req: Request, res: Response) => {
@@ -79,16 +80,22 @@ export const getAllDraws = async (req: Request, res: Response) => {
     const draws = await getAllDrawsService();
     res.status(200).json(draws);
   } catch (error) {
-    res.status(500).json({ message: 'Error fetching all draws' });
+    res.status(500).json({ message: 'Error fetching all campaigns' });
   }
 };
 
 export const createDraw = async (req: Request, res: Response) => {
+  const { prize_amount } = req.body as { prize_amount?: number };
+  const parsed = Number(prize_amount);
+  if (!prize_amount || isNaN(parsed) || parsed <= 0) {
+    res.status(400).json({ message: 'prize_amount must be a positive number' });
+    return;
+  }
   try {
     const draw = await createDrawService(req.body);
     res.status(201).json(draw);
   } catch (error) {
-    res.status(500).json({ message: 'Failed to create draw' });
+    res.status(500).json({ message: 'Failed to create campaign' });
   }
 };
 
@@ -96,9 +103,9 @@ export const openDraw = async (req: Request, res: Response) => {
   const drawId = parseInt(req.params.drawId as string, 10);
   try {
     await openDrawService(drawId);
-    res.status(200).json({ message: 'Draw opened successfully' });
+    res.status(200).json({ message: 'Campaign opened successfully' });
   } catch (error) {
-    res.status(500).json({ message: error instanceof Error ? error.message : 'Failed to open draw' });
+    res.status(500).json({ message: error instanceof Error ? error.message : 'Failed to open campaign' });
   }
 };
 
@@ -106,9 +113,9 @@ export const closeDraw = async (req: Request, res: Response) => {
   const drawId = parseInt(req.params.drawId as string, 10);
   try {
     await closeDrawService(drawId);
-    res.status(200).json({ message: 'Draw closed successfully' });
+    res.status(200).json({ message: 'Campaign closed successfully' });
   } catch (error) {
-    res.status(500).json({ message: error instanceof Error ? error.message : 'Failed to close draw' });
+    res.status(500).json({ message: error instanceof Error ? error.message : 'Failed to close campaign' });
   }
 };
 
@@ -166,7 +173,7 @@ export const getDrawBusinesses = async (req: Request, res: Response) => {
     const businesses = await getDrawBusinessesService(drawId);
     res.json(businesses);
   } catch (error) {
-    res.status(500).json({ message: 'Failed to fetch draw businesses' });
+    res.status(500).json({ message: 'Failed to fetch campaign businesses' });
   }
 };
 
@@ -263,6 +270,25 @@ export const getAnalytics = async (req: Request, res: Response) => {
   } catch (error) {
     console.error('[admin.getAnalytics]', error);
     res.status(500).json({ message: 'Failed to fetch analytics' });
+  }
+};
+
+export const setUserRisk = async (req: Request, res: Response) => {
+  const userId = parseInt(req.params.userId as string, 10);
+  if (isNaN(userId)) {
+    res.status(400).json({ message: 'Invalid userId' });
+    return;
+  }
+  const { risk_score } = req.body as { risk_score: number };
+  if (typeof risk_score !== 'number' || risk_score < 0) {
+    res.status(400).json({ message: 'risk_score must be a non-negative number' });
+    return;
+  }
+  try {
+    await adminSetUserRiskService(userId, risk_score);
+    res.status(200).json({ message: 'Risk score updated' });
+  } catch (error) {
+    res.status(500).json({ message: error instanceof Error ? error.message : 'Failed to update risk score' });
   }
 };
 

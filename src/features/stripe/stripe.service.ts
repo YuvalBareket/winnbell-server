@@ -366,25 +366,23 @@ async function handleDrawParticipation(
 
   try {
     const drawResult = await client.query(`
-      SELECT id, prize_percentage FROM draw
+      SELECT id FROM draw
       WHERE EXTRACT(MONTH FROM draw_date) = $1
         AND EXTRACT(YEAR FROM draw_date)  = $2
         AND status = 'Upcoming'
       LIMIT 1
     `, [targetMonth, targetYear]);
 
-    const existingDraw = drawResult.rows[0] as { id: number; prize_percentage: number } | undefined;
+    const existingDraw = drawResult.rows[0] as { id: number } | undefined;
 
     if (existingDraw) {
-      const contribution = parseFloat((monthlyFee * existingDraw.prize_percentage / 100).toFixed(2));
-
       const insertResult = await client.query(`
         INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, contribution_amount)
-        SELECT $1, $2, $3, $4
+        SELECT $1, $2, $3, 0
         WHERE NOT EXISTS (
           SELECT 1 FROM draw_entry WHERE draw_id = $1 AND business_id = $2
         )
-      `, [existingDraw.id, businessId, monthlyFee, contribution]);
+      `, [existingDraw.id, businessId, monthlyFee]);
 
       if (insertResult.rowCount === 0) {
         console.log(`[Draw] Business ${businessId} already in draw ${existingDraw.id} — skipped`);
@@ -392,34 +390,25 @@ async function handleDrawParticipation(
         return;
       }
 
-      await client.query(
-        `UPDATE draw SET prize_pool = prize_pool + $1 WHERE id = $2`,
-        [contribution, existingDraw.id],
-      );
-      console.log(`[Draw] Business ${businessId} entered draw ${existingDraw.id} (${targetYear}-${targetMonth}) — fee $${monthlyFee}, contribution $${contribution}`);
+      console.log(`[Draw] Business ${businessId} entered draw ${existingDraw.id} (${targetYear}-${targetMonth}) — fee $${monthlyFee}`);
     } else {
-      const DEFAULT_PRIZE_PCT = 80.00;
-
       const newDrawResult = await client.query(`
-        INSERT INTO draw (name, prize_pool, prize_percentage, draw_date, status)
+        INSERT INTO draw (name, prize_pool, draw_date, status)
         VALUES (
           TRIM(TO_CHAR($1::TIMESTAMP, 'Month')) || ' ' || TO_CHAR($1::TIMESTAMP, 'YYYY') || ' Monthly Draw',
           0,
-          $2,
           DATE_TRUNC('month', $1::TIMESTAMP) + INTERVAL '1 month' - INTERVAL '1 day',
           'Upcoming'
         )
-        RETURNING id, prize_percentage
-      `, [targetIso, DEFAULT_PRIZE_PCT]);
+        RETURNING id
+      `, [targetIso]);
 
-      const newDraw = newDrawResult.rows[0] as { id: number; prize_percentage: number };
-      const triggerContribution = parseFloat((monthlyFee * DEFAULT_PRIZE_PCT / 100).toFixed(2));
+      const newDraw = newDrawResult.rows[0] as { id: number };
 
       await client.query(
-        `INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, contribution_amount) VALUES ($1, $2, $3, $4)`,
-        [newDraw.id, businessId, monthlyFee, triggerContribution],
+        `INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, contribution_amount) VALUES ($1, $2, $3, 0)`,
+        [newDraw.id, businessId, monthlyFee],
       );
-      let totalPrizePool = triggerContribution;
 
       // Only catch up other businesses when creating the immediate next-month draw.
       // For future months (yearly pre-enrollment) each business will enroll via their own renewal.
@@ -432,18 +421,15 @@ async function handleDrawParticipation(
         `, [businessId]);
 
         for (const sub of otherSubsResult.rows) {
-          const contribution = parseFloat((sub.monthly_fee * DEFAULT_PRIZE_PCT / 100).toFixed(2));
           await client.query(
-            `INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, contribution_amount) VALUES ($1, $2, $3, $4)
+            `INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, contribution_amount) VALUES ($1, $2, $3, 0)
              ON CONFLICT (draw_id, business_id) DO NOTHING`,
-            [newDraw.id, sub.business_id, sub.monthly_fee, contribution],
+            [newDraw.id, sub.business_id, sub.monthly_fee],
           );
-          totalPrizePool += contribution;
         }
       }
 
-      await client.query(`UPDATE draw SET prize_pool = $1 WHERE id = $2`, [totalPrizePool, newDraw.id]);
-      console.log(`[Draw] Created new draw ${newDraw.id} for ${targetYear}-${targetMonth} with ${skipEnrollOthers ? 1 : 'all'} businesses — pool $${totalPrizePool}`);
+      console.log(`[Draw] Created new draw ${newDraw.id} for ${targetYear}-${targetMonth} with ${skipEnrollOthers ? 1 : 'all'} businesses — prize pool set by admin`);
     }
 
     await client.query('COMMIT');
@@ -573,7 +559,7 @@ export const cancelSubscription = async (userId: number): Promise<CancelResult> 
   );
 
   const drawResult = await pool.query(`
-    SELECT d.id, d.status, d.prize_pool, de.contribution_amount, d.draw_date
+    SELECT d.id, d.status, d.draw_date
     FROM draw_entry de
     JOIN draw d ON d.id = de.draw_id
     WHERE de.business_id = $1 AND d.status = 'Upcoming'
@@ -590,18 +576,12 @@ export const cancelSubscription = async (userId: number): Promise<CancelResult> 
     const cutoffDate = new Date(drawDate);
     cutoffDate.setDate(cutoffDate.getDate() - ONBOARDING_CUTOFF_DAYS);
 
-    const contribution = parseFloat(nextDraw.contribution_amount);
-
     if (now < cutoffDate) {
       // ── Before cutoff: full draw removal + full refund ──────────────────────
       refundType = 'full';
       const poolClient = await pool.connect();
       await poolClient.query('BEGIN');
       try {
-        await poolClient.query(
-          `UPDATE draw SET prize_pool = GREATEST(0, prize_pool - $1) WHERE id = $2`,
-          [contribution, nextDraw.id],
-        );
         await poolClient.query(
           `DELETE FROM draw_entry WHERE draw_id = $1 AND business_id = $2`,
           [nextDraw.id, sub.business_id],
@@ -633,15 +613,9 @@ export const cancelSubscription = async (userId: number): Promise<CancelResult> 
     } else if (now < drawDate) {
       // ── After cutoff, before draw: remove from draw, 40% refund ─────────────
       refundType = 'partial_40';
-      const poolRetained = parseFloat((contribution * 0.6).toFixed(2));
       const poolClient = await pool.connect();
       await poolClient.query('BEGIN');
       try {
-        // Keep 60% of contribution in prize pool, remove 40%
-        await poolClient.query(
-          `UPDATE draw SET prize_pool = GREATEST(0, prize_pool - $1) WHERE id = $2`,
-          [parseFloat((contribution * 0.4).toFixed(2)), nextDraw.id],
-        );
         await poolClient.query(
           `DELETE FROM draw_entry WHERE draw_id = $1 AND business_id = $2`,
           [nextDraw.id, sub.business_id],

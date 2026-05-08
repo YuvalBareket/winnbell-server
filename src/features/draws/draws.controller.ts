@@ -6,7 +6,7 @@ export const getActiveDraws = async (req: Request, res: Response) => {
     const result = await getActiveDrawService();
     res.status(200).json(result);
   } catch (error: unknown) {
-    res.status(500).json({ message: 'Failed to fetch active draws' });
+    res.status(500).json({ message: 'Failed to fetch active campaigns' });
   }
 };
 
@@ -15,7 +15,7 @@ export const getDrawHistory = async (req: Request, res: Response) => {
     const result = await getDrawHistoryService();
     res.status(200).json(result);
   } catch (error: unknown) {
-    res.status(500).json({ message: 'Failed to fetch draw history' });
+    res.status(500).json({ message: 'Failed to fetch campaign history' });
   }
 };
 
@@ -25,7 +25,7 @@ export const getDrawResult = async (req: Request, res: Response) => {
     const result = await getDrawResultService(drawId);
     res.status(200).json(result);
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : 'Draw not found';
+    const message = error instanceof Error ? error.message : 'Campaign not found';
     res.status(404).json({ message });
   }
 };

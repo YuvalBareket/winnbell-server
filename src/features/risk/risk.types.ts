@@ -14,6 +14,6 @@ export interface DuplicateCheckResult {
 
 export const RISK_THRESHOLDS = {
   LOW_MAX: 9,    // 0–9   = low
-  MEDIUM_MAX: 14, // 10–14 = medium
-  // >= 15 = high
+  MEDIUM_MAX: 19, // 10–19 = medium
+  // >= 20 = high
 } as const;

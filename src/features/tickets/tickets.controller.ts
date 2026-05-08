@@ -31,19 +31,17 @@ export const getMyTickets = async (req: AuthRequest, res: Response) => {
     const role = req.user!.role;
     const locationId = req.user!.location_id;
 
-    let result;
     if (role === 'Business') {
-      if (locationId) {
-        result = await ticketService.getLocationTicketsService(userId, drawId);
-      } else {
-        result = await ticketService.getBusinessTicketsService(userId, drawId);
-      }
+      const tickets = locationId
+        ? await ticketService.getLocationTicketsService(userId, drawId)
+        : await ticketService.getBusinessTicketsService(userId, drawId);
+      res.status(200).json({ tickets, effectiveCount: tickets.length });
     } else {
-      result = await ticketService.getUserTicketsService(userId, drawId);
+      const result = await ticketService.getUserTicketsService(userId, drawId);
+      res.status(200).json(result);
     }
-    res.status(200).json(result);
   } catch (error: unknown) {
-    res.status(400).json({ message: error instanceof Error ? error.message : 'Failed to get tickets' });
+    res.status(400).json({ message: error instanceof Error ? error.message : 'Failed to get entries' });
   }
 };
 
@@ -109,7 +107,14 @@ export const submitReceiptEntry = async (req: AuthRequest, res: Response) => {
       submitterIp: req.ip,
     });
 
-    res.status(201).json({ success: true, ...result });
+    const firstTicket = result.tickets[0];
+    res.status(201).json({
+      success: true,
+      ticketId: firstTicket.ticketId,
+      code: firstTicket.code,
+      tickets: result.tickets,
+      entryCount: result.entryCount,
+    });
   } catch (error: unknown) {
     res.status(400).json({ message: error instanceof Error ? error.message : 'Entry submission failed.' });
   }
@@ -194,22 +199,27 @@ export const getMyRiskLevel = async (req: AuthRequest, res: Response) => {
     // Mirror the exact throttle condition from submitReceiptEntryService:
     // high risk score AND already has a ticket in the last 24 hours
     let isThrottled = false;
-    if (score >= 15) {
+    if (score >= 20) {
       const recentResult = await pool.query(
-        `SELECT COUNT(*) AS count FROM ticket
-         WHERE activated_by_user_id = $1 AND entry_source = 'receipt' AND activated_at >= NOW() - INTERVAL '1 hour'`,
+        `SELECT COUNT(DISTINCT receipt_identifier) AS count FROM ticket
+         WHERE activated_by_user_id = $1 AND entry_source = 'receipt'
+           AND receipt_identifier IS NOT NULL
+           AND activated_at >= NOW() - INTERVAL '24 hours'`,
         [userId],
       );
       isThrottled = parseInt(recentResult.rows[0].count, 10) >= 1;
     }
 
     const drawCountResult = await pool.query(
-      `SELECT COUNT(*) AS count FROM ticket t
-       JOIN draw d ON t.draw_id = d.id
-       WHERE t.activated_by_user_id = $1 AND d.status = 'Open' AND t.is_quarantined = FALSE`,
+      `SELECT (
+         (SELECT COUNT(*)::int FROM ticket t JOIN draw d ON t.draw_id = d.id
+          WHERE t.activated_by_user_id = $1 AND d.status = 'Open' AND t.is_quarantined = FALSE)
+         + (SELECT COUNT(*)::int FROM promotional_entry pe JOIN draw d ON pe.draw_id = d.id
+            WHERE pe.user_id = $1 AND d.status = 'Open')
+       ) AS total_count`,
       [userId],
     );
-    const drawEntryCount = parseInt(drawCountResult.rows[0]?.count ?? '0', 10);
+    const drawEntryCount = parseInt(drawCountResult.rows[0]?.total_count ?? '0', 10);
 
     res.json({
       requiresImage: score > 9,
