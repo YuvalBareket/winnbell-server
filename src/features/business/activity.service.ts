@@ -4,6 +4,8 @@ export interface ActivitySummary {
   receipts_today: number;
   revenue_today: number;
   entries_today: number;
+  entries_this_month: number;
+  monthly_cap: number | null;
 }
 
 export interface ActivityItem {
@@ -82,13 +84,30 @@ export const getBusinessActivity = async (
     JOIN business_location bl ON bl.id = t.location_id
     WHERE bl.business_id = $1
       AND t.created_at >= CURRENT_DATE
+      AND t.is_quarantined = FALSE
       ${summaryLocClause}
   `, summaryParams);
+
+  // ── Monthly entries stats ──
+  const monthlyRes = await pool.query(`
+    SELECT
+      COUNT(*) FILTER (WHERE t.is_quarantined = FALSE) AS entries_this_month,
+      COALESCE(b.entry_cap, ps.global_entry_cap) AS monthly_cap
+    FROM business b
+    LEFT JOIN platform_settings ps ON ps.id = 1
+    LEFT JOIN ticket t ON t.business_id = b.id
+      AND t.created_at >= date_trunc('month', NOW())
+      ${scopedLocationId ? 'AND t.location_id = $2' : ''}
+    WHERE b.id = $1
+    GROUP BY b.entry_cap, ps.global_entry_cap
+  `, scopedLocationId ? [businessId, scopedLocationId] : [businessId]);
 
   const summary: ActivitySummary = {
     receipts_today: Number(summaryRes.rows[0]?.receipts_today ?? 0),
     revenue_today: parseFloat(summaryRes.rows[0]?.revenue_today ?? '0'),
     entries_today: Number(summaryRes.rows[0]?.entries_today ?? 0),
+    entries_this_month: Number(monthlyRes.rows[0]?.entries_this_month ?? 0),
+    monthly_cap: monthlyRes.rows[0]?.monthly_cap != null ? Number(monthlyRes.rows[0].monthly_cap) : null,
   };
 
   // ── Activity feed with cursor-based pagination ──
@@ -99,6 +118,7 @@ export const getBusinessActivity = async (
   const feedParams: unknown[] = [businessId];
   const conditions: string[] = [
     'bl.business_id = $1',
+    't.is_quarantined = FALSE',
   ];
 
   if (dateRange === 'today') {

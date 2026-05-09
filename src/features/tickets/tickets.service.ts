@@ -129,6 +129,7 @@ export const getBusinessTicketsService = async (userId: number, drawId: number) 
       t.code,
       t.status,
       t.activated_at,
+      t.is_quarantined,
       bl.name as location_name,
       u.full_name as activated_by_user,
       u.email as activated_by_email
@@ -151,6 +152,7 @@ export const getLocationTicketsService = async (userId: number, drawId: number) 
       t.code,
       t.status,
       t.activated_at,
+      t.is_quarantined,
       bl.name as location_name,
       u_act.full_name as activated_by_user,
       u_act.email as activated_by_email
