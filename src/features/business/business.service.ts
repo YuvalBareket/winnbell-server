@@ -36,6 +36,13 @@ export const getNearbyBusinessesService = async (
       b.logo_url,
       b.receipt_example_image_url,
       b.min_transaction_amount,
+      b.website_url,
+      b.phone,
+      (
+        SELECT COALESCE(json_agg(json_build_object('id', bl2.id, 'name', bl2.name, 'address', bl2.address) ORDER BY bl2.id), '[]'::json)
+        FROM business_location bl2
+        WHERE bl2.business_id = b.id AND bl2.is_active = true AND bl2.id != loc.id
+      ) AS other_locations,
       (6371 * acos(
         LEAST(1.0, GREATEST(-1.0,
           cos($1 * 0.0174532925) * cos(loc.latitude * 0.0174532925) * cos((loc.longitude * 0.0174532925) - ($2 * 0.0174532925)) +
@@ -153,6 +160,8 @@ export const getMyBusinessData = async (userId: number): Promise<MyBusinessData 
         b.entry_mode,
         b.entry_cap,
         b.min_transaction_amount,
+        b.website_url,
+        b.phone,
         s.status AS subscription_status,
         s.current_period_end,
         s.cancel_at_period_end,
@@ -249,9 +258,9 @@ export const updateBusinessProfile = async (ownerUserId: number, data: UpdateBus
 
   const result = await pool.query(`
     UPDATE business
-    SET sector = $1, description = $2, terms_text = $3
-    WHERE user_id = $4
-  `, [data.businessSector, data.description, data.terms_text, ownerUserId]);
+    SET sector = $1, description = $2, terms_text = $3, website_url = $4, phone = $5
+    WHERE user_id = $6
+  `, [data.businessSector, data.description, data.terms_text, data.website_url ?? null, data.phone ?? null, ownerUserId]);
 
   if (result.rowCount === 0) throw new Error('BUSINESS_NOT_FOUND');
 };

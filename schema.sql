@@ -52,6 +52,8 @@ CREATE TABLE business (
   -- NULL = no per-business cap; the global cap from platform_settings still applies.
   entry_cap              INTEGER NULL CHECK (entry_cap IS NULL OR entry_cap > 0),
   min_transaction_amount NUMERIC(10, 2) NULL CHECK (min_transaction_amount IS NULL OR min_transaction_amount > 0),
+  website_url            TEXT,
+  phone                  TEXT,
   -- ticket_balance: tracks how many code-mode tickets have been issued (legacy MVP counter)
   ticket_balance         INTEGER NOT NULL DEFAULT 0 CHECK (ticket_balance >= 0),
   -- Legacy single-location fields (used by admin panel create flow).

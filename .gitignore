@@ -2,3 +2,9 @@ node_modules/
 dist/
 .env
 *.log
+.vscode/
+.idea/
+*.traineddata
+test_*.mjs
+*.swp
+*.swo

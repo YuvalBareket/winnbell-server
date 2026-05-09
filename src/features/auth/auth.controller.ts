@@ -138,3 +138,23 @@ export const handleClerkWebhook = async (req: Request, res: Response): Promise<v
 
   res.status(200).json({ success: true });
 };
+
+export const changePassword = async (req: Request, res: Response): Promise<void> => {
+  const userId = (req as any).user?.id;
+  if (!userId) { res.status(401).json({ message: 'Unauthorized' }); return; }
+
+  const { currentPassword, newPassword } = req.body;
+  if (!currentPassword || !newPassword) { res.status(400).json({ message: 'Both currentPassword and newPassword are required' }); return; }
+
+  try {
+    await authService.changePasswordService(userId, currentPassword, newPassword);
+    res.json({ success: true });
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : '';
+    if (msg === 'WRONG_PASSWORD') { res.status(400).json({ message: 'Current password is incorrect' }); return; }
+    if (msg === 'SSO_ACCOUNT') { res.status(400).json({ message: 'Password cannot be changed for social login accounts' }); return; }
+    if (msg === 'PASSWORD_TOO_SHORT') { res.status(400).json({ message: 'New password must be at least 8 characters' }); return; }
+    if (msg === 'USER_NOT_FOUND') { res.status(404).json({ message: 'User not found' }); return; }
+    res.status(500).json({ message: 'Server error' });
+  }
+};

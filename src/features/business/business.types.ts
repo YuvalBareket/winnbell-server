@@ -21,6 +21,9 @@ export interface NearbyBusiness {
   receipt_example_image_url: string | null;
   min_transaction_amount: number | null;
   distance_km: number;
+  website_url?: string | null;
+  phone?: string | null;
+  other_locations?: Array<{id: number; name: string; address: string}>;
 }
 
 /** Shape of each location in the FOR JSON subquery inside getMyBusinessData */
@@ -57,6 +60,8 @@ export interface MyBusinessData {
   monthly_fee: number | null;
   next_billing_date: string | null;
   locations: MyBusinessLocation[];
+  website_url?: string | null;
+  phone?: string | null;
 }
 
 export interface UpdateCampaignSettingsInput {
@@ -136,6 +141,8 @@ export interface UpdateBusinessInput {
   businessSector: string;
   description: string;
   terms_text: string;
+  website_url?: string | null;
+  phone?: string | null;
 }
 
 export interface AddLocationInput {

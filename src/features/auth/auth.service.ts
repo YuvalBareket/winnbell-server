@@ -229,6 +229,24 @@ export const loginUser = async (
   };
 };
 
+export const changePasswordService = async (userId: number, currentPassword: string, newPassword: string): Promise<void> => {
+  const pool = getPool();
+  // Only works for users with a local password (SSO-only users have NULL password_hash)
+  const result = await pool.query(`SELECT password_hash FROM "user" WHERE id = $1`, [userId]);
+  const user = result.rows[0];
+  if (!user) throw new Error('USER_NOT_FOUND');
+  if (!user.password_hash) throw new Error('SSO_ACCOUNT');
+
+  const isMatch = await bcrypt.compare(currentPassword, user.password_hash);
+  if (!isMatch) throw new Error('WRONG_PASSWORD');
+
+  if (newPassword.length < 8) throw new Error('PASSWORD_TOO_SHORT');
+
+  const salt = await bcrypt.genSalt(10);
+  const newHash = await bcrypt.hash(newPassword, salt);
+  await pool.query(`UPDATE "user" SET password_hash = $1 WHERE id = $2`, [newHash, userId]);
+};
+
 export const syncExternalUser = async (
   externalId: string,
   email: string,
