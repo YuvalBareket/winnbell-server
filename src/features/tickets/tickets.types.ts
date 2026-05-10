@@ -20,6 +20,7 @@ export interface ITicket {
 export interface FreeTicketStatus {
   canActivate: boolean;
   nextAvailableDate?: Date;
+  reason?: string;
 }
 
 export interface ActivationResult {

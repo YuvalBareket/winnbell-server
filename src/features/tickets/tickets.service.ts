@@ -169,10 +169,16 @@ export const getLocationTicketsService = async (userId: number, drawId: number) 
 export const checkFreeTicketEligibility = async (userId: number): Promise<FreeTicketStatus> => {
   const pool = getPool();
 
+  // Check for an open draw first — no point showing READY if there's no campaign
+  const drawResult = await pool.query(`SELECT id FROM draw WHERE status = 'Open' LIMIT 1`);
+  if (!drawResult.rows[0]) {
+    return { canActivate: false, reason: 'no_campaign' };
+  }
+
   const result = await pool.query(`
     SELECT activated_at
     FROM free_ticket_usage
-    WHERE user_id = $1
+    WHERE user_id = $1 AND status = 'approved'
     ORDER BY activated_at DESC
     LIMIT 1
   `, [userId]);
@@ -233,7 +239,7 @@ export const activateFreeTicket = async (userId: number, claimIp?: string): Prom
       FROM (SELECT pg_advisory_xact_lock($1)) AS _lock
       CROSS JOIN (SELECT is_email_verified, created_at FROM "user" WHERE id = $1) AS usr
       LEFT JOIN LATERAL (
-        SELECT activated_at FROM free_ticket_usage WHERE user_id = $1
+        SELECT activated_at FROM free_ticket_usage WHERE user_id = $1 AND status = 'approved'
         ORDER BY activated_at DESC LIMIT 1
       ) AS u ON true
     `, [userId]);
@@ -250,20 +256,7 @@ export const activateFreeTicket = async (userId: number, claimIp?: string): Prom
       throw new Error('Please verify your email address before claiming a free entry.');
     }
 
-    // Guard 2: account must be at least 24 hours old (blocks freshly-created bot accounts)
-    if (lastUsage?.account_created_at) {
-      const accountAgeMs = Date.now() - new Date(lastUsage.account_created_at).getTime();
-      if (accountAgeMs < 24 * 60 * 60 * 1000) {
-        await client.query(
-          `INSERT INTO free_ticket_usage (user_id, status, rejection_reason, entries_created) VALUES ($1, 'rejected', 'account_too_new', 0)`,
-          [userId]
-        );
-        await client.query('COMMIT');
-        throw new Error('New accounts must be at least 24 hours old before claiming a free entry.');
-      }
-    }
-
-    // Guard 3: weekly usage check (1 free entry per user per week)
+    // Guard 2: weekly usage check (1 free entry per user per week)
     if (lastUsage?.activated_at) {
       const now = new Date();
       const weekStart = new Date(now);
