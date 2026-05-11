@@ -384,6 +384,27 @@ export const searchParticipatingLocationsService = async (query: string): Promis
   return result.rows;
 };
 
+export const getParticipatingLocationByIdService = async (locationId: number): Promise<ParticipatingLocation | null> => {
+  const pool = getPool();
+  const result = await pool.query(
+    `SELECT
+      bl.id AS location_id,
+      bl.name AS location_name,
+      bl.address,
+      b.id AS business_id,
+      b.name AS business_name,
+      b.sector,
+      b.logo_url,
+      b.min_transaction_amount,
+      b.receipt_example_image_url
+    FROM business_location bl
+    JOIN business b ON bl.business_id = b.id
+    WHERE bl.id = $1 AND bl.is_active = true AND b.is_subscribed = true AND b.is_participating = true`,
+    [locationId],
+  );
+  return result.rows[0] ?? null;
+};
+
 export const updateCampaignSettings = async (
   ownerUserId: number,
   data: UpdateCampaignSettingsInput,

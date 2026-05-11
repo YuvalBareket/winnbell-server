@@ -12,6 +12,7 @@ import {
   getMyBusinessData,
   getNearbyBusinessesService,
   getParticipatingBusinessesService,
+  getParticipatingLocationByIdService,
   removeLocationManagerService,
   searchParticipatingLocationsService,
   updateBusinessLocation,
@@ -48,6 +49,14 @@ export const searchParticipatingLocations = async (req: Request, res: Response) 
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
+};
+
+export const getParticipatingLocationById = async (req: Request, res: Response) => {
+  const locationId = Number(req.params.locationId);
+  if (isNaN(locationId)) return res.status(400).json({ message: 'Invalid location ID' });
+  const location = await getParticipatingLocationByIdService(locationId);
+  if (!location) return res.status(404).json({ message: 'Location not found' });
+  res.json(location);
 };
 
 export const getNearby = async (

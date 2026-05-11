@@ -11,6 +11,7 @@ import {
   getNearby,
   getParticipating,
   getUploadUrl,
+  getParticipatingLocationById,
   removeManager,
   searchParticipatingLocations,
   setupBusiness,
@@ -29,6 +30,7 @@ const router = Router();
 router.get('/nearby', getNearby);
 router.get('/participating', getParticipating);
 router.get('/participating/locations/search', searchParticipatingLocations);
+router.get('/participating/locations/:locationId', getParticipatingLocationById);
 router.get('/mode', getEntryMode);
 router.post('/address', getAddressController);
 
