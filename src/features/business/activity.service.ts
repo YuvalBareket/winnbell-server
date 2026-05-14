@@ -6,6 +6,7 @@ export interface ActivitySummary {
   entries_today: number;
   entries_this_month: number;
   monthly_cap: number | null;
+  receipts_this_month: number;
 }
 
 export interface ActivityItem {
@@ -92,6 +93,10 @@ export const getBusinessActivity = async (
   const monthlyRes = await pool.query(`
     SELECT
       COUNT(*) FILTER (WHERE t.is_quarantined = FALSE) AS entries_this_month,
+      COUNT(*) FILTER (
+        WHERE t.is_quarantined = FALSE
+          AND (t.entry_source != 'receipt' OR t.receipt_identifier IS NOT NULL)
+      ) AS receipts_this_month,
       COALESCE(b.entry_cap, ps.global_entry_cap) AS monthly_cap
     FROM business b
     LEFT JOIN platform_settings ps ON ps.id = 1
@@ -108,6 +113,7 @@ export const getBusinessActivity = async (
     entries_today: Number(summaryRes.rows[0]?.entries_today ?? 0),
     entries_this_month: Number(monthlyRes.rows[0]?.entries_this_month ?? 0),
     monthly_cap: monthlyRes.rows[0]?.monthly_cap != null ? Number(monthlyRes.rows[0].monthly_cap) : null,
+    receipts_this_month: Number(monthlyRes.rows[0]?.receipts_this_month ?? 0),
   };
 
   // ── Activity feed with cursor-based pagination ──
@@ -162,6 +168,7 @@ export const getBusinessActivity = async (
           AND t2.draw_id = t.draw_id
           AND t2.activated_at = t.activated_at
           AND t2.entry_source = 'receipt'
+          AND t2.is_quarantined = FALSE
       )                                         AS entry_count
     FROM ticket t
     JOIN business_location bl ON bl.id = t.location_id

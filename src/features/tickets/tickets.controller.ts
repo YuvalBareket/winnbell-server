@@ -32,10 +32,16 @@ export const getMyTickets = async (req: AuthRequest, res: Response) => {
     const locationId = req.user!.location_id;
 
     if (role === 'Business') {
-      const tickets = locationId
-        ? await ticketService.getLocationTicketsService(userId, drawId)
-        : await ticketService.getBusinessTicketsService(userId, drawId);
-      res.status(200).json({ tickets, effectiveCount: tickets.length });
+      const filterLocationId = req.query.location_id ? Number(req.query.location_id) : undefined;
+      if (locationId) {
+        // Location manager — scoped to their location only
+        const tickets = await ticketService.getLocationTicketsService(userId, drawId);
+        res.status(200).json({ tickets, totalCount: tickets.length, cap: null, effectiveCount: tickets.length });
+      } else {
+        // Business owner — optionally filtered by location
+        const { tickets, totalCount, cap, perLocationCap, activeLocationCount } = await ticketService.getBusinessTicketsService(userId, drawId, filterLocationId);
+        res.status(200).json({ tickets, totalCount, cap, perLocationCap, activeLocationCount, effectiveCount: tickets.length });
+      }
     } else {
       const result = await ticketService.getUserTicketsService(userId, drawId);
       res.status(200).json(result);

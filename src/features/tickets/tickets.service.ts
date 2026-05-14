@@ -121,27 +121,55 @@ export const getUserTicketsService = async (userId: number, drawId: number) => {
   return { tickets: result.rows, effectiveCount };
 };
 
-export const getBusinessTicketsService = async (userId: number, drawId: number) => {
+export const getBusinessTicketsService = async (userId: number, drawId: number, locationId?: number) => {
   const pool = getPool();
-  const result = await pool.query(`
-    SELECT
-      t.id,
-      t.code,
-      t.status,
-      t.activated_at,
-      t.is_quarantined,
-      bl.name as location_name,
-      u.full_name as activated_by_user,
-      u.email as activated_by_email
-    FROM ticket t
-    INNER JOIN business b ON t.business_id = b.id
-    LEFT JOIN business_location bl ON t.location_id = bl.id
-    LEFT JOIN "user" u ON t.activated_by_user_id = u.id
-    WHERE b.user_id = $1
-    AND t.draw_id = $2
-    ORDER BY t.created_at DESC
-  `, [userId, drawId]);
-  return result.rows;
+
+  // Get businessId, per-location cap, and active location count in one query
+  const bizRes = await pool.query(
+    `SELECT
+       b.id AS business_id,
+       COALESCE(b.entry_cap, ps.global_entry_cap) AS per_location_cap,
+       (SELECT COUNT(*)::int FROM business_location WHERE business_id = b.id AND is_active = TRUE) AS active_location_count
+     FROM business b
+     LEFT JOIN platform_settings ps ON ps.id = 1
+     WHERE b.user_id = $1`,
+    [userId],
+  );
+  const biz = bizRes.rows[0];
+  if (!biz) throw new Error('Business not found');
+  const businessId: number = biz.business_id;
+  const perLocationCap: number | null = biz.per_location_cap != null ? Number(biz.per_location_cap) : null;
+  const activeLocationCount: number = Number(biz.active_location_count ?? 1);
+  // When viewing all locations the cap is per-location cap × number of active locations.
+  // When filtered to a single location the cap is the per-location cap.
+  const cap: number | null = perLocationCap !== null
+    ? (locationId ? perLocationCap : perLocationCap * activeLocationCount)
+    : null;
+
+  const countParams: unknown[] = [businessId, drawId];
+  const countLocClause = locationId ? (countParams.push(locationId), `AND t.location_id = $${countParams.length}`) : '';
+  const countRes = await pool.query(
+    `SELECT COUNT(*)::int AS total_count FROM ticket t
+     WHERE t.business_id = $1 AND t.draw_id = $2 AND t.is_quarantined = FALSE ${countLocClause}`,
+    countParams,
+  );
+  const totalCount: number = Number(countRes.rows[0]?.total_count ?? 0);
+
+  const ticketParams: unknown[] = [userId, drawId];
+  const locationClause = locationId ? (ticketParams.push(locationId), `AND t.location_id = $${ticketParams.length}`) : '';
+  const result = await pool.query(
+    `SELECT t.id, t.code, t.status, t.activated_at, t.is_quarantined,
+            bl.name AS location_name, u.full_name AS activated_by_user, u.email AS activated_by_email
+     FROM ticket t
+     INNER JOIN business b ON t.business_id = b.id
+     LEFT JOIN business_location bl ON t.location_id = bl.id
+     LEFT JOIN "user" u ON t.activated_by_user_id = u.id
+     WHERE b.user_id = $1 AND t.draw_id = $2 ${locationClause}
+     ORDER BY t.created_at DESC`,
+    ticketParams,
+  );
+
+  return { tickets: result.rows, totalCount, cap, perLocationCap, activeLocationCount };
 };
 
 export const getLocationTicketsService = async (userId: number, drawId: number) => {
