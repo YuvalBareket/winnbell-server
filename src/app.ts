@@ -7,6 +7,7 @@ import adminRoutes from './features/admin/admin.routes.js';
 import ticketsRoutes from './features/tickets/tickets.routes.js';
 import businessRoutes from './features/business/business.routes.js';
 import drawsRoutes from './features/draws/draws.routes.js';
+import * as drawsController from './features/draws/draws.controller.js';
 import stripeWebhookRoutes from './features/stripe/stripe.routes.js';
 import notificationRoutes from './features/notifications/notifications.routes.js';
 import { Router } from 'express';
@@ -96,6 +97,11 @@ publicBusinessRouter.get('/participating/locations/search', searchParticipatingL
 publicBusinessRouter.get('/mode', getEntryMode);
 publicBusinessRouter.post('/address', publicLimiter, getAddressController);
 app.use('/business', publicBusinessRouter);
+
+// Public draws endpoint — campaign info is public
+const publicDrawsRouter = Router();
+publicDrawsRouter.get('/active', drawsController.getActiveDraws);
+app.use('/draws', publicDrawsRouter);
 
 // ── Authenticated routes ──
 app.use(authenticateToken);
