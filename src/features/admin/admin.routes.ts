@@ -20,6 +20,7 @@ router.post('/draw', adminController.createDraw);
 router.post('/draws/:drawId/open', adminController.openDraw);
 router.post('/draws/:drawId/close', adminController.closeDraw);
 router.post('/draws/:drawId/pick-winner', adminController.pickWinner);
+router.post('/draws/:drawId/reopen', adminController.reopenDraw);
 router.get('/draws/:drawId/businesses', adminController.getDrawBusinesses);
 router.get('/settings', adminController.getPlatformSettings);
 router.patch('/settings', adminController.updatePlatformSettings);

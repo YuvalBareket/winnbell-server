@@ -88,7 +88,7 @@ export const createBusinessService = async (data: {
 export const getAllDrawsService = async () => {
   const pool = getPool();
   const result = await pool.query(`
-    SELECT id, name, prize_pool AS prize_amount, draw_date, status
+    SELECT id, name, prize_pool AS prize_amount, draw_date, status, winner_user_id
     FROM draw
     ORDER BY draw_date DESC
   `);
@@ -205,6 +205,18 @@ export const closeDrawService = async (drawId: number): Promise<void> => {
 
   await pool.query(`UPDATE draw SET status = 'Closed', closed_at = NOW() WHERE id = $1`, [drawId]);
   await decayAllUserRiskScores();
+};
+
+export const reopenDrawService = async (drawId: number): Promise<void> => {
+  const pool = getPool();
+  const check = await pool.query(`SELECT id, status, winner_user_id FROM draw WHERE id = $1`, [drawId]);
+  if (check.rows.length === 0) throw new Error('Draw not found');
+  if (check.rows[0].status.toUpperCase() !== 'CLOSED') throw new Error('Draw is not Closed');
+  if (check.rows[0].winner_user_id !== null) throw new Error('Cannot reopen a draw that already has a winner');
+  // Check no other draw is already open
+  const openCheck = await pool.query(`SELECT id FROM draw WHERE status = 'Open'`);
+  if (openCheck.rows.length > 0) throw new Error('A draw is already Open. Close it before reopening another.');
+  await pool.query(`UPDATE draw SET status = 'Open', closed_at = NULL WHERE id = $1`, [drawId]);
 };
 
 export const pickDrawWinnerService = async (drawId: number): Promise<{

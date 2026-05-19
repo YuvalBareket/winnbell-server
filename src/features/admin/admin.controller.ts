@@ -2,6 +2,7 @@ import { Request, Response } from 'express';
 import {
   closeDrawService,
   openDrawService,
+  reopenDrawService,
   createBusinessService,
   getPromoCodesService,
   createPromoCodeService,
@@ -213,8 +214,19 @@ export const pickWinner = async (req: Request, res: Response) => {
     const winner = await pickDrawWinnerService(drawId);
     res.status(200).json(winner);
   } catch (error) {
-    console.error('[admin.pickWinner]', error);
-    res.status(500).json({ message: 'Failed to pick winner' });
+    const message = error instanceof Error ? error.message : 'Failed to pick winner';
+    res.status(500).json({ message });
+  }
+};
+
+export const reopenDraw = async (req: Request, res: Response) => {
+  const drawId = parseInt(req.params.drawId as string, 10);
+  try {
+    await reopenDrawService(drawId);
+    res.status(200).json({ message: 'Campaign reopened successfully' });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to reopen campaign';
+    res.status(500).json({ message });
   }
 };
 
