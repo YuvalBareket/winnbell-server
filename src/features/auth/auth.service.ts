@@ -2,6 +2,28 @@ import bcrypt from 'bcryptjs';
 import { getPool } from '../../shared/db/db.js';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
+const getAllowedStates = async (): Promise<string[]> => {
+  const pool = getPool();
+  const result = await pool.query(`SELECT allowed_states FROM platform_settings WHERE id = 1`);
+  return result.rows[0]?.allowed_states ?? [];
+};
+
+export const getCountryFromIp = async (ip: string): Promise<string | null> => {
+  if (!ip) return null;
+  try {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 2000);
+    const res = await fetch(`https://ipinfo.io/${ip}/country`, { signal: controller.signal });
+    clearTimeout(timeout);
+    if (!res.ok) {
+      return null;
+    }
+    const text = (await res.text()).trim();
+    return text.length === 2 ? text : null;
+  } catch (err) {
+    return null;
+  }
+};
 
 // ── Bot / throwaway-email protection ──────────────────────────────────────────
 
@@ -251,7 +273,7 @@ export const syncExternalUser = async (
   externalId: string,
   email: string,
   fullName: string,
-  metadata?: { role?: string; inviteToken?: string | null },
+  metadata?: { role?: string; inviteToken?: string | null; ip?: string },
 ) => {
   const pool = getPool();
   const client = await pool.connect();
@@ -264,18 +286,29 @@ export const syncExternalUser = async (
   const role = rawRole === 'Business' ? 'Business' : 'User';
   const inviteToken = metadata?.inviteToken;
 
+  const detectedState = metadata?.ip ? await getCountryFromIp(metadata.ip) : null;
+
+  // Region check: only validate when state detection succeeds
+  if (detectedState) {
+    const allowedStates = await getAllowedStates();
+    if (allowedStates.length > 0 && !allowedStates.includes(detectedState)) {
+      throw new Error('REGION_RESTRICTED');
+    }
+  }
+
   try {
     await client.query('BEGIN');
 
     const upsertResult = await client.query(
-      `INSERT INTO "user" (external_auth_id, email, full_name, role, is_active, is_email_verified)
-       VALUES ($1, $2, $3, $4, true, true)
+      `INSERT INTO "user" (external_auth_id, email, full_name, role, is_active, is_email_verified, declared_state)
+       VALUES ($1, $2, $3, $4, true, true, $5)
        ON CONFLICT (email) DO UPDATE
          SET external_auth_id = EXCLUDED.external_auth_id,
              is_email_verified = true,
+             declared_state = COALESCE(EXCLUDED.declared_state, "user".declared_state),
              updated_at = NOW()
        RETURNING id, role, full_name AS "fullName", email`,
-      [externalId, email, fullName, role],
+      [externalId, email, fullName, role, detectedState],
     );
     const dbUser = upsertResult.rows[0];
 

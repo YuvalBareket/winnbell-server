@@ -188,7 +188,7 @@ export const getPlatformSettings = async (_req: Request, res: Response) => {
 
 export const updatePlatformSettings = async (req: Request, res: Response) => {
   try {
-    const { global_entry_cap } = req.body as { global_entry_cap: number | null };
+    const { global_entry_cap, allowed_states } = req.body as { global_entry_cap: number | null; allowed_states?: string[] };
     if (global_entry_cap !== null && global_entry_cap !== undefined) {
       const parsed = Number(global_entry_cap);
       if (!Number.isInteger(parsed) || parsed < 1) {
@@ -196,8 +196,8 @@ export const updatePlatformSettings = async (req: Request, res: Response) => {
         return;
       }
     }
-    await updatePlatformSettingsService(global_entry_cap ?? null);
-    res.status(204).send();
+    await updatePlatformSettingsService(global_entry_cap ?? null, allowed_states);
+    res.json({ success: true });
   } catch (error) {
     res.status(500).json({ message: 'Failed to update platform settings' });
   }

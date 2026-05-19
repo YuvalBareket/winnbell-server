@@ -340,19 +340,22 @@ export const toggleUserActiveService = async (userId: number, isActive: boolean)
   );
 };
 
-export const getPlatformSettingsService = async (): Promise<{ global_entry_cap: number | null }> => {
+export const getPlatformSettingsService = async (): Promise<{ global_entry_cap: number | null; allowed_states: string[] }> => {
   const pool = getPool();
-  const result = await pool.query(`SELECT global_entry_cap FROM platform_settings WHERE id = 1`);
-  return result.rows[0] ?? { global_entry_cap: null };
+  const result = await pool.query(`SELECT global_entry_cap, allowed_states FROM platform_settings WHERE id = 1`);
+  return result.rows[0] ?? { global_entry_cap: null, allowed_states: ['FL'] };
 };
 
-export const updatePlatformSettingsService = async (global_entry_cap: number | null): Promise<void> => {
+export const updatePlatformSettingsService = async (
+  global_entry_cap: number | null,
+  allowed_states?: string[],
+): Promise<void> => {
   const pool = getPool();
   await pool.query(
-    `INSERT INTO platform_settings (id, global_entry_cap, updated_at)
-     VALUES (1, $1, NOW())
-     ON CONFLICT (id) DO UPDATE SET global_entry_cap = $1, updated_at = NOW()`,
-    [global_entry_cap],
+    `INSERT INTO platform_settings (id, global_entry_cap, allowed_states, updated_at)
+     VALUES (1, $1, $2, NOW())
+     ON CONFLICT (id) DO UPDATE SET global_entry_cap = $1, allowed_states = $2, updated_at = NOW()`,
+    [global_entry_cap, allowed_states ?? ['FL']],
   );
 };
 

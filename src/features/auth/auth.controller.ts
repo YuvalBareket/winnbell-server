@@ -3,6 +3,7 @@ import { createClerkClient, verifyToken } from '@clerk/backend';
 import { Webhook } from 'svix';
 import * as authService from './auth.service.js';
 import { RegisterRequest, AuthResponse } from './auth.types.js';
+import { getPool } from '../../shared/db/db.js';
 
 const clerk = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY });
 
@@ -69,14 +70,20 @@ export const syncUser = async (req: Request, res: Response): Promise<void> => {
     const email = clerkUser.emailAddresses[0]?.emailAddress;
     const fullName = `${clerkUser.firstName || ''} ${clerkUser.lastName || ''}`.trim();
     const { role, inviteToken } = req.body;
+    const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.ip || '';
 
     const result = await authService.syncExternalUser(payload.sub, email, fullName, {
       role: typeof role === 'string' ? role : undefined,
       inviteToken: inviteToken || (clerkUser.unsafeMetadata?.inviteToken as string) || null,
+      ip,
     });
 
     res.json(result);
   } catch (err: unknown) {
+    if (err instanceof Error && err.message === 'REGION_RESTRICTED') {
+      res.status(403).json({ message: 'REGION_RESTRICTED' });
+      return;
+    }
     console.error('Sync error:', err instanceof Error ? err.message : err);
     res.status(401).json({ message: 'Invalid or expired token' });
   }
@@ -137,6 +144,31 @@ export const handleClerkWebhook = async (req: Request, res: Response): Promise<v
   }
 
   res.status(200).json({ success: true });
+};
+
+export const getRegionConfig = async (_req: Request, res: Response): Promise<void> => {
+  try {
+    const pool = getPool();
+    const result = await pool.query(`SELECT allowed_states FROM platform_settings WHERE id = 1`);
+    const allowed_states: string[] = result.rows[0]?.allowed_states ?? [];
+    res.json({ allowed_states });
+  } catch {
+    res.json({ allowed_states: [] });
+  }
+};
+
+export const checkRegion = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.ip || '';
+    const country = await authService.getCountryFromIp(ip);
+    const pool = getPool();
+    const result = await pool.query(`SELECT allowed_states FROM platform_settings WHERE id = 1`);
+    const allowedStates: string[] = result.rows[0]?.allowed_states ?? [];
+    const blocked = !!country && allowedStates.length > 0 && !allowedStates.includes(country);
+    res.json({ blocked, country });
+  } catch {
+    res.json({ blocked: false, country: null });
+  }
 };
 
 export const changePassword = async (req: Request, res: Response): Promise<void> => {
