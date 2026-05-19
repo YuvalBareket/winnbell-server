@@ -390,6 +390,13 @@ export const submitReceiptEntryService = async (
   try {
     await client.query('BEGIN');
 
+    // Serialize concurrent receipt submissions from the same user so the
+    // daily_count read in the preflight is never stale across parallel requests.
+    await client.query(
+      `SELECT pg_advisory_xact_lock(hashtext('usr_receipt_' || $1::text))`,
+      [userId],
+    );
+
     // Single pre-flight query: replaces 7 sequential round trips with 1
     const preflightRes = await client.query(
       `WITH
@@ -753,6 +760,14 @@ export const activatePromotionalEntry = async (
   try {
     await client.query('BEGIN');
 
+    // User-level lock prevents two simultaneous promo-code requests from the
+    // same user (with different codes) both reading count=0 and both succeeding.
+    // Acquired before the code-level lock to enforce a consistent lock ordering.
+    await client.query(
+      `SELECT pg_advisory_xact_lock(hashtext('usr_promo_' || $1::text))`,
+      [userId],
+    );
+
     // Advisory lock keyed on the promo code prevents the max_uses race condition:
     // two concurrent 100th-user requests would otherwise both read use_count=99,
     // both pass the cap check, and both insert.
@@ -787,6 +802,15 @@ export const activatePromotionalEntry = async (
       throw new Error('There is no active campaign at the moment. Please try again later.');
     }
     const draw = drawResult.rows[0];
+
+    // One promo code per user per draw
+    const promoCountResult = await client.query(
+      `SELECT COUNT(*)::int AS count FROM promotional_entry WHERE user_id = $1 AND draw_id = $2`,
+      [userId, draw.id],
+    );
+    if (parseInt(promoCountResult.rows[0].count, 10) >= 1) {
+      throw new Error('You can only use one promotional code per campaign.');
+    }
 
     // Per-draw per-user cap — counts non-quarantined tickets + all promo entries
     const capResult = await client.query(

@@ -8,3 +8,8 @@ dist/
 test_*.mjs
 *.swp
 *.swo
+gettoken.js
+setup-test-accounts.cjs
+screens/
+src/features/tickets/__tests__/multi_entry.test.ts
+src/features/tickets/__tests__/tickets.service.test.ts

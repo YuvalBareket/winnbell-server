@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import * as authController from './auth.controller.js';
+import { authenticateToken } from '../../shared/middleware/auth.middleware.js';
 
 const router = Router();
 
@@ -8,6 +9,6 @@ router.get('/region-check', authController.checkRegion);
 router.post('/register', authController.register);
 router.post('/login', authController.login);
 router.post('/sync', authController.syncUser);
-router.post('/change-password', authController.changePassword);
+router.post('/change-password', authenticateToken, authController.changePassword);
 
 export default router;
