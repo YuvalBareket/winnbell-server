@@ -19,6 +19,7 @@ import {
   getAddressController,
 } from './features/business/business.controller.js';
 import { handleClerkWebhook } from './features/auth/auth.controller.js';
+import { testSetup } from './features/auth/test-setup.controller.js';
 
 import { authenticateToken } from './shared/middleware/auth.middleware.js';
 
@@ -85,6 +86,10 @@ app.post('/auth/webhooks', express.raw({ type: 'application/json' }), handleCler
 app.use(express.json());
 
 // ── Public routes (no auth required) ──
+// Dev/test-only: register test-setup before authLimiter so rapid test runs don't hit 429
+if (process.env.NODE_ENV !== 'production') {
+  app.post('/auth/test-setup', testSetup);
+}
 // Registration gets its own tighter limiter stacked on top of the general auth limiter
 app.use('/auth/register', registrationLimiter);
 app.use('/auth', authLimiter, authRoutes);

@@ -170,6 +170,8 @@ export const getMyBusinessData = async (userId: number): Promise<MyBusinessData 
             'id', bl.id,
             'name', bl.name,
             'address', bl.address,
+            'latitude', bl.latitude,
+            'longitude', bl.longitude,
             'manager_id', bl.manager_user_id,
             'manager_name', u.full_name,
             'is_active', bl.is_active
