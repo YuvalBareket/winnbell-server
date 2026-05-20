@@ -59,7 +59,13 @@ export const getBusinessActivity = async (
   } else {
     const bizRes = await pool.query('SELECT id FROM business WHERE user_id = $1', [userId]);
     const row = bizRes.rows[0];
-    if (!row) throw new Error('Business not found');
+    if (!row) {
+      return {
+        summary: { receipts_today: 0, revenue_today: 0, entries_today: 0, entries_this_month: 0, monthly_cap: null, receipts_this_month: 0 },
+        items: [],
+        next_cursor: null,
+      };
+    }
     businessId = row.id;
     if (filterLocationId) scopedLocationId = filterLocationId;
   }
