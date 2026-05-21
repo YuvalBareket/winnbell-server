@@ -1,12 +1,10 @@
 import { getPool } from '../../shared/db/db.js';
 
 export interface ActivitySummary {
-  receipts_today: number;
-  revenue_today: number;
-  entries_today: number;
-  entries_this_month: number;
+  receipts_period: number;
+  revenue_period: number;
+  entries_period: number;
   monthly_cap: number | null;
-  receipts_this_month: number;
 }
 
 export interface ActivityItem {
@@ -61,7 +59,7 @@ export const getBusinessActivity = async (
     const row = bizRes.rows[0];
     if (!row) {
       return {
-        summary: { receipts_today: 0, revenue_today: 0, entries_today: 0, entries_this_month: 0, monthly_cap: null, receipts_this_month: 0 },
+        summary: { receipts_period: 0, revenue_period: 0, entries_period: 0, monthly_cap: null },
         items: [],
         next_cursor: null,
       };
@@ -70,56 +68,50 @@ export const getBusinessActivity = async (
     if (filterLocationId) scopedLocationId = filterLocationId;
   }
 
-  // ── Today's summary KPIs (always scoped to today regardless of date range filter) ──
+  // ── Period summary KPIs (follows date_range filter) ──
   const summaryParams: unknown[] = [businessId];
   const summaryLocClause = scopedLocationId
     ? (summaryParams.push(scopedLocationId), ` AND t.location_id = $${summaryParams.length}`)
     : '';
 
+  let periodClause: string;
+  if (dateRange === 'today') {
+    periodClause = 'AND t.created_at >= CURRENT_DATE';
+  } else if (dateRange === '7d') {
+    periodClause = "AND t.created_at >= NOW() - INTERVAL '7 days'";
+  } else {
+    periodClause = "AND t.created_at >= NOW() - INTERVAL '30 days'";
+  }
+
   const summaryRes = await pool.query(`
     SELECT
-      -- receipts = distinct receipt submissions (anchor only); code/free/promo each count as 1
       COUNT(*) FILTER (WHERE t.entry_source != 'receipt' OR t.receipt_identifier IS NOT NULL)
-                                                                  AS receipts_today,
-      -- revenue = only anchor rows to avoid double-counting multi-entry amounts
+                                                                  AS receipts_period,
       COALESCE(SUM(t.transaction_amount) FILTER (
         WHERE t.entry_source != 'receipt' OR t.receipt_identifier IS NOT NULL
-      ), 0)                                                        AS revenue_today,
-      -- entries = every ticket row, including bonus entries from multi-entry receipts
-      COUNT(*)                                                     AS entries_today
+      ), 0)                                                        AS revenue_period,
+      COUNT(*)                                                     AS entries_period
     FROM ticket t
     JOIN business_location bl ON bl.id = t.location_id
     WHERE bl.business_id = $1
-      AND t.created_at >= CURRENT_DATE
+      ${periodClause}
       AND t.is_quarantined = FALSE
       ${summaryLocClause}
   `, summaryParams);
 
-  // ── Monthly entries stats ──
-  const monthlyRes = await pool.query(`
-    SELECT
-      COUNT(*) FILTER (WHERE t.is_quarantined = FALSE) AS entries_this_month,
-      COUNT(*) FILTER (
-        WHERE t.is_quarantined = FALSE
-          AND (t.entry_source != 'receipt' OR t.receipt_identifier IS NOT NULL)
-      ) AS receipts_this_month,
-      COALESCE(b.entry_cap, ps.global_entry_cap) AS monthly_cap
+  // ── Monthly cap ──
+  const capRes = await pool.query(`
+    SELECT COALESCE(b.entry_cap, ps.global_entry_cap) AS monthly_cap
     FROM business b
     LEFT JOIN platform_settings ps ON ps.id = 1
-    LEFT JOIN ticket t ON t.business_id = b.id
-      AND t.created_at >= date_trunc('month', NOW())
-      ${scopedLocationId ? 'AND t.location_id = $2' : ''}
     WHERE b.id = $1
-    GROUP BY b.entry_cap, ps.global_entry_cap
-  `, scopedLocationId ? [businessId, scopedLocationId] : [businessId]);
+  `, [businessId]);
 
   const summary: ActivitySummary = {
-    receipts_today: Number(summaryRes.rows[0]?.receipts_today ?? 0),
-    revenue_today: parseFloat(summaryRes.rows[0]?.revenue_today ?? '0'),
-    entries_today: Number(summaryRes.rows[0]?.entries_today ?? 0),
-    entries_this_month: Number(monthlyRes.rows[0]?.entries_this_month ?? 0),
-    monthly_cap: monthlyRes.rows[0]?.monthly_cap != null ? Number(monthlyRes.rows[0].monthly_cap) : null,
-    receipts_this_month: Number(monthlyRes.rows[0]?.receipts_this_month ?? 0),
+    receipts_period: Number(summaryRes.rows[0]?.receipts_period ?? 0),
+    revenue_period: parseFloat(summaryRes.rows[0]?.revenue_period ?? '0'),
+    entries_period: Number(summaryRes.rows[0]?.entries_period ?? 0),
+    monthly_cap: capRes.rows[0]?.monthly_cap != null ? Number(capRes.rows[0].monthly_cap) : null,
   };
 
   // ── Activity feed with cursor-based pagination ──
