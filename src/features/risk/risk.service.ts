@@ -243,17 +243,34 @@ export const evaluateUserRisk = async (
 
 /**
  * Persist the risk delta for a user after an evaluation.
+ * Optionally merge new flag names into the user's accumulated risk_flags array.
  */
-export const updateUserRiskScore = async (userId: number, delta: number, client?: PoolClient): Promise<void> => {
+export const updateUserRiskScore = async (
+  userId: number,
+  delta: number,
+  client?: PoolClient,
+  flags?: string[],
+): Promise<void> => {
   if (delta <= 0) return;
   const db = client ?? getPool();
-  await db.query(
-    `UPDATE "user" SET
-       risk_score           = risk_score + $1,
-       risk_last_flagged_at = NOW()
-     WHERE id = $2`,
-    [delta, userId],
-  );
+  if (flags && flags.length > 0) {
+    await db.query(
+      `UPDATE "user" SET
+         risk_score           = risk_score + $1,
+         risk_last_flagged_at = NOW(),
+         risk_flags           = ARRAY(SELECT DISTINCT unnest(COALESCE(risk_flags, '{}') || $3::text[]))
+       WHERE id = $2`,
+      [delta, userId, flags],
+    );
+  } else {
+    await db.query(
+      `UPDATE "user" SET
+         risk_score           = risk_score + $1,
+         risk_last_flagged_at = NOW()
+       WHERE id = $2`,
+      [delta, userId],
+    );
+  }
 };
 
 /**

@@ -1,6 +1,7 @@
 import 'dotenv/config'; // 1. LOAD ENV VARS FIRST
 import { connectDB } from './shared/db/db.js';
 import app from './app.js';
+import { recoverStaleOcrJobs } from './features/ocr/ocr.service.js';
 
 const PORT = process.env.PORT || 3000;
 
@@ -17,6 +18,9 @@ const startServer = async () => {
   try {
     // 2. Connect to Database
     await connectDB();
+
+    // Re-queue any OCR jobs that were lost during a server restart
+    await recoverStaleOcrJobs();
 
     // 3. Start Server
     app.listen(PORT, () => {

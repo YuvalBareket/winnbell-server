@@ -585,7 +585,7 @@ export const submitReceiptEntryService = async (
     // Past the gates — persist the risk delta, then sync quarantine.
     // Sync here ensures existing tickets are quarantined immediately if this
     // submission's delta pushes the user into HIGH risk, even if we throw below.
-    await updateUserRiskScore(userId, riskEval.delta, client);
+    await updateUserRiskScore(userId, riskEval.delta, client, riskEval.flags);
     await syncUserQuarantineState(userId, drawId, client);
 
     // Hard block on sequential identifier guessing — elevated from advisory signal to immediate block.
@@ -682,8 +682,9 @@ export const submitReceiptEntryService = async (
             (code, status, entry_source, business_id, location_id, draw_id,
              activated_by_user_id, activated_at,
              receipt_identifier, transaction_amount, transaction_date, receipt_image_url, risk_score,
-             is_quarantined, quarantine_reason, quarantined_at, image_validation_status, submitter_ip)
-           VALUES ($1, 'Activated', 'receipt', $2, $3, $4, $5, NOW(), $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)
+             is_quarantined, quarantine_reason, quarantined_at, image_validation_status, submitter_ip, risk_flags,
+             anchor_ticket_id)
+           VALUES ($1, 'Activated', 'receipt', $2, $3, $4, $5, NOW(), $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
            RETURNING id`,
           [
             ticketCode,
@@ -691,16 +692,18 @@ export const submitReceiptEntryService = async (
             input.locationId,
             drawId,
             userId,
-            i === 0 ? input.receiptIdentifier : null, // only first ticket holds the identifier (UNIQUE index constraint)
+            i === 0 ? input.receiptIdentifier : null,
             input.transactionAmount,
             input.transactionDate ?? null,
-            i === 0 ? (input.receiptImageUrl ?? null) : null, // image only on anchor ticket
+            i === 0 ? (input.receiptImageUrl ?? null) : null,
             riskEval.totalScore,
             isQuarantined,
             quarantineReason,
             quarantinedAt,
             i === 0 && hasImage ? 'pending' : 'not_required',
             input.submitterIp ?? null,
+            i === 0 ? riskEval.flags : [],
+            i === 0 ? null : insertedTickets[0].ticketId, // siblings link back to anchor
           ],
         );
       } catch (insertErr: any) {

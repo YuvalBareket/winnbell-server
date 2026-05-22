@@ -883,6 +883,7 @@ export const getUserDetailService = async (userId: number) => {
         u.is_active,
         u.is_email_verified,
         u.risk_score,
+        u.risk_flags,
         u.risk_last_flagged_at,
         u.created_at,
         b.id AS business_id,
@@ -901,6 +902,7 @@ export const getUserDetailService = async (userId: number) => {
         t.activated_at,
         t.is_quarantined,
         t.quarantine_reason,
+        t.risk_flags,
         d.name AS draw_name,
         b.name AS business_name
       FROM ticket t
