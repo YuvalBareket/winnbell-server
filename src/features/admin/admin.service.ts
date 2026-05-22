@@ -1,22 +1,71 @@
 import { getPool } from '../../shared/db/db.js';
-import { generateGlobalUniqueCode } from '../tickets/tickets.service.js';
 import { decayAllUserRiskScores } from '../risk/risk.service.js';
 
-export const getBusinessesWithStats = async () => {
+export const getBusinessesWithStats = async (params: {
+  page: number;
+  limit: number;
+  search?: string;
+}) => {
   const pool = getPool();
-  const result = await pool.query(`
-    SELECT
+  const { page, limit, search } = params;
+  const offset = (page - 1) * limit;
+
+  const conditions: string[] = [];
+  const values: unknown[] = [];
+  let idx = 1;
+
+  if (search) {
+    conditions.push(`(b.name ILIKE $${idx} OR u.full_name ILIKE $${idx} OR u.email ILIKE $${idx})`);
+    values.push(`%${search}%`);
+    idx++;
+  }
+
+  const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+  const [rowsRes, countRes] = await Promise.all([
+    pool.query(`
+      SELECT
         b.id,
         b.name,
         b.sector,
-        b.ticket_balance,
-        COUNT(t.id) AS total_tickets_created,
-        SUM(CASE WHEN t.status = 'Activated' THEN 1 ELSE 0 END) AS total_activated
-    FROM business b
-    LEFT JOIN ticket t ON b.id = t.business_id
-    GROUP BY b.id, b.name, b.sector, b.ticket_balance
-  `);
-  return result.rows;
+        b.entry_cap,
+        b.is_subscribed,
+        u.full_name AS owner_name,
+        u.email AS owner_email,
+        s.status AS subscription_status,
+        s.current_period_end,
+        s.fee_at_entry,
+        COALESCE(loc.location_count, 0) AS location_count,
+        COALESCE(t.total_activated, 0) AS total_activated
+      FROM business b
+      LEFT JOIN "user" u ON b.user_id = u.id
+      LEFT JOIN subscription s ON s.business_id = b.id
+      LEFT JOIN (
+        SELECT business_id, COUNT(*) AS location_count FROM business_location GROUP BY business_id
+      ) loc ON loc.business_id = b.id
+      LEFT JOIN (
+        SELECT business_id, SUM(CASE WHEN UPPER(status) = 'ACTIVATED' THEN 1 ELSE 0 END) AS total_activated
+        FROM ticket GROUP BY business_id
+      ) t ON t.business_id = b.id
+      ${where}
+      ORDER BY b.name ASC
+      LIMIT $${idx} OFFSET $${idx + 1}
+    `, [...values, limit, offset]),
+    pool.query(`
+      SELECT COUNT(*) AS total
+      FROM business b
+      LEFT JOIN "user" u ON b.user_id = u.id
+      ${where}
+    `, values),
+  ]);
+
+  return {
+    rows: rowsRes.rows,
+    total: Number(countRes.rows[0]?.total ?? 0),
+    page,
+    limit,
+    totalPages: Math.ceil(Number(countRes.rows[0]?.total ?? 0) / limit),
+  };
 };
 
 export const getActiveDraws = async () => {
@@ -27,36 +76,6 @@ export const getActiveDraws = async () => {
     WHERE status = 'Open'
   `);
   return result.rows;
-};
-
-export const generateBatchTickets = async (businessId: number, drawId: number, quantity: number) => {
-  const pool = getPool();
-  const batchId = `BATCH_${businessId}_${Date.now()}`;
-
-  const client = await pool.connect();
-  try {
-    await client.query('BEGIN');
-    const tickets: string[] = [];
-    for (let i = 0; i < quantity; i++) {
-      const code = await generateGlobalUniqueCode(client);
-      tickets.push(code);
-      await client.query(
-        `INSERT INTO ticket (code, business_id, draw_id, batch_id, status) VALUES ($1, $2, $3, $4, 'Issued')`,
-        [code, businessId, drawId, batchId],
-      );
-    }
-    await client.query(
-      `UPDATE business SET ticket_balance = ticket_balance + $1 WHERE id = $2`,
-      [quantity, businessId],
-    );
-    await client.query('COMMIT');
-    return { batchId, count: tickets.length };
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
-  }
 };
 
 export const createBusinessService = async (data: {
@@ -88,11 +107,86 @@ export const createBusinessService = async (data: {
 export const getAllDrawsService = async () => {
   const pool = getPool();
   const result = await pool.query(`
-    SELECT id, name, prize_pool AS prize_amount, draw_date, status, winner_user_id
-    FROM draw
-    ORDER BY draw_date DESC
+    SELECT
+      d.id,
+      d.name,
+      d.prize_pool AS prize_amount,
+      d.draw_date,
+      d.status,
+      d.winner_user_id,
+      COALESCE(t.entry_count, 0) AS entry_count
+    FROM draw d
+    LEFT JOIN (
+      SELECT draw_id, COUNT(*) AS entry_count
+      FROM ticket
+      WHERE UPPER(status) = 'ACTIVATED'
+      GROUP BY draw_id
+    ) t ON t.draw_id = d.id
+    ORDER BY d.draw_date DESC
   `);
   return result.rows;
+};
+
+export const updateDrawService = async (
+  drawId: number,
+  data: { name?: string; prize_amount?: number; draw_date?: string },
+) => {
+  const pool = getPool();
+
+  // Verify draw exists and is Upcoming
+  const existing = await pool.query(
+    `SELECT id, status FROM draw WHERE id = $1`,
+    [drawId],
+  );
+  if (!existing.rows[0]) throw new Error('Campaign not found');
+  if (existing.rows[0].status !== 'Upcoming')
+    throw new Error('Only upcoming campaigns can be edited');
+
+  const updates: string[] = [];
+  const values: unknown[] = [];
+  let idx = 1;
+
+  if (data.name !== undefined) {
+    const trimmed = data.name.trim();
+    if (!trimmed) throw new Error('name must not be empty');
+    updates.push(`name = $${idx++}`);
+    values.push(trimmed);
+  }
+  if (data.prize_amount !== undefined) {
+    if (data.prize_amount <= 0) throw new Error('prize_amount must be positive');
+    updates.push(`prize_pool = $${idx++}`);
+    values.push(data.prize_amount);
+  }
+  if (data.draw_date !== undefined) {
+    const nyDateStr = new Date(data.draw_date).toLocaleDateString('en-US', {
+      timeZone: 'America/New_York',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    });
+    const [month, , year] = nyDateStr.split('/').map(Number);
+    const lastDay = new Date(Date.UTC(year, month, 0, 4, 0, 0));
+    updates.push(`draw_date = $${idx++}`);
+    values.push(lastDay);
+  }
+
+  if (updates.length === 0) throw new Error('No fields to update');
+
+  values.push(drawId);
+  const result = await pool.query(
+    `UPDATE draw SET ${updates.join(', ')} WHERE id = $${idx} RETURNING id, name, prize_pool AS prize_amount, draw_date, status`,
+    values,
+  );
+  return result.rows[0];
+};
+
+export const deleteDrawService = async (drawId: number) => {
+  const pool = getPool();
+  const existing = await pool.query(`SELECT id, status FROM draw WHERE id = $1`, [drawId]);
+  if (!existing.rows[0]) throw new Error('Campaign not found');
+  if (existing.rows[0].status !== 'Upcoming')
+    throw new Error('Only upcoming campaigns can be deleted');
+  await pool.query(`DELETE FROM draw WHERE id = $1`, [drawId]);
 };
 
 export const createDrawService = async (data: {
@@ -282,12 +376,13 @@ export const pickDrawWinnerService = async (drawId: number): Promise<{
 export const getAdminOverviewService = async () => {
   const pool = getPool();
 
-  const [usersRes, bizRes, subRes, drawRes, ticketRes] = await Promise.all([
+  const [usersRes, bizRes, subRes, drawRes, ticketRes, flaggedRes] = await Promise.all([
     pool.query(`SELECT COUNT(*) AS total_users, SUM(CASE WHEN role='Business' THEN 1 ELSE 0 END) AS business_users, SUM(CASE WHEN role='User' THEN 1 ELSE 0 END) AS regular_users FROM "user" WHERE role != 'Admin'`),
     pool.query(`SELECT COUNT(*) AS total, SUM(CASE WHEN is_subscribed=true THEN 1 ELSE 0 END) AS active FROM business`),
     pool.query(`SELECT COUNT(*) AS active_subs, COALESCE(SUM(fee_at_entry), 0) AS total_fees FROM subscription WHERE UPPER(status) = 'ACTIVE'`),
     pool.query(`SELECT id, name, prize_pool, draw_date FROM draw WHERE UPPER(status)='OPEN' ORDER BY draw_date ASC LIMIT 1`),
     pool.query(`SELECT COUNT(*) AS total_tickets, SUM(CASE WHEN UPPER(status)='ACTIVATED' THEN 1 ELSE 0 END) AS activated FROM ticket WHERE draw_id=(SELECT id FROM draw WHERE UPPER(status)='OPEN' ORDER BY draw_date ASC LIMIT 1)`),
+    pool.query(`SELECT COUNT(*) AS flagged_users FROM "user" WHERE risk_score >= 20 AND role != 'Admin'`),
   ]);
 
   return {
@@ -296,21 +391,77 @@ export const getAdminOverviewService = async () => {
     subscriptions: subRes.rows[0],
     currentDraw: drawRes.rows[0] ?? null,
     currentDrawTickets: ticketRes.rows[0],
+    attention: {
+      flagged_users: Number(flaggedRes.rows[0]?.flagged_users ?? 0),
+    },
   };
 };
 
-export const getAllUsersService = async () => {
+export const getAllUsersService = async (params: {
+  page: number;
+  limit: number;
+  search?: string;
+  role?: string;
+  riskLevel?: 'high' | 'medium' | 'low';
+}) => {
   const pool = getPool();
-  const result = await pool.query(`
-    SELECT u.id, u.full_name, u.email, u.role, u.is_active, u.is_email_verified, u.created_at,
-      u.risk_score, u.risk_last_flagged_at,
-      b.id AS business_id, b.name AS business_name, b.is_subscribed AS business_active
-    FROM "user" u
-    LEFT JOIN business b ON b.user_id = u.id
-    WHERE u.role != 'Admin'
-    ORDER BY u.risk_score DESC, u.created_at DESC
-  `);
-  return result.rows;
+  const { page, limit, search, role, riskLevel } = params;
+  const offset = (page - 1) * limit;
+
+  const conditions: string[] = [`u.role != 'Admin'`];
+  const values: unknown[] = [];
+  let idx = 1;
+
+  if (search) {
+    conditions.push(`(u.full_name ILIKE $${idx} OR u.email ILIKE $${idx})`);
+    values.push(`%${search}%`);
+    idx++;
+  }
+  if (role) {
+    conditions.push(`u.role = $${idx}`);
+    values.push(role);
+    idx++;
+  }
+  if (riskLevel === 'high') {
+    conditions.push(`u.risk_score >= 20`);
+  } else if (riskLevel === 'medium') {
+    conditions.push(`u.risk_score >= 10 AND u.risk_score < 20`);
+  } else if (riskLevel === 'low') {
+    conditions.push(`u.risk_score < 10`);
+  }
+
+  const where = `WHERE ${conditions.join(' AND ')}`;
+
+  const [rowsRes, countRes] = await Promise.all([
+    pool.query(
+      `SELECT u.id, u.full_name, u.email, u.role, u.is_active, u.is_email_verified, u.created_at,
+          u.risk_score, u.risk_last_flagged_at,
+          b.id AS business_id, b.name AS business_name, b.is_subscribed AS business_active,
+          (SELECT COUNT(*) FROM ticket t WHERE t.activated_by_user_id = u.id AND t.status = 'Activated'
+           AND t.draw_id = (SELECT id FROM draw WHERE UPPER(status)='OPEN' ORDER BY draw_date ASC LIMIT 1)
+          ) AS entry_count,
+          (SELECT MAX(t2.activated_at) FROM ticket t2 WHERE t2.activated_by_user_id = u.id) AS last_active_at
+       FROM "user" u
+       LEFT JOIN business b ON b.user_id = u.id
+       ${where}
+       ORDER BY u.risk_score DESC, u.created_at DESC
+       LIMIT $${idx} OFFSET $${idx + 1}`,
+      [...values, limit, offset],
+    ),
+    pool.query(
+      `SELECT COUNT(*) FROM "user" u ${where}`,
+      values,
+    ),
+  ]);
+
+  const total = parseInt(countRes.rows[0].count, 10);
+  return {
+    rows: rowsRes.rows,
+    total,
+    page,
+    limit,
+    totalPages: Math.ceil(total / limit),
+  };
 };
 
 export const adminSetUserRiskService = async (userId: number, riskScore: number): Promise<void> => {
@@ -416,11 +567,11 @@ export const deactivatePromoCodeService = async (id: number): Promise<void> => {
   await pool.query(`UPDATE promotional_code SET is_active = false WHERE id = $1`, [id]);
 };
 
-export const getAdminAnalyticsService = async (businessId?: number) => {
+export const getAdminAnalyticsService = async (businessId?: number, drawId?: number) => {
   const pool = getPool();
-  // $1 is used as the optional business filter across all filterable queries.
-  // NULL means no filter (all businesses).
+  // $1 = optional business filter, $2 = optional draw filter. NULL = no filter.
   const biz = businessId ?? null;
+  const draw = drawId ?? null;
 
   const [
     entrySrcRes,
@@ -436,16 +587,16 @@ export const getAdminAnalyticsService = async (businessId?: number) => {
       `SELECT entry_source, COUNT(*) AS count
        FROM ticket
        WHERE ($1::int IS NULL OR business_id = $1)
+         AND ($2::int IS NULL OR draw_id = $2)
        GROUP BY entry_source`,
-      [biz],
+      [biz, draw],
     ),
-    // Promo entries live in promotional_entry, not ticket — count separately.
-    // Promo entries have no business_id so only include when no business filter.
+    // Promo entries have no business_id / draw_id — only include when no filter active
     pool.query(
-      `SELECT COUNT(*) AS count FROM promotional_entry WHERE ($1::int IS NULL)`,
-      [biz],
+      `SELECT COUNT(*) AS count FROM promotional_entry WHERE ($1::int IS NULL AND $2::int IS NULL)`,
+      [biz, draw],
     ),
-    // AMOE is platform-wide — not filtered by business
+    // AMOE: filter by draw_id when provided
     pool.query(
       `SELECT
          COUNT(*) AS total_requests,
@@ -453,9 +604,11 @@ export const getAdminAnalyticsService = async (businessId?: number) => {
          SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejected,
          SUM(CASE WHEN rejection_reason = 'weekly_limit_reached' THEN 1 ELSE 0 END) AS weekly_limit_count,
          SUM(CASE WHEN rejection_reason = 'campaign_ended' THEN 1 ELSE 0 END) AS campaign_ended_count
-       FROM free_ticket_usage`,
+       FROM free_ticket_usage
+       WHERE ($1::int IS NULL OR draw_id = $1)`,
+      [draw],
     ),
-    // Fraud is platform-wide — not filtered by business
+    // Fraud is always platform-wide
     pool.query(
       `SELECT
          SUM(CASE WHEN risk_score >= 20 THEN 1 ELSE 0 END) AS high_risk,
@@ -469,17 +622,19 @@ export const getAdminAnalyticsService = async (businessId?: number) => {
          SUM(CASE WHEN is_quarantined = FALSE AND status = 'Activated' THEN 1 ELSE 0 END) AS accepted,
          COUNT(*) AS total
        FROM ticket
-       WHERE ($1::int IS NULL OR business_id = $1)`,
-      [biz],
+       WHERE ($1::int IS NULL OR business_id = $1)
+         AND ($2::int IS NULL OR draw_id = $2)`,
+      [biz, draw],
     ),
     pool.query(
       `SELECT quarantine_reason, COUNT(*) AS count
        FROM ticket
        WHERE is_quarantined = TRUE AND quarantine_reason IS NOT NULL
          AND ($1::int IS NULL OR business_id = $1)
+         AND ($2::int IS NULL OR draw_id = $2)
        GROUP BY quarantine_reason
        ORDER BY count DESC`,
-      [biz],
+      [biz, draw],
     ),
     pool.query(
       `SELECT
@@ -494,11 +649,12 @@ export const getAdminAnalyticsService = async (businessId?: number) => {
          FROM ticket
          WHERE status = 'Activated' AND activated_by_user_id IS NOT NULL
            AND ($1::int IS NULL OR business_id = $1)
+           AND ($2::int IS NULL OR draw_id = $2)
          GROUP BY activated_by_user_id
        ) sub`,
-      [biz],
+      [biz, draw],
     ),
-    // User growth is platform-wide — not filtered by business
+    // User growth is always platform-wide
     pool.query(
       `SELECT
          SUM(CASE WHEN created_at >= DATE_TRUNC('week', NOW()) THEN 1 ELSE 0 END) AS new_this_week,
@@ -558,6 +714,79 @@ export const getAdminAnalyticsService = async (businessId?: number) => {
       total: parseInt(userGrowthRes.rows[0].total) || 0,
     },
   };
+};
+
+export const getEntryVolumeService = async (drawId?: number, businessId?: number) => {
+  const pool = getPool();
+  const draw = drawId ?? null;
+  const biz = businessId ?? null;
+  const result = await pool.query(
+    `SELECT
+       DATE_TRUNC('day', activated_at)::date AS date,
+       COUNT(*) AS count
+     FROM ticket
+     WHERE UPPER(status) = 'ACTIVATED'
+       AND activated_at IS NOT NULL
+       AND ($1::int IS NULL OR draw_id = $1)
+       AND ($2::int IS NULL OR business_id = $2)
+     GROUP BY DATE_TRUNC('day', activated_at)
+     ORDER BY DATE_TRUNC('day', activated_at) ASC`,
+    [draw, biz],
+  );
+  return result.rows.map((r) => ({
+    date: r.date as string,
+    count: parseInt(r.count),
+  }));
+};
+
+export const getCampaignComparisonService = async () => {
+  const pool = getPool();
+  const result = await pool.query(`
+    SELECT
+      d.id,
+      d.name,
+      d.status,
+      d.prize_pool AS prize_amount,
+      d.draw_date,
+      COALESCE(t.total_entries, 0) AS total_entries,
+      COALESCE(t.quarantined, 0) AS quarantined,
+      COALESCE(de.business_count, 0) AS business_count
+    FROM draw d
+    LEFT JOIN (
+      SELECT draw_id,
+        COUNT(*) FILTER (WHERE UPPER(status) = 'ACTIVATED') AS total_entries,
+        COUNT(*) FILTER (WHERE is_quarantined = TRUE) AS quarantined
+      FROM ticket GROUP BY draw_id
+    ) t ON t.draw_id = d.id
+    LEFT JOIN (
+      SELECT draw_id, COUNT(*) AS business_count FROM draw_entry GROUP BY draw_id
+    ) de ON de.draw_id = d.id
+    ORDER BY d.draw_date DESC
+  `);
+  return result.rows.map((r) => ({
+    id: r.id as number,
+    name: r.name as string,
+    status: r.status as string,
+    prize_amount: parseFloat(r.prize_amount) || 0,
+    draw_date: r.draw_date as string,
+    total_entries: parseInt(r.total_entries),
+    quarantined: parseInt(r.quarantined),
+    business_count: parseInt(r.business_count),
+  }));
+};
+
+export const duplicateDrawService = async (drawId: number) => {
+  const pool = getPool();
+  const existing = await pool.query(`SELECT name, prize_pool FROM draw WHERE id = $1`, [drawId]);
+  if (!existing.rows[0]) throw new Error('Draw not found');
+  const { name, prize_pool } = existing.rows[0];
+  const result = await pool.query(
+    `INSERT INTO draw (name, prize_pool, draw_date, status)
+     VALUES ($1, $2, NOW() + INTERVAL '30 days', 'Upcoming')
+     RETURNING id, name, prize_pool AS prize_amount, draw_date, status`,
+    [`${name} (Copy)`, prize_pool],
+  );
+  return result.rows[0];
 };
 
 export const getLocationBreakdownService = async (params: {
@@ -638,5 +867,55 @@ export const getLocationBreakdownService = async (params: {
     page,
     limit,
     totalPages: Math.ceil(total / limit),
+  };
+};
+
+export const getUserDetailService = async (userId: number) => {
+  const pool = getPool();
+
+  const [userRes, entriesRes] = await Promise.all([
+    pool.query(`
+      SELECT
+        u.id,
+        u.full_name,
+        u.email,
+        u.role,
+        u.is_active,
+        u.is_email_verified,
+        u.risk_score,
+        u.risk_last_flagged_at,
+        u.created_at,
+        b.id AS business_id,
+        b.name AS business_name,
+        b.is_subscribed AS business_active
+      FROM "user" u
+      LEFT JOIN business b ON b.user_id = u.id
+      WHERE u.id = $1
+    `, [userId]),
+    pool.query(`
+      SELECT
+        t.id,
+        t.code,
+        t.status,
+        t.entry_source,
+        t.activated_at,
+        t.is_quarantined,
+        t.quarantine_reason,
+        d.name AS draw_name,
+        b.name AS business_name
+      FROM ticket t
+      LEFT JOIN draw d ON d.id = t.draw_id
+      LEFT JOIN business b ON b.id = t.business_id
+      WHERE t.activated_by_user_id = $1
+      ORDER BY t.activated_at DESC
+      LIMIT 50
+    `, [userId]),
+  ]);
+
+  if (!userRes.rows[0]) return null;
+
+  return {
+    user: userRes.rows[0],
+    entries: entriesRes.rows,
   };
 };

@@ -11,12 +11,15 @@ router.get('/businesses', adminController.getDashboardData);
 router.get('/draws', adminController.getDraws);
 router.get('/draws-all', adminController.getAllDraws);
 router.get('/users', adminController.getUsers);
+router.get('/users/:userId', adminController.getUserDetail);
 router.patch('/users/:userId/role', adminController.updateUserRole);
 router.patch('/users/:userId/active', adminController.toggleUserActive);
 router.patch('/users/:userId/risk', adminController.setUserRisk);
-router.post('/generate-tickets', adminController.createTickets);
 router.post('/business', adminController.createBusiness);
 router.post('/draw', adminController.createDraw);
+router.patch('/draws/:drawId', adminController.updateDraw);
+router.delete('/draws/:drawId', adminController.deleteDraw);
+router.post('/draws/:drawId/duplicate', adminController.duplicateDraw);
 router.post('/draws/:drawId/open', adminController.openDraw);
 router.post('/draws/:drawId/close', adminController.closeDraw);
 router.post('/draws/:drawId/pick-winner', adminController.pickWinner);
@@ -30,6 +33,8 @@ router.post('/promo-codes', adminController.createPromoCode);
 router.patch('/promo-codes/:id/deactivate', adminController.deactivatePromoCode);
 
 router.get('/analytics', adminController.getAnalytics);
+router.get('/analytics/entry-volume', adminController.getEntryVolume);
+router.get('/analytics/campaigns', adminController.getCampaignComparison);
 router.get('/analytics/locations', adminController.getLocationBreakdown);
 
 export default router;
