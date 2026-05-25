@@ -16,9 +16,10 @@ import {
 import jwt from 'jsonwebtoken';
 
 export const getNearbyBusinessesService = async (
-  lat: number,
-  lon: number,
-  radius: number = 10,
+  minLat: number,
+  maxLat: number,
+  minLng: number,
+  maxLng: number,
 ): Promise<NearbyBusiness[]> => {
   const pool = getPool();
 
@@ -42,26 +43,17 @@ export const getNearbyBusinessesService = async (
         SELECT COALESCE(json_agg(json_build_object('id', bl2.id, 'name', bl2.name, 'address', bl2.address) ORDER BY bl2.id), '[]'::json)
         FROM business_location bl2
         WHERE bl2.business_id = b.id AND bl2.is_active = true AND bl2.id != loc.id
-      ) AS other_locations,
-      (6371 * acos(
-        LEAST(1.0, GREATEST(-1.0,
-          cos($1 * 0.0174532925) * cos(loc.latitude * 0.0174532925) * cos((loc.longitude * 0.0174532925) - ($2 * 0.0174532925)) +
-          sin($1 * 0.0174532925) * sin(loc.latitude * 0.0174532925)
-        ))
-      )) AS distance_km
+      ) AS other_locations
     FROM business_location loc
     INNER JOIN business b ON loc.business_id = b.id
     WHERE loc.is_active = true AND b.is_subscribed = true AND b.is_participating = true
-      AND (6371 * acos(
-        LEAST(1.0, GREATEST(-1.0,
-          cos($1 * 0.0174532925) * cos(loc.latitude * 0.0174532925) * cos((loc.longitude * 0.0174532925) - ($2 * 0.0174532925)) +
-          sin($1 * 0.0174532925) * sin(loc.latitude * 0.0174532925)
-        ))
-      )) <= $3
-    ORDER BY distance_km
+      AND loc.latitude  BETWEEN $1 AND $2
+      AND loc.longitude BETWEEN $3 AND $4
+    ORDER BY loc.id
+    LIMIT 30
   `;
 
-  const result = await pool.query(query, [lat, lon, radius]);
+  const result = await pool.query(query, [minLat, maxLat, minLng, maxLng]);
   return result.rows;
 };
 

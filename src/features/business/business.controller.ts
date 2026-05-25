@@ -64,20 +64,17 @@ export const getNearby = async (
   res: Response,
 ) => {
   try {
-    const { latitude, longitude, radius } = req.query;
+    const { minLat, maxLat, minLng, maxLng } = req.query;
 
-    if (!latitude || !longitude) {
-      return res
-        .status(400)
-        .json({ message: 'Latitude and Longitude are required' });
+    if (!minLat || !maxLat || !minLng || !maxLng) {
+      return res.status(400).json({ message: 'Bounding box params required' });
     }
 
-    const rawRadius = radius ? parseFloat(radius) : 10;
-    const cappedRadius = Math.min(Math.max(rawRadius, 0.1), 20000);
     const businesses = await getNearbyBusinessesService(
-      parseFloat(latitude),
-      parseFloat(longitude),
-      cappedRadius,
+      parseFloat(minLat),
+      parseFloat(maxLat),
+      parseFloat(minLng),
+      parseFloat(maxLng),
     );
 
     res.json(businesses);

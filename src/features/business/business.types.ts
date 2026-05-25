@@ -1,9 +1,10 @@
 // src/features/business/business.types.ts
 
 export interface INearbyQuery {
-  latitude: string;
-  longitude: string;
-  radius?: string; // in Kilometers
+  minLat: string;
+  maxLat: string;
+  minLng: string;
+  maxLng: string;
 }
 
 /** Shape returned by the nearby search query */
