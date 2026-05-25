@@ -20,8 +20,12 @@ export const getNearbyBusinessesService = async (
   maxLat: number,
   minLng: number,
   maxLng: number,
+  sector?: string,
 ): Promise<NearbyBusiness[]> => {
   const pool = getPool();
+
+  const params: (number | string)[] = [minLat, maxLat, minLng, maxLng];
+  const sectorClause = sector ? `AND b.sector = $${params.push(sector)}` : '';
 
   const query = `
     SELECT
@@ -49,11 +53,12 @@ export const getNearbyBusinessesService = async (
     WHERE loc.is_active = true AND b.is_subscribed = true AND b.is_participating = true
       AND loc.latitude  BETWEEN $1 AND $2
       AND loc.longitude BETWEEN $3 AND $4
+      ${sectorClause}
     ORDER BY loc.id
     LIMIT 30
   `;
 
-  const result = await pool.query(query, [minLat, maxLat, minLng, maxLng]);
+  const result = await pool.query(query, params);
   return result.rows;
 };
 

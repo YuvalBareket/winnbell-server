@@ -64,7 +64,7 @@ export const getNearby = async (
   res: Response,
 ) => {
   try {
-    const { minLat, maxLat, minLng, maxLng } = req.query;
+    const { minLat, maxLat, minLng, maxLng, sector } = req.query;
 
     if (!minLat || !maxLat || !minLng || !maxLng) {
       return res.status(400).json({ message: 'Bounding box params required' });
@@ -75,6 +75,7 @@ export const getNearby = async (
       parseFloat(maxLat),
       parseFloat(minLng),
       parseFloat(maxLng),
+      sector,
     );
 
     res.json(businesses);
