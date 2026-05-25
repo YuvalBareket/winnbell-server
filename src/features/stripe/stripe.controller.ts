@@ -27,16 +27,12 @@ export const createCheckout = async (req: Request, res: Response) => {
     }
 
     const billingInterval: 'monthly' | 'yearly' = req.body.billing_interval === 'yearly' ? 'yearly' : 'monthly';
-    const url = await createCheckoutSession(business.id, business.email, entriesPerLocation, billingInterval);
-    res.json({ url });
+    const result = await createCheckoutSession(business.id, business.email, entriesPerLocation, billingInterval);
+    res.json(result);
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : '';
     if (msg.includes('already has an active subscription')) {
       res.status(409).json({ error: 'This business already has an active subscription.' });
-      return;
-    }
-    if (msg.includes('CAMPAIGN_CUTOFF:')) {
-      res.status(409).json({ error: msg.replace('CAMPAIGN_CUTOFF:', '') });
       return;
     }
     console.error('[stripe.createCheckout]', err);

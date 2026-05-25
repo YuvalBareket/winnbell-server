@@ -1,11 +1,9 @@
 import { Request, Response } from 'express';
-import { createClerkClient, verifyToken } from '@clerk/backend';
-import { Webhook } from 'svix';
+import jwt from 'jsonwebtoken';
+import { createRemoteJWKSet, jwtVerify } from 'jose';
 import * as authService from './auth.service.js';
 import { RegisterRequest, AuthResponse } from './auth.types.js';
 import { getPool } from '../../shared/db/db.js';
-
-const clerk = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY });
 
 export const register = async (
   req: Request<{}, {}, RegisterRequest>,
@@ -54,7 +52,7 @@ export const login = async (req: Request, res: Response) => {
   }
 };
 
-// Called by the frontend after any Clerk sign-in to get an internal JWT
+// Called by the frontend after any Supabase sign-in to get an internal JWT
 export const syncUser = async (req: Request, res: Response): Promise<void> => {
   const token = req.headers.authorization?.replace('Bearer ', '');
 
@@ -63,18 +61,33 @@ export const syncUser = async (req: Request, res: Response): Promise<void> => {
     return;
   }
 
+  let payload: Record<string, unknown>;
   try {
-    const payload = await verifyToken(token, { secretKey: process.env.CLERK_SECRET_KEY });
-    const clerkUser = await clerk.users.getUser(payload.sub);
+    const JWKS = createRemoteJWKSet(
+      new URL(`${process.env.SUPABASE_URL}/auth/v1/.well-known/jwks.json`),
+    );
+    const { payload: verified } = await jwtVerify(token, JWKS);
+    payload = verified as Record<string, unknown>;
+  } catch (err: unknown) {
+    console.error('JWT verify failed:', err instanceof Error ? err.message : err);
+    res.status(401).json({ message: 'Invalid or expired token' });
+    return;
+  }
 
-    const email = clerkUser.emailAddresses[0]?.emailAddress;
-    const fullName = `${clerkUser.firstName || ''} ${clerkUser.lastName || ''}`.trim();
-    const { role, inviteToken } = req.body;
+  try {
+    const email = payload['email'] as string;
+    const meta = (payload['user_metadata'] ?? {}) as Record<string, unknown>;
+    const fullName = ((meta['full_name'] ?? meta['name'] ?? '') as string).trim();
+    const { inviteToken, role: bodyRole } = req.body;
+    // Role comes from JWT user_metadata (set at signUp time) — atomic, no race condition.
+    // For OAuth sign-ins user_metadata.role is absent; fall back to req.body.role (set
+    // from pendingRole localStorage by useSupabaseSync before calling syncUser).
+    const roleFromToken = (meta['role'] as string | undefined) ?? (bodyRole as string | undefined);
     const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.ip || '';
 
-    const result = await authService.syncExternalUser(payload.sub, email, fullName, {
-      role: typeof role === 'string' ? role : undefined,
-      inviteToken: inviteToken || (clerkUser.unsafeMetadata?.inviteToken as string) || null,
+    const result = await authService.syncExternalUser(payload['sub'] as string, email, fullName, {
+      role: roleFromToken,
+      inviteToken: inviteToken || (meta['invite_token'] as string) || null,
       ip,
     });
 
@@ -84,66 +97,9 @@ export const syncUser = async (req: Request, res: Response): Promise<void> => {
       res.status(403).json({ message: 'REGION_RESTRICTED' });
       return;
     }
-    console.error('Sync error:', err instanceof Error ? err.message : err);
-    res.status(401).json({ message: 'Invalid or expired token' });
+    console.error('Sync service error:', err instanceof Error ? err.message : err);
+    res.status(500).json({ message: 'Server error' });
   }
-};
-
-export const handleClerkWebhook = async (req: Request, res: Response): Promise<void> => {
-  const CLERK_WEBHOOK_SECRET = process.env.CLERK_WEBHOOK_SECRET;
-
-  if (!CLERK_WEBHOOK_SECRET) {
-    res.status(500).json({ error: 'Webhook secret not configured' });
-    return;
-  }
-
-  const svix_id = req.headers['svix-id'] as string;
-  const svix_timestamp = req.headers['svix-timestamp'] as string;
-  const svix_signature = req.headers['svix-signature'] as string;
-
-  if (!svix_id || !svix_timestamp || !svix_signature) {
-    res.status(400).json({ error: 'Missing svix headers' });
-    return;
-  }
-
-  const payload = (req.body as Buffer).toString();
-  const wh = new Webhook(CLERK_WEBHOOK_SECRET);
-
-  let evt: { type: string; data: Record<string, unknown> };
-  try {
-    evt = wh.verify(payload, {
-      'svix-id': svix_id,
-      'svix-timestamp': svix_timestamp,
-      'svix-signature': svix_signature,
-    }) as { type: string; data: Record<string, unknown> };
-  } catch {
-    res.status(400).json({ error: 'Invalid signature' });
-    return;
-  }
-
-  if (evt.type === 'user.created') {
-    const { id, email_addresses, first_name, last_name, unsafe_metadata } = evt.data as {
-      id: string;
-      email_addresses: Array<{ email_address: string }>;
-      first_name: string | null;
-      last_name: string | null;
-      unsafe_metadata: Record<string, unknown>;
-    };
-    const email = email_addresses[0]?.email_address;
-    const fullName = `${first_name || ''} ${last_name || ''}`.trim();
-
-    try {
-      await authService.syncExternalUser(id, email, fullName, {
-        inviteToken: typeof unsafe_metadata?.inviteToken === 'string' ? unsafe_metadata.inviteToken : null,
-      });
-    } catch (dbErr: unknown) {
-      console.error('Webhook DB sync failed:', dbErr instanceof Error ? dbErr.message : dbErr);
-      res.status(500).json({ error: 'Internal database sync failed' });
-      return;
-    }
-  }
-
-  res.status(200).json({ success: true });
 };
 
 export const getRegionConfig = async (_req: Request, res: Response): Promise<void> => {

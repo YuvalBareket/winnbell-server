@@ -223,7 +223,7 @@ export const loginUser = async (
       [user.id],
     );
     hasBusiness = bizResult.rows.length > 0;
-    businessIsActive = !!bizResult.rows[0]?.is_active;
+    businessIsActive = !!bizResult.rows[0]?.is_subscribed;
     businessLogoUrl = bizResult.rows[0]?.logo_url ?? null;
     businessId = bizResult.rows[0]?.id ?? null;
   }
@@ -279,7 +279,7 @@ export const syncExternalUser = async (
   const client = await pool.connect();
   let locationId: number | null = null;
   // Admin role can never be assigned through sync — only via direct DB action.
-  // 'Business' is allowed for new users (INSERT path) so the Clerk sign-up flow works.
+  // 'Business' is allowed for new users (INSERT path) so the external auth sync flow works.
   // For existing users the ON CONFLICT clause does NOT update role, so sync can never downgrade
   // or escalate an already-created account regardless of what metadata says.
   const rawRole = metadata?.role || 'User';

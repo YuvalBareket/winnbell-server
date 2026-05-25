@@ -4,8 +4,8 @@ import {
   AddLocationInput,
   AddressSuggestion,
   BusinessSetupInput,
-  GeoapifyResponse,
-  GeoapifyResult,
+  GooglePlaceResult,
+  GooglePlacesResponse,
   MyBusinessData,
   NearbyBusiness,
   ParticipatingLocation,
@@ -69,41 +69,33 @@ export const getAddress = async (text: string): Promise<AddressSuggestion[]> => 
   const q = (text || '').trim();
   if (q.length < 3) return [];
 
-  const apiKey = process.env.GEOAPIFY_API_KEY;
-  if (!apiKey) throw new Error('Missing GEOAPIFY_API_KEY');
+  const apiKey = process.env.GOOGLE_PLACES_API;
+  if (!apiKey) throw new Error('Missing GOOGLE_PLACES_API');
 
-  const url = new URL('https://api.geoapify.com/v1/geocode/autocomplete');
-  url.searchParams.set('text', q);
-  url.searchParams.set('format', 'json');
-  url.searchParams.set('apiKey', apiKey);
-  url.searchParams.set('limit', '20');
-
-  const res = await fetch(url.toString(), { headers: { Accept: 'application/json' } });
+  // Places API (New) — Text Search returns formattedAddress + coordinates in one call
+  const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Goog-Api-Key': apiKey,
+      'X-Goog-FieldMask': 'places.formattedAddress,places.location',
+    },
+    body: JSON.stringify({ textQuery: q, pageSize: 8 }),
+  });
 
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    throw new Error(`Geoapify error: ${res.status} ${res.statusText}${body ? ` - ${body}` : ''}`);
+    throw new Error(`Google Places error: ${res.status} ${res.statusText}${body ? ` - ${body}` : ''}`);
   }
 
-  const data = (await res.json()) as GeoapifyResponse;
-
-  const toLabel = (r: GeoapifyResult): string =>
-    (r.formatted || [r.address_line1, r.address_line2].filter(Boolean).join(', ') || r.name || '').trim();
-
-  const results = (data.results || [])
-    .filter((r: GeoapifyResult) => typeof r.lat === 'number' && typeof r.lon === 'number')
-    .sort((a: GeoapifyResult, b: GeoapifyResult) => {
-      const ac = a.rank?.confidence ?? a.rank?.importance ?? 0;
-      const bc = b.rank?.confidence ?? b.rank?.importance ?? 0;
-      return bc - ac;
-    });
+  const data = (await res.json()) as GooglePlacesResponse;
 
   const uniq = new Map<string, AddressSuggestion>();
-  for (const r of results) {
-    const label = toLabel(r);
-    if (!label) continue;
-    if (!uniq.has(label)) uniq.set(label, { label, lat: r.lat, lon: r.lon });
-    if (uniq.size >= 8) break;
+  for (const place of data.places ?? []) {
+    const label = (place as GooglePlaceResult).formattedAddress?.trim();
+    const loc = (place as GooglePlaceResult).location;
+    if (!label || typeof loc?.latitude !== 'number' || typeof loc?.longitude !== 'number') continue;
+    if (!uniq.has(label)) uniq.set(label, { label, lat: loc.latitude, lon: loc.longitude });
   }
 
   return Array.from(uniq.values());

@@ -99,19 +99,17 @@ export type AddressSuggestion = {
   lat: number;
   lon: number;
 };
-export type GeoapifyResult = {
-  formatted?: string;
-  address_line1?: string;
-  address_line2?: string;
-  name?: string;
-  lat: number;
-  lon: number;
-  rank?: { confidence?: number; importance?: number };
-  [key: string]: unknown;
-};
 
-export type GeoapifyResponse = {
-  results?: GeoapifyResult[];
+// Google Places API (New) — Text Search response types
+type GooglePlaceLocation = { latitude: number; longitude: number };
+type GooglePlaceDisplayName = { text: string; languageCode?: string };
+export type GooglePlaceResult = {
+  formattedAddress?: string;
+  location?: GooglePlaceLocation;
+  displayName?: GooglePlaceDisplayName;
+};
+export type GooglePlacesResponse = {
+  places?: GooglePlaceResult[];
 };
 
 // src/features/business/types/business.types.ts

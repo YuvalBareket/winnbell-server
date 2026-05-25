@@ -12,7 +12,6 @@
 import { Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
-import { createClerkClient } from '@clerk/backend';
 import { getPool } from '../../shared/db/db.js';
 
 const PERSONAS: Record<string, {
@@ -177,35 +176,6 @@ export const testSetup = async (req: Request, res: Response): Promise<void> => {
 
     await client.query('COMMIT');
 
-    let signInToken: string | undefined;
-    if (process.env.CLERK_SECRET_KEY) {
-      try {
-        const clerkClient = createClerkClient({ secretKey: process.env.CLERK_SECRET_KEY });
-        const nameParts = config.fullName.split(' ');
-        const existing = await clerkClient.users.getUserList({ emailAddress: [config.email], limit: 1 });
-        let clerkUserId: string;
-        if (existing.data.length === 0) {
-          const created = await clerkClient.users.createUser({
-            emailAddress: [config.email],
-            password: config.password,
-            firstName: nameParts[0],
-            lastName: nameParts.slice(1).join(' ') || undefined,
-            skipPasswordChecks: true,
-          });
-          clerkUserId = created.id;
-        } else {
-          clerkUserId = existing.data[0].id;
-        }
-        const tokenResult = await clerkClient.signInTokens.createSignInToken({
-          userId: clerkUserId,
-          expiresInSeconds: 120,
-        });
-        signInToken = tokenResult.token;
-      } catch (clerkErr: any) {
-        console.warn('[test-setup] Clerk sync warning:', clerkErr.message);
-      }
-    }
-
     // ── Issue fresh JWT ────────────────────────────────────────────────────────
     const token = jwt.sign(
       { id: userId, role: userRole, location_id: null },
@@ -224,7 +194,7 @@ export const testSetup = async (req: Request, res: Response): Promise<void> => {
       businessLogoUrl: null,
     };
 
-    res.json({ token, user, signInToken });
+    res.json({ token, user });
   } catch (err: any) {
     await client.query('ROLLBACK');
     console.error('[test-setup]', err);

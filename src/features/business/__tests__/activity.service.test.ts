@@ -44,28 +44,34 @@ const setupPoolQueries = (...responses: QueryResponse[]) => {
 /** Standard biz row: business owner with id=42 */
 const BIZ_ROW = { rows: [{ id: 42 }] };
 
-/** Build a summary row for pool query #2 */
+/** Build a summary row for pool query #2 (receipts_period / entries_period / revenue_period) */
 const summaryRow = (opts: {
+  receipts_period?: number;
+  revenue_period?: number | string;
+  entries_period?: number;
+  /** @deprecated old field name — alias for receipts_period for backward compat in test helpers */
   receipts_today?: number;
-  revenue_today?: number | string;
+  /** @deprecated old field name — alias for entries_period */
   entries_today?: number;
+  /** @deprecated old field name — alias for revenue_period */
+  revenue_today?: number | string;
 }) => ({
   rows: [{
-    receipts_today: opts.receipts_today ?? 0,
-    revenue_today: String(opts.revenue_today ?? 0),
-    entries_today: opts.entries_today ?? 0,
+    receipts_period: opts.receipts_period ?? opts.receipts_today ?? 0,
+    revenue_period: String(opts.revenue_period ?? opts.revenue_today ?? 0),
+    entries_period: opts.entries_period ?? opts.entries_today ?? 0,
   }],
 });
 
-/** Build a monthly row for pool query #3 */
+/** Build a cap row for pool query #3 (monthly_cap only — no longer returns monthly counts) */
 const monthlyRow = (opts: {
-  entries_this_month?: number;
-  receipts_this_month?: number;
   monthly_cap?: number | null;
+  /** @deprecated receipts_this_month removed from service; kept for backward compat in call sites */
+  receipts_this_month?: number;
+  /** @deprecated entries_this_month removed from service */
+  entries_this_month?: number;
 }) => ({
   rows: [{
-    entries_this_month: opts.entries_this_month ?? 0,
-    receipts_this_month: opts.receipts_this_month ?? 0,
     monthly_cap: opts.monthly_cap ?? null,
   }],
 });
@@ -78,33 +84,33 @@ beforeEach(() => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 1. receipts_today — counts anchor + non-receipt, not bonus rows
+// 1. receipts_period — counts anchor + non-receipt, not bonus rows
 // ─────────────────────────────────────────────────────────────────────────────
-describe('receipts_today count', () => {
-  it('should return receipts_today as reported by the summary query', async () => {
+describe('receipts_period count', () => {
+  it('should return receipts_period as reported by the summary query', async () => {
     setupPoolQueries(
       BIZ_ROW,
-      summaryRow({ receipts_today: 5, entries_today: 8 }),
+      summaryRow({ receipts_period: 5, entries_period: 8 }),
       monthlyRow({}),
       emptyFeed(),
     );
 
     const result = await getBusinessActivity(1, null);
 
-    expect(result.summary.receipts_today).toBe(5);
+    expect(result.summary.receipts_period).toBe(5);
   });
 
-  it('should return 0 receipts_today when there are no entries today', async () => {
+  it('should return 0 receipts_period when there are no entries today', async () => {
     setupPoolQueries(
       BIZ_ROW,
-      summaryRow({ receipts_today: 0, entries_today: 0 }),
+      summaryRow({ receipts_period: 0, entries_period: 0 }),
       monthlyRow({}),
       emptyFeed(),
     );
 
     const result = await getBusinessActivity(1, null);
 
-    expect(result.summary.receipts_today).toBe(0);
+    expect(result.summary.receipts_period).toBe(0);
   });
 
   it('summary SQL should filter receipts using receipt_identifier IS NOT NULL for receipt source', async () => {
@@ -137,96 +143,114 @@ describe('receipts_today count', () => {
 
     const summarySql = mockQuery.mock.calls[1]?.[0] as string;
     // entries_today must be an unfiltered COUNT(*) — no extra FILTER on source
-    expect(summarySql).toMatch(/entries_today/i);
+    expect(summarySql).toMatch(/entries_period/i);
     // Ensure there is at least one COUNT(*) that does NOT have the receipt filter
-    // (i.e. a plain COUNT(*) AS entries_today)
-    expect(summarySql).toMatch(/COUNT\(\*\)\s+AS\s+entries_today/i);
+    // (i.e. a plain COUNT(*) AS entries_period)
+    expect(summarySql).toMatch(/COUNT\(\*\)\s+AS\s+entries_period/i);
   });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 2. entries_today — includes ALL ticket rows (anchor + bonus)
+// 2. entries_period — includes ALL ticket rows (anchor + bonus)
 // ─────────────────────────────────────────────────────────────────────────────
-describe('entries_today count', () => {
-  it('should return entries_today as reported by the summary query', async () => {
+describe('entries_period count', () => {
+  it('should return entries_period as reported by the summary query', async () => {
     // 2 receipt submissions: first earns 3 entries, second earns 2 → entries=5, receipts=2
     setupPoolQueries(
       BIZ_ROW,
-      summaryRow({ receipts_today: 2, entries_today: 5 }),
+      summaryRow({ receipts_period: 2, entries_period: 5 }),
       monthlyRow({}),
       emptyFeed(),
     );
 
     const result = await getBusinessActivity(1, null);
 
-    expect(result.summary.entries_today).toBe(5);
-    // entries_today must be >= receipts_today (bonus rows can only add)
-    expect(result.summary.entries_today).toBeGreaterThanOrEqual(result.summary.receipts_today);
+    expect(result.summary.entries_period).toBe(5);
+    // entries_period must be >= receipts_period (bonus rows can only add)
+    expect(result.summary.entries_period).toBeGreaterThanOrEqual(result.summary.receipts_period);
   });
 
-  it('entries_today can be larger than receipts_today due to bonus entries', async () => {
+  it('entries_period can be larger than receipts_period due to bonus entries', async () => {
     setupPoolQueries(
       BIZ_ROW,
-      summaryRow({ receipts_today: 3, entries_today: 10 }),
+      summaryRow({ receipts_period: 3, entries_period: 10 }),
       monthlyRow({}),
       emptyFeed(),
     );
 
     const result = await getBusinessActivity(1, null);
 
-    expect(result.summary.entries_today).toBe(10);
-    expect(result.summary.receipts_today).toBe(3);
+    expect(result.summary.entries_period).toBe(10);
+    expect(result.summary.receipts_period).toBe(3);
     // The difference is the bonus entries (7 bonus tickets from 3 submissions)
-    expect(result.summary.entries_today - result.summary.receipts_today).toBe(7);
+    expect(result.summary.entries_period - result.summary.receipts_period).toBe(7);
   });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 3. receipts_this_month — same logic as today but over the month
+// 3. monthly_cap query (formerly receipts_this_month)
+// NOTE: The service was refactored — monthly counts (receipts_this_month,
+// entries_this_month) were consolidated into receipts_period / entries_period.
+// The third query is now a cap query that only returns monthly_cap.
 // ─────────────────────────────────────────────────────────────────────────────
-describe('receipts_this_month count', () => {
-  it('should return receipts_this_month from the monthly query', async () => {
+describe('cap query (query index 2)', () => {
+  it('should return the monthly_cap from the cap query', async () => {
     setupPoolQueries(
       BIZ_ROW,
       summaryRow({}),
-      monthlyRow({ receipts_this_month: 42, entries_this_month: 80 }),
+      monthlyRow({ monthly_cap: 42 }),
       emptyFeed(),
     );
 
     const result = await getBusinessActivity(1, null);
 
-    expect(result.summary.receipts_this_month).toBe(42);
+    expect(result.summary.monthly_cap).toBe(42);
   });
 
-  it('monthly SQL should filter receipts using receipt_identifier IS NOT NULL', async () => {
+  it('cap SQL should select monthly_cap using COALESCE of business and platform caps', async () => {
     setupPoolQueries(
       BIZ_ROW,
       summaryRow({}),
-      monthlyRow({ receipts_this_month: 10 }),
+      monthlyRow({}),
       emptyFeed(),
     );
 
     await getBusinessActivity(1, null);
 
-    const monthlySql = mockQuery.mock.calls[2]?.[0] as string;
-    expect(monthlySql).toBeDefined();
-    expect(monthlySql).toMatch(/receipt_identifier IS NOT NULL/i);
-    expect(monthlySql).toMatch(/entry_source\s*!=\s*'receipt'/i);
+    const capSql = mockQuery.mock.calls[2]?.[0] as string;
+    expect(capSql).toBeDefined();
+    expect(capSql).toMatch(/monthly_cap/i);
+    expect(capSql).toMatch(/COALESCE/i);
   });
 
-  it('monthly SQL should exclude quarantined rows from receipts_this_month', async () => {
+  it('summary SQL should filter receipts using receipt_identifier IS NOT NULL', async () => {
     setupPoolQueries(
       BIZ_ROW,
       summaryRow({}),
-      monthlyRow({ receipts_this_month: 5 }),
+      monthlyRow({}),
       emptyFeed(),
     );
 
     await getBusinessActivity(1, null);
 
-    const monthlySql = mockQuery.mock.calls[2]?.[0] as string;
-    // The FILTER for receipts_this_month must require is_quarantined = FALSE
-    expect(monthlySql).toMatch(/is_quarantined\s*=\s*FALSE/i);
+    const summarySql = mockQuery.mock.calls[1]?.[0] as string;
+    expect(summarySql).toBeDefined();
+    expect(summarySql).toMatch(/receipt_identifier IS NOT NULL/i);
+    expect(summarySql).toMatch(/entry_source\s*!=\s*'receipt'/i);
+  });
+
+  it('summary SQL should exclude quarantined rows', async () => {
+    setupPoolQueries(
+      BIZ_ROW,
+      summaryRow({}),
+      monthlyRow({}),
+      emptyFeed(),
+    );
+
+    await getBusinessActivity(1, null);
+
+    const summarySql = mockQuery.mock.calls[1]?.[0] as string;
+    expect(summarySql).toMatch(/is_quarantined\s*=\s*FALSE/i);
   });
 });
 
@@ -452,15 +476,15 @@ describe('location manager scoping (jwtLocationId)', () => {
      */
     setupPoolQueries(
       { rows: [{ business_id: 42 }] }, // locRes
-      summaryRow({ receipts_today: 3, entries_today: 5 }),
-      monthlyRow({ receipts_this_month: 8 }),
+      summaryRow({ receipts_period: 3, entries_period: 5 }),
+      monthlyRow({}),
       emptyFeed(),
     );
 
     const result = await getBusinessActivity(1, 7); // jwtLocationId = 7
 
-    expect(result.summary.receipts_today).toBe(3);
-    expect(result.summary.entries_today).toBe(5);
+    expect(result.summary.receipts_period).toBe(3);
+    expect(result.summary.entries_period).toBe(5);
   });
 
   it('should throw "Location not found" when jwtLocationId resolves to no row', async () => {
@@ -474,10 +498,18 @@ describe('location manager scoping (jwtLocationId)', () => {
 // 9. Business not found
 // ─────────────────────────────────────────────────────────────────────────────
 describe('business owner not found', () => {
-  it('should throw "Business not found" when no business row for userId', async () => {
+  it('should return empty activity when no business row exists for userId', async () => {
+    // NOTE: the service was updated to return an empty result rather than throw
+    // when a business owner has no business row yet (e.g., setup incomplete).
     setupPoolQueries({ rows: [] }); // no biz row
 
-    await expect(getBusinessActivity(999, null)).rejects.toThrow('Business not found');
+    const result = await getBusinessActivity(999, null);
+
+    expect(result.items).toHaveLength(0);
+    expect(result.next_cursor).toBeNull();
+    expect(result.summary.receipts_period).toBe(0);
+    expect(result.summary.entries_period).toBe(0);
+    expect(result.summary.monthly_cap).toBeNull();
   });
 });
 

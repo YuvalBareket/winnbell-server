@@ -12,11 +12,11 @@
 
 CREATE TABLE "user" (
   id                   SERIAL PRIMARY KEY,
-  -- Clerk user ID for Clerk-managed accounts; NULL for local (email/password) accounts
+  -- Supabase user ID for Supabase-managed accounts; NULL for local (email/password) accounts
   external_auth_id     TEXT UNIQUE,
   email                TEXT UNIQUE NOT NULL,
   full_name            TEXT,
-  -- NULL for Clerk-managed accounts (password lives in Clerk)
+  -- NULL for Supabase-managed accounts (password lives in Supabase)
   password_hash        TEXT,
   role                 TEXT NOT NULL DEFAULT 'User'
                          CHECK (role IN ('User', 'Business', 'Admin')),
@@ -27,6 +27,8 @@ CREATE TABLE "user" (
   risk_score           INTEGER NOT NULL DEFAULT 0 CHECK (risk_score >= 0),
   risk_clean_entries   INTEGER NOT NULL DEFAULT 0 CHECK (risk_clean_entries >= 0),
   risk_last_flagged_at TIMESTAMP NULL,
+  -- ISO 3166-1 alpha-2 country code detected at registration (geo-restriction)
+  declared_state       VARCHAR(10) NULL,
   created_at           TIMESTAMP NOT NULL DEFAULT NOW(),
   updated_at           TIMESTAMP NOT NULL DEFAULT NOW()
 );
@@ -159,6 +161,12 @@ CREATE TABLE ticket (
   image_validation_status VARCHAR(20) NOT NULL DEFAULT 'not_required'
                             CHECK (image_validation_status IN
                               ('not_required', 'pending', 'passed', 'failed', 'ocr_error')),
+
+  -- Risk flags: comma-separated codes explaining the risk score
+  risk_flags              TEXT NULL,
+
+  -- Multi-ticket receipt: secondary tickets point back to the first (anchor) ticket
+  anchor_ticket_id        INTEGER NULL REFERENCES ticket(id) ON DELETE SET NULL,
 
   created_at              TIMESTAMP NOT NULL DEFAULT NOW()
 );

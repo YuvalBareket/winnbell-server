@@ -49,7 +49,7 @@ export const createCheckoutSession = async (
   userEmail: string,
   entriesPerLocation: number,
   billingInterval: 'monthly' | 'yearly' = 'monthly',
-): Promise<string> => {
+): Promise<{ url: string; joinsNextCampaign: boolean; nextCampaignDate: string | null }> => {
   const tier = TIER_PRICE_MAP[entriesPerLocation];
   if (!tier) throw new Error('Invalid entries_per_location value');
 
@@ -64,17 +64,17 @@ export const createCheckoutSession = async (
   );
   if (existing.rows.length > 0) throw new Error('This business already has an active subscription');
 
-  // Block new subscriptions within 7 days of the next campaign start (1st of next month, NY time).
-  // New businesses joining this close to a campaign draw would only be in the campaign briefly,
-  // creating an unfair onboarding window. They must wait until the new campaign opens.
+  // Detect late-cycle signups (within 7 days of next campaign start).
+  // We still allow the subscription — but flag it so the client can inform the business
+  // they'll join the NEXT campaign rather than the current one.
   const nowNY = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
-  const nextCampaignStart = new Date(nowNY.getFullYear(), nowNY.getMonth() + 1, 1); // 1st of next month NY
+  const nextCampaignStart = new Date(nowNY.getFullYear(), nowNY.getMonth() + 1, 1);
   const msUntilNext = nextCampaignStart.getTime() - nowNY.getTime();
   const daysUntilNext = msUntilNext / (1000 * 60 * 60 * 24);
-  if (daysUntilNext <= CAMPAIGN_ONBOARDING_CUTOFF_DAYS) {
-    const formatted = nextCampaignStart.toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' });
-    throw new Error(`CAMPAIGN_CUTOFF:New subscriptions are paused until the current campaign ends. New signups open on ${formatted}.`);
-  }
+  const joinsNextCampaign = daysUntilNext <= CAMPAIGN_ONBOARDING_CUTOFF_DAYS;
+  const nextCampaignDate = joinsNextCampaign
+    ? new Date(nowNY.getFullYear(), nowNY.getMonth() + 2, 1).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
+    : null;
 
   const locResult = await pool.query(
     `SELECT COUNT(*) AS cnt FROM business_location WHERE business_id = $1 AND is_active = true`,
@@ -95,7 +95,7 @@ export const createCheckoutSession = async (
     cancel_url: `${baseUrl}/subscribe`,
   });
 
-  return session.url as string;
+  return { url: session.url as string, joinsNextCampaign, nextCampaignDate };
 };
 
 // ─── Verify Session ───────────────────────────────────────────────────────────
@@ -395,20 +395,28 @@ async function handleDrawParticipation(
   const target = targetDate ?? addMonths(new Date(), 1);
   const targetMonth = target.getMonth() + 1; // 1-based
   const targetYear  = target.getFullYear();
-  // ISO string for first-of-month — used as a TIMESTAMP parameter in draw creation SQL
-  const targetIso = new Date(targetYear, targetMonth - 1, 1).toISOString();
 
   const client = await pool.connect();
   await client.query('BEGIN');
 
   try {
-    const drawResult = await client.query(`
-      SELECT id FROM draw
-      WHERE EXTRACT(MONTH FROM draw_date) = $1
-        AND EXTRACT(YEAR FROM draw_date)  = $2
-        AND status = 'Upcoming'
-      LIMIT 1
-    `, [targetMonth, targetYear]);
+    // For monthly signups (no specific targetDate), join the next upcoming draw regardless of month.
+    // For yearly pre-enrollment (specific targetDate), match the exact month so each future month
+    // gets its own draw row.
+    const drawResult = targetDate
+      ? await client.query(`
+          SELECT id FROM draw
+          WHERE EXTRACT(MONTH FROM draw_date) = $1
+            AND EXTRACT(YEAR FROM draw_date)  = $2
+            AND status = 'Upcoming'
+          LIMIT 1
+        `, [targetMonth, targetYear])
+      : await client.query(`
+          SELECT id FROM draw
+          WHERE status = 'Upcoming'
+          ORDER BY draw_date ASC
+          LIMIT 1
+        `);
 
     const existingDraw = drawResult.rows[0] as { id: number } | undefined;
 
@@ -429,16 +437,18 @@ async function handleDrawParticipation(
 
       console.log(`[Draw] Business ${businessId} entered draw ${existingDraw.id} (${targetYear}-${targetMonth}) — fee $${monthlyFee}`);
     } else {
+      // Use MAKE_DATE with explicit year/month to avoid JS timezone-to-UTC conversion
+      // shifting the date to the previous month on servers behind UTC.
       const newDrawResult = await client.query(`
         INSERT INTO draw (name, prize_pool, draw_date, status)
         VALUES (
-          TRIM(TO_CHAR($1::TIMESTAMP, 'Month')) || ' ' || TO_CHAR($1::TIMESTAMP, 'YYYY') || ' Monthly Draw',
+          TRIM(TO_CHAR(MAKE_DATE($1, $2, 1), 'Month')) || ' ' || $1::text || ' Monthly Draw',
           0,
-          DATE_TRUNC('month', $1::TIMESTAMP) + INTERVAL '1 month' - INTERVAL '1 day',
+          (MAKE_DATE($1, $2, 1) + INTERVAL '1 month' - INTERVAL '1 day')::date,
           'Upcoming'
         )
         RETURNING id
-      `, [targetIso]);
+      `, [targetYear, targetMonth]);
 
       const newDraw = newDrawResult.rows[0] as { id: number };
 

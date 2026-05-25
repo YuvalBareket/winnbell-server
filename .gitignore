@@ -1,6 +1,10 @@
 node_modules/
 dist/
 .env
+*.json
+!package.json
+!tsconfig.json
+!jest.config.json
 *.log
 .vscode/
 .idea/

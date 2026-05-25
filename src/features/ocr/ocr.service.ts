@@ -1,21 +1,20 @@
 import { getPool } from '../../shared/db/db.js';
 import { updateUserRiskScore, syncUserQuarantineState } from '../risk/risk.service.js';
 import { TesseractProvider } from './providers/tesseract.provider.js';
+import { GoogleVisionProvider } from './providers/google-vision.provider.js';
 import type { OcrProvider, OcrExpected } from './ocr.types.js';
 
 // ─── Provider Factory ─────────────────────────────────────────────────────────
-// To swap providers: set OCR_PROVIDER=claude (or google, etc.) in .env
-// Each provider must implement the OcrProvider interface from ocr.types.ts
+// Set OCR_PROVIDER=google in .env to use Google Vision (recommended for production).
+// Defaults to tesseract for local dev without credentials.
 
 function getProvider(): OcrProvider {
   const provider = process.env.OCR_PROVIDER ?? 'tesseract';
   switch (provider) {
+    case 'google':
+      return new GoogleVisionProvider();
     case 'tesseract':
       return new TesseractProvider();
-    // case 'claude':
-    //   return new ClaudeProvider();
-    // case 'google':
-    //   return new GoogleVisionProvider();
     default:
       console.warn(`Unknown OCR_PROVIDER "${provider}", falling back to tesseract`);
       return new TesseractProvider();
