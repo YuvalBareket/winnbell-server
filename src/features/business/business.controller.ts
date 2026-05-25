@@ -73,7 +73,7 @@ export const getNearby = async (
     }
 
     const rawRadius = radius ? parseFloat(radius) : 10;
-    const cappedRadius = Math.min(Math.max(rawRadius, 0.1), 50);
+    const cappedRadius = Math.min(Math.max(rawRadius, 0.1), 20000);
     const businesses = await getNearbyBusinessesService(
       parseFloat(latitude),
       parseFloat(longitude),

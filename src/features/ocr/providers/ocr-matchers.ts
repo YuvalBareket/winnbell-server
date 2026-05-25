@@ -36,7 +36,9 @@ export function matchBusinessName(text: string, businessName: string): boolean |
   const normalizedBizName = businessName.toUpperCase().replace(/[^A-Z0-9\s]/g, '');
   const significantWords = normalizedBizName.split(/\s+/).filter(w => w.length >= 4);
   if (significantWords.length === 0) return null;
-  return significantWords.some(word => text.includes(word));
+  const required = Math.min(2, significantWords.length);
+  const matched = significantWords.filter(word => text.includes(word)).length;
+  return matched >= required;
 }
 
 export const RECEIPT_KEYWORDS = [
@@ -46,7 +48,7 @@ export const RECEIPT_KEYWORDS = [
 
 export function isReceiptText(text: string): boolean {
   const keywordCount = RECEIPT_KEYWORDS.filter(k => text.includes(k)).length;
-  return keywordCount >= 2 && text.length > 50;
+  return keywordCount >= 3 && text.length > 50;
 }
 
 export function scoreConfidence(

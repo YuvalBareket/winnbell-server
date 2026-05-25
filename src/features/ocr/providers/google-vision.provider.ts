@@ -60,6 +60,9 @@ export class GoogleVisionProvider implements OcrProvider {
     const businessNameFound = expected.businessName ? matchBusinessName(normalizedText, expected.businessName) : null;
     const confidence = scoreConfidence(identifierFound, amountMatches, dateMatches);
 
-return { isReceipt, identifierFound, amountMatches, dateMatches, businessNameFound, confidence, rawText };
+    console.log('[OCR] Google Vision raw text:', JSON.stringify(rawText));
+    console.log('[OCR] Result:', JSON.stringify({ isReceipt, identifierFound, amountMatches, dateMatches, businessNameFound, confidence }));
+
+    return { isReceipt, identifierFound, amountMatches, dateMatches, businessNameFound, confidence, rawText };
   }
 }

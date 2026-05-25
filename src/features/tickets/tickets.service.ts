@@ -681,10 +681,10 @@ export const submitReceiptEntryService = async (
           `INSERT INTO ticket
             (code, status, entry_source, business_id, location_id, draw_id,
              activated_by_user_id, activated_at,
-             receipt_identifier, transaction_amount, transaction_date, receipt_image_url, risk_score,
+             receipt_identifier, transaction_amount, transaction_date, receipt_image_url, risk_score, risk_score_delta,
              is_quarantined, quarantine_reason, quarantined_at, image_validation_status, submitter_ip, risk_flags,
              anchor_ticket_id)
-           VALUES ($1, 'Activated', 'receipt', $2, $3, $4, $5, NOW(), $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17)
+           VALUES ($1, 'Activated', 'receipt', $2, $3, $4, $5, NOW(), $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
            RETURNING id`,
           [
             ticketCode,
@@ -697,6 +697,7 @@ export const submitReceiptEntryService = async (
             input.transactionDate ?? null,
             i === 0 ? (input.receiptImageUrl ?? null) : null,
             riskEval.totalScore,
+            i === 0 ? riskEval.delta : 0,
             isQuarantined,
             quarantineReason,
             quarantinedAt,

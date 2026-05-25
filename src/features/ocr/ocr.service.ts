@@ -102,14 +102,19 @@ export const validateReceiptAsync = (
         result.identifierFound &&
         result.amountMatches &&
         result.isReceipt &&
+        result.dateMatches !== false &&
         result.businessNameFound !== false;
 
       if (passed) {
-        // Unquarantine anchor + all siblings linked to it
+        // Always record the OCR result on the anchor ticket
+        await pool.query(
+          `UPDATE ticket SET image_validation_status = 'passed' WHERE id = $1`,
+          [ticketId],
+        );
+        // Unquarantine anchor + siblings only if they were pending OCR review
         await pool.query(
           `UPDATE ticket
-           SET image_validation_status = CASE WHEN id = $1 THEN 'passed' ELSE image_validation_status END,
-               is_quarantined    = FALSE,
+           SET is_quarantined    = FALSE,
                quarantine_reason = NULL,
                quarantined_at    = NULL
            WHERE (id = $1 OR anchor_ticket_id = $1)
@@ -117,15 +122,19 @@ export const validateReceiptAsync = (
           [ticketId],
         );
       } else {
-        // Quarantine anchor + all siblings with the failed reason
+        // Always record the OCR failure on the anchor ticket and add the risk delta
+        await pool.query(
+          `UPDATE ticket SET image_validation_status = 'failed', risk_score_delta = risk_score_delta + 2 WHERE id = $1`,
+          [ticketId],
+        );
+        // Update quarantine reason for tickets that were pending OCR (not already quarantined for another reason)
         await pool.query(
           `UPDATE ticket
-           SET image_validation_status = CASE WHEN id = $1 THEN 'failed' ELSE image_validation_status END,
-               is_quarantined    = TRUE,
+           SET is_quarantined    = TRUE,
                quarantine_reason = 'ocr_validation_failed',
                quarantined_at    = NOW()
            WHERE (id = $1 OR anchor_ticket_id = $1)
-             AND (is_quarantined = FALSE OR quarantine_reason = 'ocr_pending')`,
+             AND quarantine_reason = 'ocr_pending'`,
           [ticketId],
         );
         // Penalty for submitting an image that doesn't match
@@ -135,14 +144,18 @@ export const validateReceiptAsync = (
     } catch (err) {
       // Provider error (network, tesseract crash, etc.) — quarantine pending manual review
       console.error(`[OCR] Validation error for ticket ${ticketId}:`, err);
+      // Always record the OCR error on the anchor ticket
+      await pool.query(
+        `UPDATE ticket SET image_validation_status = 'ocr_error' WHERE id = $1`,
+        [ticketId],
+      );
       await pool.query(
         `UPDATE ticket
-         SET image_validation_status = CASE WHEN id = $1 THEN 'ocr_error' ELSE image_validation_status END,
-             is_quarantined    = TRUE,
+         SET is_quarantined    = TRUE,
              quarantine_reason = 'ocr_error_pending_review',
              quarantined_at    = NOW()
          WHERE (id = $1 OR anchor_ticket_id = $1)
-           AND (is_quarantined = FALSE OR quarantine_reason = 'ocr_pending')`,
+           AND quarantine_reason = 'ocr_pending'`,
         [ticketId],
       );
     }

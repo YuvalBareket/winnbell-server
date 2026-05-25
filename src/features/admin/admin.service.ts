@@ -903,6 +903,9 @@ export const getUserDetailService = async (userId: number) => {
         t.is_quarantined,
         t.quarantine_reason,
         t.risk_flags,
+        t.receipt_image_url,
+        t.image_validation_status,
+        t.risk_score_delta,
         d.name AS draw_name,
         b.name AS business_name
       FROM ticket t

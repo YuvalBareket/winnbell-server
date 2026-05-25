@@ -230,7 +230,7 @@ export const evaluateUserRisk = async (
       context.receiptInputMethod === 'typed' &&
       receiptIdentifier.length > 4 &&
       context.typingDurationMs !== undefined &&
-      context.typingDurationMs < 800
+      context.typingDurationMs < 600
     ) {
       delta += 3;
       flags.push('suspiciously_fast_input');
