@@ -14,12 +14,21 @@ export const connectDB = async () => {
   try {
     pool = new Pool({
       connectionString: process.env.DATABASE_URL,
-      // Neon serverless Postgres requires SSL; rejectUnauthorized is true by default when using
-      // the full Neon connection string which includes `sslmode=require`.
       ssl: process.env.DATABASE_URL?.includes('neon.tech') ? { rejectUnauthorized: true } : false,
       max: 10,
-      idleTimeoutMillis: 30000,
+      // Release idle connections after 10s — Neon terminates them after ~5 min of inactivity,
+      // so keeping them shorter prevents 57P01 "connection terminated" errors on the next query.
+      idleTimeoutMillis: 10000,
+      // If a connection cannot be established within 5s, fail fast rather than hanging.
+      connectionTimeoutMillis: 5000,
     });
+
+    // Prevent terminated Neon connections from crashing the process.
+    // The pool will automatically create a fresh connection on the next query.
+    pool.on('error', (err) => {
+      console.error('[Pool] Idle client error (connection dropped by Neon):', err.message);
+    });
+
     const client = await pool.connect();
     client.release();
     console.log('✅ Connected to PostgreSQL (Neon)');
