@@ -279,7 +279,7 @@ export const openDrawService = async (drawId: number): Promise<void> => {
     const openCheck = await client.query(`SELECT id FROM draw WHERE status = 'Open' FOR UPDATE SKIP LOCKED`);
     if (openCheck.rows.length > 0) throw new Error('A draw is already Open. Close it before opening another.');
 
-    await client.query(`UPDATE draw SET status = 'Open' WHERE id = $1`, [drawId]);
+    await client.query(`UPDATE draw SET status = 'Open', opened_at = NOW() WHERE id = $1`, [drawId]);
     await client.query(`UPDATE business SET is_participating = true WHERE is_subscribed = true`);
     await client.query('COMMIT');
   } catch (err) {
@@ -310,7 +310,7 @@ export const reopenDrawService = async (drawId: number): Promise<void> => {
   // Check no other draw is already open
   const openCheck = await pool.query(`SELECT id FROM draw WHERE status = 'Open'`);
   if (openCheck.rows.length > 0) throw new Error('A draw is already Open. Close it before reopening another.');
-  await pool.query(`UPDATE draw SET status = 'Open', closed_at = NULL WHERE id = $1`, [drawId]);
+  await pool.query(`UPDATE draw SET status = 'Open', opened_at = COALESCE(opened_at, NOW()), closed_at = NULL WHERE id = $1`, [drawId]);
 };
 
 export const pickDrawWinnerService = async (drawId: number): Promise<{

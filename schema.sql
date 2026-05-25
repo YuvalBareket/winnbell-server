@@ -19,7 +19,7 @@ CREATE TABLE "user" (
   -- NULL for Supabase-managed accounts (password lives in Supabase)
   password_hash        TEXT,
   role                 TEXT NOT NULL DEFAULT 'User'
-                         CHECK (role IN ('User', 'Business', 'Admin')),
+                         CHECK (role IN ('User', 'Business', 'Admin', 'Manager')),
   is_active            BOOLEAN NOT NULL DEFAULT TRUE,
   is_email_verified    BOOLEAN NOT NULL DEFAULT FALSE,
   registration_ip      INET NULL,
@@ -27,6 +27,7 @@ CREATE TABLE "user" (
   risk_score           INTEGER NOT NULL DEFAULT 0 CHECK (risk_score >= 0),
   risk_clean_entries   INTEGER NOT NULL DEFAULT 0 CHECK (risk_clean_entries >= 0),
   risk_last_flagged_at TIMESTAMP NULL,
+  risk_flags           TEXT[] NULL,
   -- ISO 3166-1 alpha-2 country code detected at registration (geo-restriction)
   declared_state       VARCHAR(10) NULL,
   created_at           TIMESTAMP NOT NULL DEFAULT NOW(),
@@ -102,6 +103,7 @@ CREATE TABLE draw (
   -- Populated by pickDrawWinnerService after the draw closes
   winner_user_id   INTEGER REFERENCES "user"(id) ON DELETE SET NULL,
   winner_ticket_id INTEGER NULL,              -- FK added below after ticket table
+  opened_at        TIMESTAMP NULL,            -- set when admin opens the draw
   closed_at        TIMESTAMP NULL,
   created_at       TIMESTAMP NOT NULL DEFAULT NOW()
 );
@@ -245,6 +247,8 @@ CREATE TABLE platform_settings (
   id               INTEGER PRIMARY KEY DEFAULT 1 CHECK (id = 1),
   -- NULL = no platform-wide cap; if the row is missing the app defaults to 500
   global_entry_cap INTEGER NULL CHECK (global_entry_cap IS NULL OR global_entry_cap > 0),
+  -- NULL or empty array = all states allowed; otherwise restrict signups to listed states
+  allowed_states   TEXT[] NULL,
   updated_at       TIMESTAMP NOT NULL DEFAULT NOW()
 );
 

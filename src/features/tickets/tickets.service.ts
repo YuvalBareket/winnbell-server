@@ -408,7 +408,7 @@ export const submitReceiptEntryService = async (
           LIMIT 1
         ),
         od AS (
-          SELECT id AS draw_id, created_at AS draw_opened_at
+          SELECT id AS draw_id, COALESCE(opened_at, created_at) AS draw_opened_at
           FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1
         )
       SELECT

@@ -227,10 +227,20 @@ export const getMyRiskLevel = async (req: AuthRequest, res: Response) => {
     );
     const drawEntryCount = parseInt(drawCountResult.rows[0]?.total_count ?? '0', 10);
 
+    const dailyResult = await pool.query(
+      `SELECT COUNT(*) AS count FROM ticket
+       WHERE activated_by_user_id = $1 AND entry_source = 'receipt'
+         AND activated_at >= NOW() - INTERVAL '24 hours'`,
+      [userId],
+    );
+    const dailyCount = parseInt(dailyResult.rows[0]?.count ?? '0', 10);
+
     res.json({
       requiresImage: score > 9,
       isThrottled,
       drawEntryCount,
+      dailyCount,
+      dailyLimit: 5,
     });
   } catch {
     res.status(500).json({ message: 'Failed to fetch risk level.' });
