@@ -6,6 +6,7 @@ export interface INearbyQuery {
   minLng: string;
   maxLng: string;
   sector?: string;
+  limit?: string;
 }
 
 /** Shape returned by the nearby search query */

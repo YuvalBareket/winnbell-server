@@ -21,6 +21,7 @@ export const getNearbyBusinessesService = async (
   minLng: number,
   maxLng: number,
   sector?: string,
+  limit = 30,
 ): Promise<NearbyBusiness[]> => {
   const pool = getPool();
 
@@ -55,8 +56,10 @@ export const getNearbyBusinessesService = async (
       AND loc.latitude  BETWEEN $1 AND $2
       AND loc.longitude BETWEEN $3 AND $4
       ${sectorClause}
-    ORDER BY loc.id
-    LIMIT 30
+    ORDER BY
+      (loc.latitude  - ($1 + $2) / 2.0) * (loc.latitude  - ($1 + $2) / 2.0) +
+      (loc.longitude - ($3 + $4) / 2.0) * (loc.longitude - ($3 + $4) / 2.0)
+    LIMIT ${limit}
   `;
 
   const result = await pool.query(query, params);
