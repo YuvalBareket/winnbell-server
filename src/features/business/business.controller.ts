@@ -160,8 +160,8 @@ export const updateCampaignSettingsController = async (req: AuthRequest, res: Re
       data.receipt_example_image_url = receipt_example_image_url ?? null;
     }
 
-    await updateCampaignSettings(req.user!.id, data);
-    res.status(204).send();
+    const result = await updateCampaignSettings(req.user!.id, data);
+    res.json({ success: true, isPending: result.isPending });
   } catch (error: unknown) {
     if (error instanceof Error && error.message === 'BUSINESS_NOT_FOUND') {
       res.status(404).json({ message: 'Business not found' });

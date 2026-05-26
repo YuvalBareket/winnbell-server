@@ -298,6 +298,15 @@ export const closeDrawService = async (drawId: number): Promise<void> => {
   if (check.rows[0].status.toUpperCase() !== 'OPEN') throw new Error('Draw is not Open');
 
   await pool.query(`UPDATE draw SET status = 'Closed', closed_at = NOW() WHERE id = $1`, [drawId]);
+
+  // Apply any pending threshold changes that businesses set during the active campaign
+  await pool.query(`
+    UPDATE business
+    SET min_transaction_amount         = pending_min_transaction_amount,
+        pending_min_transaction_amount = NULL
+    WHERE pending_min_transaction_amount IS NOT NULL
+  `);
+
   await decayAllUserRiskScores();
 };
 

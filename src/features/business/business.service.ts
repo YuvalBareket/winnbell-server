@@ -41,6 +41,7 @@ export const getNearbyBusinessesService = async (
       b.logo_url,
       b.receipt_example_image_url,
       b.min_transaction_amount,
+      b.pending_min_transaction_amount,
       b.website_url,
       b.phone,
       (
@@ -149,6 +150,7 @@ export const getMyBusinessData = async (userId: number): Promise<MyBusinessData 
         b.entry_mode,
         b.entry_cap,
         b.min_transaction_amount,
+        b.pending_min_transaction_amount,
         b.website_url,
         b.phone,
         s.status AS subscription_status,
@@ -359,6 +361,7 @@ export const searchParticipatingLocationsService = async (query: string): Promis
       b.sector,
       b.logo_url,
       b.min_transaction_amount,
+      b.pending_min_transaction_amount,
       b.receipt_example_image_url
     FROM business_location bl
     JOIN business b ON bl.business_id = b.id
@@ -387,6 +390,7 @@ export const getParticipatingLocationByIdService = async (locationId: number): P
       b.sector,
       b.logo_url,
       b.min_transaction_amount,
+      b.pending_min_transaction_amount,
       b.receipt_example_image_url
     FROM business_location bl
     JOIN business b ON bl.business_id = b.id
@@ -399,24 +403,56 @@ export const getParticipatingLocationByIdService = async (locationId: number): P
 export const updateCampaignSettings = async (
   ownerUserId: number,
   data: UpdateCampaignSettingsInput,
-): Promise<void> => {
+): Promise<{ isPending: boolean }> => {
   const pool = getPool();
-  // receipt_example_image_url: if key present in data (even null) → update it;
-  // if absent → leave existing value untouched via COALESCE pattern
-  const updateExampleImage = 'receipt_example_image_url' in data;
-  const result = await pool.query(
-    `UPDATE business
-     SET min_transaction_amount   = $1,
-         receipt_example_image_url = CASE WHEN $2 THEN $3 ELSE receipt_example_image_url END
-     WHERE user_id = $4`,
-    [
-      data.min_transaction_amount,
-      updateExampleImage,
-      data.receipt_example_image_url ?? null,
-      ownerUserId,
-    ],
+
+  // Only defer to pending if the business is actually enrolled in the open draw
+  const drawCheck = await pool.query(
+    `SELECT de.id FROM draw_entry de
+     JOIN draw d ON d.id = de.draw_id
+     JOIN business b ON b.id = de.business_id
+     WHERE d.status = 'Open' AND b.user_id = $1
+     LIMIT 1`,
+    [ownerUserId],
   );
+  const hasOpenDraw = drawCheck.rows.length > 0;
+
+  const updateExampleImage = 'receipt_example_image_url' in data;
+
+  let result;
+  if (hasOpenDraw) {
+    // Business is in an active campaign — store as pending, takes effect when draw closes
+    result = await pool.query(
+      `UPDATE business
+       SET pending_min_transaction_amount = $1,
+           receipt_example_image_url = CASE WHEN $2 THEN $3 ELSE receipt_example_image_url END
+       WHERE user_id = $4`,
+      [
+        data.min_transaction_amount,
+        updateExampleImage,
+        data.receipt_example_image_url ?? null,
+        ownerUserId,
+      ],
+    );
+  } else {
+    // No active campaign — apply immediately
+    result = await pool.query(
+      `UPDATE business
+       SET min_transaction_amount   = $1,
+           pending_min_transaction_amount = NULL,
+           receipt_example_image_url = CASE WHEN $2 THEN $3 ELSE receipt_example_image_url END
+       WHERE user_id = $4`,
+      [
+        data.min_transaction_amount,
+        updateExampleImage,
+        data.receipt_example_image_url ?? null,
+        ownerUserId,
+      ],
+    );
+  }
+
   if (result.rowCount === 0) throw new Error('BUSINESS_NOT_FOUND');
+  return { isPending: hasOpenDraw };
 };
 
 export const getBusinessLocationsByUserId = async (userId: number) => {
