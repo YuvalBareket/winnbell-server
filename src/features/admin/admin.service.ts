@@ -512,22 +512,44 @@ export const toggleUserActiveService = async (userId: number, isActive: boolean)
   );
 };
 
-export const getPlatformSettingsService = async (): Promise<{ global_entry_cap: number | null; allowed_states: string[] }> => {
+export const getPlatformSettingsService = async (): Promise<{
+  global_entry_cap: number | null;
+  allowed_states: string[];
+  founding_member_cap: number;
+  founding_phase_active: boolean;
+}> => {
   const pool = getPool();
-  const result = await pool.query(`SELECT global_entry_cap, allowed_states FROM platform_settings WHERE id = 1`);
-  return result.rows[0] ?? { global_entry_cap: null, allowed_states: ['FL'] };
+  const result = await pool.query(
+    `SELECT global_entry_cap, allowed_states, founding_member_cap, founding_phase_active FROM platform_settings WHERE id = 1`,
+  );
+  return result.rows[0] ?? { global_entry_cap: null, allowed_states: ['FL'], founding_member_cap: 30, founding_phase_active: true };
+};
+
+export const getFoundingMembersTakenCount = async (): Promise<number> => {
+  const pool = getPool();
+  const result = await pool.query(`SELECT COUNT(*)::int AS taken FROM founding_member`);
+  return result.rows[0]?.taken ?? 0;
 };
 
 export const updatePlatformSettingsService = async (
   global_entry_cap: number | null,
   allowed_states?: string[],
+  founding_member_cap?: number,
+  founding_phase_active?: boolean,
 ): Promise<void> => {
   const pool = getPool();
+  // Use COALESCE($3, col) so omitted fields keep their current value.
+  // Note: founding_phase_active=false works correctly because false ?? null = false (not null).
   await pool.query(
-    `INSERT INTO platform_settings (id, global_entry_cap, allowed_states, updated_at)
-     VALUES (1, $1, $2, NOW())
-     ON CONFLICT (id) DO UPDATE SET global_entry_cap = $1, allowed_states = $2, updated_at = NOW()`,
-    [global_entry_cap, allowed_states ?? ['FL']],
+    `INSERT INTO platform_settings (id, global_entry_cap, allowed_states, founding_member_cap, founding_phase_active, updated_at)
+     VALUES (1, $1, $2, COALESCE($3, 30), COALESCE($4, TRUE), NOW())
+     ON CONFLICT (id) DO UPDATE
+       SET global_entry_cap      = $1,
+           allowed_states        = $2,
+           founding_member_cap   = COALESCE($3, platform_settings.founding_member_cap),
+           founding_phase_active = COALESCE($4, platform_settings.founding_phase_active),
+           updated_at            = NOW()`,
+    [global_entry_cap, allowed_states ?? ['FL'], founding_member_cap ?? null, founding_phase_active ?? null],
   );
 };
 

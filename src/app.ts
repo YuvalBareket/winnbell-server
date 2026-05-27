@@ -18,6 +18,7 @@ import {
   getEntryMode,
   getAddressController,
 } from './features/business/business.controller.js';
+import { getFoundingAvailability } from './features/stripe/stripe.controller.js';
 import { testSetup } from './features/auth/test-setup.controller.js';
 
 import { authenticateToken } from './shared/middleware/auth.middleware.js';
@@ -97,6 +98,7 @@ publicBusinessRouter.get('/participating', getParticipating);
 publicBusinessRouter.get('/participating/locations/search', searchParticipatingLocations);
 publicBusinessRouter.get('/mode', getEntryMode);
 publicBusinessRouter.post('/address', publicLimiter, getAddressController);
+publicBusinessRouter.get('/subscription/founding-availability', getFoundingAvailability);
 app.use('/business', publicBusinessRouter);
 
 // Public draws endpoint — campaign info is public

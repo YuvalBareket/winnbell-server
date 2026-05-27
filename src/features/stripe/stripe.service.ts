@@ -42,6 +42,73 @@ export const TIER_PRICE_MAP: Record<number, {
   2500: { monthly: { envKey: 'STRIPE_PRICE_ID_2500',        pricePerLocation: 2000  }, yearly: { envKey: 'STRIPE_PRICE_ID_2500_YEARLY', pricePerLocation: 24000 } },
 };
 
+// ─── Founding Member: Checkout Session ────────────────────────────────────────
+
+export const createFoundingMemberCheckoutSession = async (
+  businessId: number,
+  userEmail: string,
+): Promise<{ url: string }> => {
+  const pool = getPool();
+
+  const settingsResult = await pool.query(
+    `SELECT founding_member_cap, founding_phase_active FROM platform_settings WHERE id = 1`,
+  );
+  const settings = settingsResult.rows[0];
+  if (!settings?.founding_phase_active) throw new Error('Founding partner program is not currently active');
+
+  const cap = settings.founding_member_cap as number;
+  const countResult = await pool.query(`SELECT COUNT(*)::int AS taken FROM founding_member`);
+  const taken = countResult.rows[0]?.taken ?? 0;
+  if (taken >= cap) throw new Error('All founding partner spots have been claimed');
+
+  const existing = await pool.query(
+    `SELECT id FROM subscription WHERE business_id = $1 AND status != 'Cancelled'`,
+    [businessId],
+  );
+  if (existing.rows.length > 0) throw new Error('This business already has an active subscription');
+
+  const baseUrl = process.env.FRONTEND_URL || 'http://localhost:8081';
+
+  const session = await stripe.checkout.sessions.create({
+    mode: 'payment',
+    payment_method_types: ['card'],
+    customer_email: userEmail,
+    line_items: [{
+      quantity: 1,
+      price_data: {
+        currency: 'usd',
+        unit_amount: 120000, // $1,200.00
+        product_data: {
+          name: 'Founding Partner - Winnbell',
+          description: 'One-time membership. Full year. 1,000 entries per location per month.',
+        },
+      },
+    }],
+    metadata: { business_id: String(businessId), founding: 'true' },
+    success_url: `${baseUrl}/subscription/success?session_id={CHECKOUT_SESSION_ID}`,
+    cancel_url: `${baseUrl}/subscribe`,
+  });
+
+  return { url: session.url as string };
+};
+
+// ─── Founding Member: Count / Availability ────────────────────────────────────
+
+export const getFoundingMemberCount = async (): Promise<{
+  taken: number; remaining: number; cap: number; price: number; active: boolean;
+}> => {
+  const pool = getPool();
+  const [settingsResult, countResult] = await Promise.all([
+    pool.query(`SELECT founding_member_cap, founding_phase_active FROM platform_settings WHERE id = 1`),
+    pool.query(`SELECT COUNT(*)::int AS taken FROM founding_member`),
+  ]);
+  const settings = settingsResult.rows[0] ?? { founding_member_cap: 30, founding_phase_active: true };
+  const taken = countResult.rows[0]?.taken ?? 0;
+  const cap = settings.founding_member_cap ?? 30;
+  const active = settings.founding_phase_active ?? true;
+  return { taken, remaining: Math.max(0, cap - taken), cap, price: 1000, active };
+};
+
 // ─── Create Checkout Session ──────────────────────────────────────────────────
 
 export const createCheckoutSession = async (
@@ -114,6 +181,14 @@ export const verifyAndActivateSession = async (sessionId: string, userId: number
   if (session.payment_status !== 'paid') throw new Error('Payment not completed');
   if (session.metadata?.business_id !== String(businessId)) throw new Error('Session does not belong to this business');
 
+  // ── Founding member one-time payment branch ────────────────────────────────
+  if (session.mode === 'payment' && session.metadata?.founding === 'true') {
+    const paymentIntentId = session.payment_intent as string;
+    await activateFoundingMember(pool, businessId, paymentIntentId, sessionId);
+    return;
+  }
+
+  // ── Recurring subscription branch ─────────────────────────────────────────
   const subscription = session.subscription as Stripe.Subscription;
 
   // Idempotency guard: if this Stripe subscription is already activated, skip re-processing
@@ -159,6 +234,15 @@ export const handleStripeWebhook = async (rawBody: Buffer, signature: string): P
         const businessId = Number(session.metadata?.business_id);
         if (!businessId) { console.error('[Stripe] checkout.session.completed: missing business_id', session.id); break; }
 
+        // ── Founding member one-time payment ────────────────────────────────
+        if (session.mode === 'payment' && session.metadata?.founding === 'true') {
+          const paymentIntentId = session.payment_intent as string;
+          await activateFoundingMember(pool, businessId, paymentIntentId, session.id);
+          console.log(`[Stripe] Webhook activated founding member for business ${businessId}`);
+          break;
+        }
+
+        // ── Recurring subscription ───────────────────────────────────────────
         const subscriptionId = session.subscription as string;
         if (!subscriptionId) { console.error('[Stripe] checkout.session.completed: no subscription', session.id); break; }
 
@@ -291,6 +375,189 @@ export const handleStripeWebhook = async (rawBody: Buffer, signature: string): P
     }
   }
 };
+
+// ─── Founding Member: Activate ────────────────────────────────────────────────
+
+async function activateFoundingMember(
+  pool: Pool,
+  businessId: number,
+  paymentIntentId: string,
+  checkoutSessionId: string,
+): Promise<void> {
+  // Idempotency guard
+  const existing = await pool.query(
+    `SELECT id FROM founding_member WHERE stripe_checkout_session_id = $1`,
+    [checkoutSessionId],
+  );
+  if (existing.rows.length > 0) {
+    console.log(`[Founding] Session ${checkoutSessionId} already activated — skipping`);
+    return;
+  }
+
+  const client = await pool.connect();
+  let seatNumber: number;
+  try {
+    await client.query('BEGIN');
+
+    // Atomically claim the lowest available seat within the current cap
+    const seatResult = await client.query(`
+      WITH available_seat AS (
+        SELECT s AS seat_number
+        FROM generate_series(1, (SELECT founding_member_cap FROM platform_settings WHERE id = 1)) s
+        WHERE s NOT IN (SELECT seat_number FROM founding_member)
+        ORDER BY s ASC
+        LIMIT 1
+      )
+      INSERT INTO founding_member (business_id, seat_number, stripe_payment_intent_id, stripe_checkout_session_id)
+      SELECT $1, seat_number, $2, $3
+      FROM available_seat
+      RETURNING seat_number
+    `, [businessId, paymentIntentId, checkoutSessionId]);
+
+    if ((seatResult.rowCount ?? 0) === 0) {
+      await client.query('ROLLBACK');
+      console.error(`[Founding] No seats available for business ${businessId} — issuing auto-refund`);
+      try {
+        await stripe.refunds.create({ payment_intent: paymentIntentId });
+      } catch (refundErr: any) {
+        console.error(`[Founding] Auto-refund failed: ${refundErr.message}`);
+      }
+      throw new Error('All founding partner spots were claimed while your payment was processing. A full refund has been issued.');
+    }
+
+    seatNumber = seatResult.rows[0].seat_number as number;
+    console.log(`[Founding] Business ${businessId} claimed seat #${seatNumber}`);
+
+    // One-time payment: no stripe_subscription_id; period ends in 1 year; top entry tier
+    const periodEnd = new Date();
+    periodEnd.setFullYear(periodEnd.getFullYear() + 1);
+    const monthlyEquivalent = Math.round(120000 / 12) / 100; // $83.33
+
+    await client.query(`
+      INSERT INTO subscription
+        (business_id, stripe_customer_id, stripe_subscription_id, stripe_price_id,
+         status, current_period_end, cancel_at_period_end, fee_at_entry, entries_per_location, billing_interval)
+      VALUES ($1, NULL, NULL, NULL, 'Active', $2, false, $3, 2500, 'yearly')
+      ON CONFLICT (business_id) DO UPDATE
+        SET status               = 'Active',
+            stripe_subscription_id = NULL,
+            current_period_end   = EXCLUDED.current_period_end,
+            cancel_at_period_end = false,
+            fee_at_entry         = EXCLUDED.fee_at_entry,
+            entries_per_location = 1000,
+            billing_interval     = 'yearly',
+            updated_at           = NOW()
+    `, [businessId, periodEnd, monthlyEquivalent]);
+
+    await client.query(
+      `UPDATE business SET is_subscribed = true, entry_cap = 2500 WHERE id = $1`,
+      [businessId],
+    );
+
+    await client.query('COMMIT');
+    console.log(`[Founding] subscription row upserted for business ${businessId} (seat #${seatNumber})`);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  // Enroll in next upcoming draw (same as regular subscriber).
+  // Future draws created by admin will auto-enroll all active subscribers including this one.
+  try {
+    const monthlyEquivalent = Math.round(120000 / 12) / 100;
+    await handleDrawParticipation(pool, businessId, monthlyEquivalent);
+  } catch (err: any) {
+    console.error(`[Founding] Draw enrollment failed for business ${businessId} (non-fatal):`, err.message);
+  }
+
+  // Confirmation email — non-fatal
+  try {
+    const bizResult = await pool.query(`
+      SELECT b.name, u.email, fm.seat_number,
+             (SELECT founding_member_cap FROM platform_settings WHERE id = 1) AS cap
+      FROM business b
+      JOIN "user" u ON u.id = b.user_id
+      JOIN founding_member fm ON fm.business_id = b.id
+      WHERE b.id = $1
+    `, [businessId]);
+    const biz = bizResult.rows[0];
+    if (biz?.email) {
+      console.log(`[Founding] Business ${businessId} "${biz.name}" activated as Founding Partner #${biz.seat_number} of ${biz.cap} — email: ${biz.email}`);
+    }
+  } catch (err: any) {
+    console.error(`[Founding] Email lookup failed for business ${businessId} (non-fatal):`, err.message);
+  }
+}
+
+// ─── Founding Member: Cancel + Prorated Refund ────────────────────────────────
+
+async function cancelFoundingMembership(
+  pool: Pool,
+  businessId: number,
+  paymentIntentId: string,
+): Promise<CancelResult> {
+  // Get all draw entries for this business
+  const drawResult = await pool.query(`
+    SELECT de.draw_id, d.status, d.draw_date
+    FROM draw_entry de
+    JOIN draw d ON d.id = de.draw_id
+    WHERE de.business_id = $1
+    ORDER BY d.draw_date ASC
+  `, [businessId]);
+
+  const allDraws = drawResult.rows as { draw_id: number; status: string; draw_date: Date }[];
+  const upcomingDraws = allDraws.filter(d => d.status === 'Upcoming');
+  const totalEnrolled = Math.max(allDraws.length, 12);
+
+  let refundType: CancelRefundType = 'none';
+  let refundAmount = 0;
+  let removedFromDraw = false;
+
+  // Remove from all upcoming draws
+  if (upcomingDraws.length > 0) {
+    const upcomingIds = upcomingDraws.map(d => d.draw_id);
+    await pool.query(
+      `DELETE FROM draw_entry WHERE business_id = $1 AND draw_id = ANY($2::int[])`,
+      [businessId, upcomingIds],
+    );
+    removedFromDraw = true;
+  }
+
+  // Prorated refund: $1,000 × (remaining draws / total enrolled)
+  if (upcomingDraws.length > 0) {
+    const refundFraction = upcomingDraws.length / totalEnrolled;
+    const refundCents = Math.round(120000 * refundFraction);
+    refundAmount = refundCents / 100;
+    refundType = upcomingDraws.length === totalEnrolled ? 'full' : 'prorated';
+
+    try {
+      await stripe.refunds.create({ payment_intent: paymentIntentId, amount: refundCents });
+    } catch (err: any) {
+      console.error(`[Founding] Refund failed (non-fatal): ${err.message}`);
+    }
+
+    await pool.query(`
+      UPDATE founding_member
+      SET refund_status = $1, refund_amount = $2
+      WHERE stripe_payment_intent_id = $3
+    `, [refundType === 'full' ? 'full' : 'partial', refundAmount, paymentIntentId]);
+  }
+
+  // Deactivate subscription and business
+  await pool.query(
+    `UPDATE subscription SET status = 'Cancelled', cancel_at_period_end = false, updated_at = NOW() WHERE business_id = $1`,
+    [businessId],
+  );
+  await pool.query(
+    `UPDATE business SET is_subscribed = false, is_participating = false WHERE id = $1`,
+    [businessId],
+  );
+
+  console.log(`[Founding] Business ${businessId} cancelled — removed from ${upcomingDraws.length} upcoming draws, refunded $${refundAmount}`);
+  return { removedFromDraw, refundType, refundAmount };
+}
 
 // ─── Shared Activation Logic ──────────────────────────────────────────────────
 
@@ -510,13 +777,22 @@ export const getSubscriptionDetails = async (userId: number) => {
     SELECT
       s.id, s.status, s.current_period_end, s.cancel_at_period_end,
       s.stripe_subscription_id, s.stripe_price_id, s.billing_interval,
-      d.id        AS draw_id,
-      d.name      AS draw_name,
-      d.draw_date AS draw_date,
-      d.status    AS draw_status,
-      d.prize_pool AS prize_amount
+      d.id         AS draw_id,
+      d.name       AS draw_name,
+      d.draw_date  AS draw_date,
+      d.status     AS draw_status,
+      d.prize_pool AS prize_amount,
+      CASE WHEN fm.id IS NOT NULL THEN true ELSE false END AS is_founding,
+      fm.seat_number AS founding_seat_number,
+      (
+        SELECT COUNT(*)::int
+        FROM draw_entry de3
+        JOIN draw d3 ON d3.id = de3.draw_id
+        WHERE de3.business_id = b.id AND d3.status = 'Upcoming'
+      ) AS founding_draws_remaining
     FROM business b
     JOIN subscription s ON s.business_id = b.id
+    LEFT JOIN founding_member fm ON fm.business_id = b.id
     LEFT JOIN LATERAL (
       SELECT d2.id, d2.name, d2.draw_date, d2.status, d2.prize_pool
       FROM draw_entry de2
@@ -538,6 +814,16 @@ export const getSubscriptionDetails = async (userId: number) => {
 
 export const resumeSubscription = async (userId: number): Promise<void> => {
   const pool = getPool();
+
+  // Founding memberships are one-time payments — there is nothing to resume
+  const foundingCheck = await pool.query(`
+    SELECT fm.id FROM founding_member fm
+    JOIN business b ON b.id = fm.business_id
+    WHERE b.user_id = $1
+  `, [userId]);
+  if (foundingCheck.rows.length > 0) {
+    throw new Error('Founding partner memberships cannot be paused and resumed. Contact support if you need assistance.');
+  }
 
   const subResult = await pool.query(`
     SELECT s.id, s.stripe_subscription_id, b.id AS business_id
@@ -579,7 +865,7 @@ export const resumeSubscription = async (userId: number): Promise<void> => {
 const ONBOARDING_CUTOFF_DAYS = 7;
 const CAMPAIGN_ONBOARDING_CUTOFF_DAYS = 7; // days before the 1st of next month where new signups are blocked
 
-export type CancelRefundType = 'full' | 'partial_40' | 'none';
+export type CancelRefundType = 'full' | 'partial_40' | 'prorated' | 'none';
 
 export interface CancelResult {
   removedFromDraw: boolean;
@@ -590,6 +876,20 @@ export interface CancelResult {
 export const cancelSubscription = async (userId: number): Promise<CancelResult> => {
   const pool = getPool();
 
+  // ── Founding member branch ─────────────────────────────────────────────────
+  const foundingResult = await pool.query(`
+    SELECT fm.stripe_payment_intent_id, b.id AS business_id
+    FROM founding_member fm
+    JOIN business b ON b.id = fm.business_id
+    WHERE b.user_id = $1
+  `, [userId]);
+
+  if (foundingResult.rows.length > 0) {
+    const { business_id, stripe_payment_intent_id } = foundingResult.rows[0];
+    return cancelFoundingMembership(pool, business_id, stripe_payment_intent_id);
+  }
+
+  // ── Recurring subscription branch ─────────────────────────────────────────
   const subResult = await pool.query(`
     SELECT s.id, s.stripe_subscription_id, b.id AS business_id
     FROM subscription s

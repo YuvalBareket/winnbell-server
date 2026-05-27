@@ -20,6 +20,7 @@ import {
   toggleUserActiveService,
   getPlatformSettingsService,
   updatePlatformSettingsService,
+  getFoundingMembersTakenCount,
   getDrawBusinessesService,
   getAdminAnalyticsService,
   getLocationBreakdownService,
@@ -221,7 +222,13 @@ export const getPlatformSettings = async (_req: Request, res: Response) => {
 
 export const updatePlatformSettings = async (req: Request, res: Response) => {
   try {
-    const { global_entry_cap, allowed_states } = req.body as { global_entry_cap: number | null; allowed_states?: string[] };
+    const { global_entry_cap, allowed_states, founding_member_cap, founding_phase_active } = req.body as {
+      global_entry_cap: number | null;
+      allowed_states?: string[];
+      founding_member_cap?: number;
+      founding_phase_active?: boolean;
+    };
+
     if (global_entry_cap !== null && global_entry_cap !== undefined) {
       const parsed = Number(global_entry_cap);
       if (!Number.isInteger(parsed) || parsed < 1) {
@@ -229,7 +236,21 @@ export const updatePlatformSettings = async (req: Request, res: Response) => {
         return;
       }
     }
-    await updatePlatformSettingsService(global_entry_cap ?? null, allowed_states);
+
+    if (founding_member_cap !== undefined) {
+      const parsed = Number(founding_member_cap);
+      if (!Number.isInteger(parsed) || parsed < 1) {
+        res.status(400).json({ message: 'founding_member_cap must be a positive integer' });
+        return;
+      }
+      const taken = await getFoundingMembersTakenCount();
+      if (parsed < taken) {
+        res.status(400).json({ message: `Cannot set cap below current founding member count (${taken})` });
+        return;
+      }
+    }
+
+    await updatePlatformSettingsService(global_entry_cap ?? null, allowed_states, founding_member_cap, founding_phase_active);
     res.json({ success: true });
   } catch (error) {
     res.status(500).json({ message: 'Failed to update platform settings' });

@@ -1,6 +1,8 @@
 import { Request, Response } from 'express';
 import {
+  createFoundingMemberCheckoutSession,
   createCheckoutSession,
+  getFoundingMemberCount,
   handleStripeWebhook,
   verifyAndActivateSession,
   getSubscriptionDetails,
@@ -10,7 +12,21 @@ import {
   TIER_PRICE_MAP,
 } from './stripe.service.js';
 
+// GET /business/subscription/founding-availability  (public — no auth)
+export const getFoundingAvailability = async (_req: Request, res: Response) => {
+  try {
+    const availability = await getFoundingMemberCount();
+    res.set('Cache-Control', 'public, max-age=10');
+    res.json(availability);
+  } catch (err: unknown) {
+    console.error('[stripe.getFoundingAvailability]', err);
+    res.status(500).json({ error: 'Failed to fetch availability.' });
+  }
+};
+
 // POST /business/subscription/checkout
+// Body: { founding: true }  → founding partner one-time $1,000
+// Body: { entries_per_location, billing_interval } → regular recurring subscription
 export const createCheckout = async (req: Request, res: Response) => {
   try {
     const userId = req.user!.id;
@@ -20,12 +36,19 @@ export const createCheckout = async (req: Request, res: Response) => {
       return;
     }
 
+    // ── Founding member flow ───────────────────────────────────────────────
+    if (req.body.founding === true) {
+      const result = await createFoundingMemberCheckoutSession(business.id, business.email);
+      res.json(result);
+      return;
+    }
+
+    // ── Regular recurring subscription flow ────────────────────────────────
     const entriesPerLocation = Number(req.body.entries_per_location);
     if (!TIER_PRICE_MAP[entriesPerLocation]) {
       res.status(400).json({ error: 'Invalid entries_per_location. Must be 250–2500 in steps of 250.' });
       return;
     }
-
     const billingInterval: 'monthly' | 'yearly' = req.body.billing_interval === 'yearly' ? 'yearly' : 'monthly';
     const result = await createCheckoutSession(business.id, business.email, entriesPerLocation, billingInterval);
     res.json(result);
@@ -33,6 +56,14 @@ export const createCheckout = async (req: Request, res: Response) => {
     const msg = err instanceof Error ? err.message : '';
     if (msg.includes('already has an active subscription')) {
       res.status(409).json({ error: 'This business already has an active subscription.' });
+      return;
+    }
+    if (msg.includes('not currently active')) {
+      res.status(403).json({ error: 'The founding partner program is not currently active.' });
+      return;
+    }
+    if (msg.includes('spots have been claimed')) {
+      res.status(409).json({ error: 'All founding partner spots have been claimed.' });
       return;
     }
     console.error('[stripe.createCheckout]', err);

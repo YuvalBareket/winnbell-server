@@ -22,7 +22,7 @@ import {
 } from './business.controller.js';
 import { getStats } from './stats.controller.js';
 import { getActivity, qualifyTicket } from './activity.controller.js';
-import { createCheckout, verifySession, getSubscription, cancelSub, resumeSub } from '../stripe/stripe.controller.js';
+import { createCheckout, verifySession, getSubscription, cancelSub, resumeSub, getFoundingAvailability } from '../stripe/stripe.controller.js';
 
 const router = Router();
 
@@ -33,6 +33,7 @@ router.get('/participating/locations/search', searchParticipatingLocations);
 router.get('/participating/locations/:locationId', getParticipatingLocationById);
 router.get('/mode', getEntryMode);
 router.post('/address', getAddressController);
+router.get('/subscription/founding-availability', getFoundingAvailability);
 
 // ── Authenticated routes ──
 // /setup requires the user to already have role 'Business' (assigned at registration via invite or sign-up flow)
