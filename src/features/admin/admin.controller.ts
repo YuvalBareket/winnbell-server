@@ -31,6 +31,8 @@ import {
   duplicateDrawService,
   addBusinessToDrawService,
   removeBusinessFromDrawService,
+  getBusinessDetailService,
+  adminImageDecisionService,
 } from './admin.service.js';
 
 export const getDashboardData = async (req: Request, res: Response) => {
@@ -365,6 +367,25 @@ export const setUserRisk = async (req: Request, res: Response) => {
   }
 };
 
+export const getBusinessDetail = async (req: Request, res: Response) => {
+  const businessId = parseInt(req.params.businessId as string, 10);
+  if (isNaN(businessId)) {
+    res.status(400).json({ message: 'Invalid businessId' });
+    return;
+  }
+  try {
+    const detail = await getBusinessDetailService(businessId);
+    if (!detail) {
+      res.status(404).json({ message: 'Business not found' });
+      return;
+    }
+    res.json(detail);
+  } catch (error) {
+    console.error('[admin.getBusinessDetail]', error);
+    res.status(500).json({ message: 'Failed to fetch business detail' });
+  }
+};
+
 export const getUserDetail = async (req: Request, res: Response) => {
   const userId = parseInt(req.params.userId as string, 10);
   if (isNaN(userId)) {
@@ -445,6 +466,23 @@ export const duplicateDraw = async (req: Request, res: Response) => {
   } catch (error) {
     console.error('[admin.duplicateDraw]', error);
     res.status(500).json({ message: error instanceof Error ? error.message : 'Failed to duplicate draw' });
+  }
+};
+
+export const adminImageDecision = async (req: Request, res: Response): Promise<void> => {
+  const ticketId = parseInt(req.params.ticketId as string, 10);
+  if (isNaN(ticketId)) { res.status(400).json({ message: 'Invalid ticketId' }); return; }
+  const { decision } = req.body as { decision?: string };
+  if (decision !== 'approve' && decision !== 'reject') {
+    res.status(400).json({ message: 'decision must be "approve" or "reject"' });
+    return;
+  }
+  try {
+    await adminImageDecisionService(ticketId, decision);
+    res.status(200).json({ message: `Image ${decision}d` });
+  } catch (err: any) {
+    console.error('[admin.adminImageDecision]', err);
+    res.status(400).json({ message: err.message || 'Failed to update image decision' });
   }
 };
 

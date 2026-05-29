@@ -47,7 +47,7 @@ export interface PreFetchedUserRisk {
  *   - Sequential identifier guessing       +4
  *   - Threshold probing (amount swap)      +4
  *   - Amount >3× business 30-day average   +2
- *   - Typed >4 chars in <800 ms            +3
+ *   - Typed >5 chars in <800 ms            +3
  */
 export const evaluateUserRisk = async (
   userId: number,
@@ -228,9 +228,9 @@ export const evaluateUserRisk = async (
     // Signal 4: suspiciously fast typing
     if (
       context.receiptInputMethod === 'typed' &&
-      receiptIdentifier.length > 4 &&
+      receiptIdentifier.length > 5 &&
       context.typingDurationMs !== undefined &&
-      context.typingDurationMs < 600
+      context.typingDurationMs < 800
     ) {
       delta += 3;
       flags.push('suspiciously_fast_input');
@@ -251,12 +251,12 @@ export const updateUserRiskScore = async (
   client?: PoolClient,
   flags?: string[],
 ): Promise<void> => {
-  if (delta <= 0) return;
+  if (delta === 0) return;
   const db = client ?? getPool();
-  if (flags && flags.length > 0) {
+  if (delta > 0 && flags && flags.length > 0) {
     await db.query(
       `UPDATE "user" SET
-         risk_score           = risk_score + $1,
+         risk_score           = GREATEST(0, risk_score + $1),
          risk_last_flagged_at = NOW(),
          risk_flags           = ARRAY(SELECT DISTINCT unnest(COALESCE(risk_flags, '{}') || $3::text[]))
        WHERE id = $2`,
@@ -265,8 +265,7 @@ export const updateUserRiskScore = async (
   } else {
     await db.query(
       `UPDATE "user" SET
-         risk_score           = risk_score + $1,
-         risk_last_flagged_at = NOW()
+         risk_score           = GREATEST(0, risk_score + $1)
        WHERE id = $2`,
       [delta, userId],
     );
@@ -286,6 +285,7 @@ export const checkDuplicateReceiptIdentifier = async (
   const result = await db.query(
     `SELECT activated_by_user_id FROM ticket
      WHERE business_id = $1 AND receipt_identifier = $2 AND activated_by_user_id != $3
+       AND is_quarantined = FALSE
      LIMIT 1`,
     [businessId, receiptIdentifier, submittingUserId],
   );

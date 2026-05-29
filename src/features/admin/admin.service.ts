@@ -942,6 +942,181 @@ export const removeBusinessFromDrawService = async (drawId: number, businessId: 
   );
 };
 
+export const getBusinessDetailService = async (businessId: number) => {
+  const pool = getPool();
+
+  const [bizRes, locationsRes, entriesRes] = await Promise.all([
+    pool.query(`
+      SELECT
+        b.id,
+        b.name,
+        b.sector,
+        b.description,
+        b.entry_mode,
+        b.min_transaction_amount,
+        b.website_url,
+        b.phone,
+        b.logo_url,
+        b.created_at,
+        u.id AS owner_id,
+        u.full_name AS owner_name,
+        u.email AS owner_email,
+        u.risk_score AS owner_risk_score,
+        u.risk_flags AS owner_risk_flags,
+        u.is_active AS owner_is_active,
+        s.status AS subscription_status,
+        s.fee_at_entry,
+        s.entries_per_location,
+        s.current_period_end,
+        EXISTS (
+          SELECT 1 FROM draw_entry de
+          JOIN draw d ON d.id = de.draw_id
+          WHERE de.business_id = b.id AND d.status = 'Open'
+        ) AS in_open_draw
+      FROM business b
+      LEFT JOIN "user" u ON u.id = b.user_id
+      LEFT JOIN subscription s ON s.business_id = b.id
+      WHERE b.id = $1
+    `, [businessId]),
+
+    pool.query(`
+      SELECT
+        bl.id,
+        bl.name,
+        bl.address,
+        bl.latitude,
+        bl.longitude,
+        bl.is_active,
+        COUNT(t.id) FILTER (WHERE UPPER(t.status::text) = 'ACTIVATED') AS activated_tickets,
+        COUNT(t.id) FILTER (WHERE t.is_quarantined = true) AS quarantined_tickets
+      FROM business_location bl
+      LEFT JOIN ticket t ON t.location_id = bl.id
+      WHERE bl.business_id = $1
+      GROUP BY bl.id
+      ORDER BY bl.is_active DESC, bl.name ASC
+    `, [businessId]),
+
+    pool.query(`
+      SELECT
+        t.id,
+        t.code,
+        t.status,
+        t.entry_source,
+        t.activated_at,
+        t.is_quarantined,
+        t.quarantine_reason,
+        t.risk_flags,
+        t.receipt_image_url,
+        t.image_validation_status,
+        t.risk_score_delta,
+        t.transaction_amount,
+        d.name AS draw_name,
+        d.id AS draw_id,
+        u.full_name AS user_name,
+        u.email AS user_email,
+        u.id AS user_id,
+        bl.name AS location_name
+      FROM ticket t
+      LEFT JOIN draw d ON d.id = t.draw_id
+      LEFT JOIN "user" u ON u.id = t.activated_by_user_id
+      LEFT JOIN business_location bl ON bl.id = t.location_id
+      WHERE t.business_id = $1
+      ORDER BY t.activated_at DESC NULLS LAST
+      LIMIT 200
+    `, [businessId]),
+  ]);
+
+  if (!bizRes.rows[0]) return null;
+
+  // Group entries by campaign
+  const byCampaign = new Map<string, { draw_id: number; draw_name: string; count: number; quarantined: number }>();
+  for (const e of entriesRes.rows) {
+    const key = String(e.draw_id ?? 'none');
+    if (!byCampaign.has(key)) {
+      byCampaign.set(key, { draw_id: e.draw_id, draw_name: e.draw_name ?? 'Unknown', count: 0, quarantined: 0 });
+    }
+    const c = byCampaign.get(key)!;
+    c.count++;
+    if (e.is_quarantined) c.quarantined++;
+  }
+
+  return {
+    business: bizRes.rows[0],
+    locations: locationsRes.rows,
+    entries: entriesRes.rows,
+    campaignSummary: Array.from(byCampaign.values()).sort((a, b) => b.draw_id - a.draw_id),
+  };
+};
+
+export const adminImageDecisionService = async (
+  ticketId: number,
+  decision: 'approve' | 'reject',
+): Promise<void> => {
+  const pool = getPool();
+  const { updateUserRiskScore, syncUserQuarantineState } = await import('../risk/risk.service.js');
+
+  const ticketRes = await pool.query(
+    `SELECT id, activated_by_user_id, draw_id, image_validation_status FROM ticket WHERE id = $1`,
+    [ticketId],
+  );
+  if (!ticketRes.rows[0]) throw new Error('Ticket not found');
+
+  const { activated_by_user_id: userId, draw_id: drawId, image_validation_status: prevStatus } = ticketRes.rows[0];
+  if (!userId) throw new Error('Ticket has no associated user');
+
+  const overrideable = ['passed', 'failed', 'ocr_error', 'pending'];
+  if (!overrideable.includes(prevStatus)) throw new Error(`Cannot override image decision for status: ${prevStatus}`);
+
+  if (decision === 'approve') {
+    // Reverse the +2 penalty if previously failed, then apply -3 reward
+    const ticketDeltaChange = prevStatus === 'failed' ? -5 : -3;
+    const userDelta = prevStatus === 'failed' ? -5 : -3;
+
+    await pool.query(
+      `UPDATE ticket
+       SET image_validation_status = 'passed',
+           risk_score_delta        = risk_score_delta + $2,
+           is_quarantined          = FALSE,
+           quarantine_reason       = NULL,
+           quarantined_at          = NULL
+       WHERE id = $1`,
+      [ticketId, ticketDeltaChange],
+    );
+    await pool.query(
+      `UPDATE ticket
+       SET is_quarantined = FALSE, quarantine_reason = NULL, quarantined_at = NULL
+       WHERE anchor_ticket_id = $1
+         AND quarantine_reason IN ('ocr_pending', 'ocr_validation_failed', 'ocr_error_pending_review')`,
+      [ticketId],
+    );
+    await updateUserRiskScore(userId, userDelta);
+    await syncUserQuarantineState(userId, drawId);
+  } else {
+    // Reverse the -3 reward if previously passed, then apply +2 penalty
+    const ticketDeltaChange = prevStatus === 'passed' ? 5 : 2;
+    const userDelta = prevStatus === 'passed' ? 5 : 2;
+
+    await pool.query(
+      `UPDATE ticket
+       SET image_validation_status = 'failed',
+           risk_score_delta        = risk_score_delta + $2,
+           is_quarantined          = TRUE,
+           quarantine_reason       = 'ocr_validation_failed',
+           quarantined_at          = NOW()
+       WHERE id = $1`,
+      [ticketId, ticketDeltaChange],
+    );
+    await pool.query(
+      `UPDATE ticket
+       SET is_quarantined = TRUE, quarantine_reason = 'ocr_validation_failed', quarantined_at = NOW()
+       WHERE anchor_ticket_id = $1 AND quarantine_reason = 'ocr_pending'`,
+      [ticketId],
+    );
+    await updateUserRiskScore(userId, userDelta, undefined, []);
+    await syncUserQuarantineState(userId, drawId);
+  }
+};
+
 export const getUserDetailService = async (userId: number) => {
   const pool = getPool();
 

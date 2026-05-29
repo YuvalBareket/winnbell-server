@@ -108,7 +108,7 @@ export const validateReceiptAsync = (
       if (passed) {
         // Always record the OCR result on the anchor ticket
         await pool.query(
-          `UPDATE ticket SET image_validation_status = 'passed' WHERE id = $1`,
+          `UPDATE ticket SET image_validation_status = 'passed', risk_score_delta = risk_score_delta - 3 WHERE id = $1`,
           [ticketId],
         );
         // Unquarantine anchor + siblings only if they were pending OCR review
@@ -121,6 +121,9 @@ export const validateReceiptAsync = (
              AND quarantine_reason = 'ocr_pending'`,
           [ticketId],
         );
+        // Reward the user for a verified image — reduce risk score toward safety
+        await updateUserRiskScore(userId, -3);
+        await syncUserQuarantineState(userId, drawId);
       } else {
         // Always record the OCR failure on the anchor ticket and add the risk delta
         await pool.query(
@@ -161,3 +164,4 @@ export const validateReceiptAsync = (
     }
   });
 };
+ 

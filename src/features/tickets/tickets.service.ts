@@ -600,17 +600,11 @@ export const submitReceiptEntryService = async (
       throw new Error('Suspicious sequential receipt pattern detected. Please contact support if this is in error.');
     }
 
-    // Block cross-user duplicate and immediately quarantine the original submitter's ticket.
-    // Any second-user attempt on the same receipt is a sharing signal regardless of intent.
-    // The original ticket is held for manual review — if legitimate, an admin can release it.
-    // IMPORTANT: use pool (not client) so the quarantine persists after the transaction rollback.
+    // Block cross-user duplicate only when the existing entry is active (not quarantined).
+    // A quarantined entry is effectively disqualified — the receipt is unclaimed again and
+    // the next person with the real receipt can use it. This prevents scammers from
+    // poisoning a receipt by submitting it into a quarantined state via high risk score.
     if (dupCheck.isDuplicate) {
-      await pool.query(
-        `UPDATE ticket
-         SET is_quarantined = TRUE, quarantine_reason = 'shared_receipt_suspected', quarantined_at = NOW()
-         WHERE business_id = $1 AND receipt_identifier = $2 AND is_quarantined = FALSE`,
-        [business_id, input.receiptIdentifier],
-      );
       throw new Error('This receipt has already been used for an entry.');
     }
 

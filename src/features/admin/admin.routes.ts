@@ -12,6 +12,7 @@ router.get('/draws', adminController.getDraws);
 router.get('/draws-all', adminController.getAllDraws);
 router.get('/users', adminController.getUsers);
 router.get('/users/:userId', adminController.getUserDetail);
+router.get('/businesses/:businessId', adminController.getBusinessDetail);
 router.patch('/users/:userId/role', adminController.updateUserRole);
 router.patch('/users/:userId/active', adminController.toggleUserActive);
 router.patch('/users/:userId/risk', adminController.setUserRisk);
@@ -34,6 +35,7 @@ router.get('/promo-codes', adminController.getPromoCodes);
 router.post('/promo-codes', adminController.createPromoCode);
 router.patch('/promo-codes/:id/deactivate', adminController.deactivatePromoCode);
 
+router.patch('/tickets/:ticketId/image-decision', adminController.adminImageDecision);
 router.get('/analytics', adminController.getAnalytics);
 router.get('/analytics/entry-volume', adminController.getEntryVolume);
 router.get('/analytics/campaigns', adminController.getCampaignComparison);
