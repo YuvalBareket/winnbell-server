@@ -219,7 +219,10 @@ export const loginUser = async (
   let businessId: number | null = null;
   if (user.role === 'Business' && !locationId) {
     const bizResult = await pool.query(
-      `SELECT id, is_subscribed, logo_url FROM business WHERE user_id = $1`,
+      `SELECT b.id, b.logo_url, (s.status IN ('Active', 'Trialing')) AS is_subscribed
+       FROM business b
+       LEFT JOIN subscription s ON s.business_id = b.id
+       WHERE b.user_id = $1`,
       [user.id],
     );
     hasBusiness = bizResult.rows.length > 0;
@@ -359,7 +362,10 @@ export const syncExternalUser = async (
     let businessId: number | null = null;
     if (dbUser.role === 'Business' && !locationId) {
       const bizResult = await client.query(
-        `SELECT id, is_subscribed, logo_url FROM business WHERE user_id = $1`,
+        `SELECT b.id, b.logo_url, (s.status IN ('Active', 'Trialing')) AS is_subscribed
+         FROM business b
+         LEFT JOIN subscription s ON s.business_id = b.id
+         WHERE b.user_id = $1`,
         [dbUser.id],
       );
       hasBusiness = bizResult.rows.length > 0;

@@ -52,7 +52,13 @@ export const getNearbyBusinessesService = async (
       ) AS other_locations
     FROM business_location loc
     INNER JOIN business b ON loc.business_id = b.id
-    WHERE loc.is_active = true AND b.is_subscribed = true AND b.is_participating = true
+    JOIN subscription s ON s.business_id = b.id AND s.status IN ('Active', 'Trialing')
+    WHERE loc.is_active = true
+      AND EXISTS (
+        SELECT 1 FROM draw_entry de
+        JOIN draw d ON d.id = de.draw_id
+        WHERE de.business_id = b.id AND d.status = 'Open'
+      )
       AND loc.latitude  BETWEEN $1 AND $2
       AND loc.longitude BETWEEN $3 AND $4
       ${sectorClause}
@@ -148,17 +154,16 @@ export const getMyBusinessData = async (userId: number): Promise<MyBusinessData 
         b.terms_text,
         b.logo_url,
         b.receipt_example_image_url,
-        b.is_subscribed,
-        b.is_participating,
         b.entry_mode,
-        b.entry_cap,
         b.min_transaction_amount,
         b.pending_min_transaction_amount,
         b.website_url,
         b.phone,
+        (s.status IN ('Active', 'Trialing')) AS is_subscribed,
         s.status AS subscription_status,
         s.current_period_end,
         s.cancel_at_period_end,
+        s.entries_per_location,
         (
           SELECT COALESCE(json_agg(json_build_object(
             'id', bl.id,
@@ -330,7 +335,14 @@ export const updateBusinessLogo = async (ownerUserId: number, logoUrl: string): 
 export const getEntryModeService = async (): Promise<{ entry_mode: string }> => {
   const pool = getPool();
   const result = await pool.query(
-    `SELECT entry_mode FROM business WHERE is_participating = true LIMIT 1`,
+    `SELECT b.entry_mode FROM business b
+     JOIN subscription s ON s.business_id = b.id AND s.status IN ('Active', 'Trialing')
+     WHERE EXISTS (
+       SELECT 1 FROM draw_entry de
+       JOIN draw d ON d.id = de.draw_id
+       WHERE de.business_id = b.id AND d.status = 'Open'
+     )
+     LIMIT 1`,
   );
   return { entry_mode: result.rows[0]?.entry_mode ?? 'receipt' };
 };
@@ -341,7 +353,12 @@ export const getParticipatingBusinessesService = async () => {
   const result = await pool.query(`
     SELECT b.id, b.name, b.sector, b.logo_url, b.entry_mode
     FROM business b
-    WHERE b.is_subscribed = true AND b.is_participating = true
+    JOIN subscription s ON s.business_id = b.id AND s.status IN ('Active', 'Trialing')
+    WHERE EXISTS (
+      SELECT 1 FROM draw_entry de
+      JOIN draw d ON d.id = de.draw_id
+      WHERE de.business_id = b.id AND d.status = 'Open'
+    )
     ORDER BY b.name ASC
   `);
 
@@ -368,7 +385,13 @@ export const searchParticipatingLocationsService = async (query: string): Promis
       b.receipt_example_image_url
     FROM business_location bl
     JOIN business b ON bl.business_id = b.id
-    WHERE bl.is_active = true AND b.is_subscribed = true AND b.is_participating = true
+    JOIN subscription s ON s.business_id = b.id AND s.status IN ('Active', 'Trialing')
+    WHERE bl.is_active = true
+      AND EXISTS (
+        SELECT 1 FROM draw_entry de
+        JOIN draw d ON d.id = de.draw_id
+        WHERE de.business_id = b.id AND d.status = 'Open'
+      )
       AND (
         LOWER(b.name) LIKE LOWER($1) OR
         LOWER(bl.name) LIKE LOWER($1) OR
@@ -397,7 +420,13 @@ export const getParticipatingLocationByIdService = async (locationId: number): P
       b.receipt_example_image_url
     FROM business_location bl
     JOIN business b ON bl.business_id = b.id
-    WHERE bl.id = $1 AND bl.is_active = true AND b.is_subscribed = true AND b.is_participating = true`,
+    JOIN subscription s ON s.business_id = b.id AND s.status IN ('Active', 'Trialing')
+    WHERE bl.id = $1 AND bl.is_active = true
+      AND EXISTS (
+        SELECT 1 FROM draw_entry de
+        JOIN draw d ON d.id = de.draw_id
+        WHERE de.business_id = b.id AND d.status = 'Open'
+      )`,
     [locationId],
   );
   return result.rows[0] ?? null;

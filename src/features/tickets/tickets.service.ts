@@ -128,9 +128,10 @@ export const getBusinessTicketsService = async (userId: number, drawId: number, 
   const bizRes = await pool.query(
     `SELECT
        b.id AS business_id,
-       COALESCE(b.entry_cap, ps.global_entry_cap) AS per_location_cap,
+       COALESCE(s.entries_per_location, ps.global_entry_cap) AS per_location_cap,
        (SELECT COUNT(*)::int FROM business_location WHERE business_id = b.id AND is_active = TRUE) AS active_location_count
      FROM business b
+     LEFT JOIN subscription s ON s.business_id = b.id
      LEFT JOIN platform_settings ps ON ps.id = 1
      WHERE b.user_id = $1`,
     [userId],
@@ -402,9 +403,14 @@ export const submitReceiptEntryService = async (
       `WITH
         biz AS (
           SELECT b.id AS business_id, b.name AS business_name, b.min_transaction_amount
-          FROM business_location bl JOIN business b ON bl.business_id = b.id
+          FROM business_location bl
+          JOIN business b ON bl.business_id = b.id
           WHERE bl.id = $2 AND bl.is_active = true
-            AND b.is_subscribed = true AND b.is_participating = true
+            AND EXISTS (
+              SELECT 1 FROM draw_entry de
+              JOIN draw d ON d.id = de.draw_id
+              WHERE de.business_id = b.id AND d.status = 'Open'
+            )
           LIMIT 1
         ),
         od AS (
@@ -449,7 +455,7 @@ export const submitReceiptEntryService = async (
       throw new Error('Please verify your email address before submitting entries.');
     }
     if (!pf.business_id) {
-      throw new Error('Location is not currently participating in a draw.');
+      throw new Error('This business is not participating in the current campaign. Try a different location or check back next month.');
     }
     if (pf.has_conflict) {
       throw new Error('Business owners and managers cannot submit entries for their own business.');
@@ -862,21 +868,26 @@ export const generateTicketService = async (user_id: number, location_id: number
     await client.query('BEGIN');
 
     const authInfo = await client.query(`
-      SELECT bl.business_id, bl.id as location_id, b.entry_cap
+      SELECT bl.business_id, bl.id as location_id, s.entries_per_location
       FROM business_location bl
       JOIN business b ON bl.business_id = b.id
+      JOIN subscription s ON s.business_id = b.id AND s.status IN ('Active', 'Trialing')
       WHERE bl.id = $1
         AND (b.user_id = $2 OR bl.manager_user_id = $2)
         AND bl.is_active = true
-        AND b.is_subscribed = true
-        AND b.is_participating = true
+        AND EXISTS (
+          SELECT 1 FROM draw_entry de
+          JOIN draw d ON d.id = de.draw_id
+          WHERE de.business_id = b.id AND d.status IN ('Open', 'Upcoming')
+        )
     `, [location_id, user_id]);
 
     if (authInfo.rows.length === 0) {
       throw new Error('Unauthorized or inactive location. Ticket cannot be issued.');
     }
 
-    const { business_id, entry_cap } = authInfo.rows[0];
+    const { business_id, entries_per_location } = authInfo.rows[0];
+    const entry_cap: number | null = entries_per_location != null ? Number(entries_per_location) : null;
 
     const drawInfo = await client.query(`
       SELECT id FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1

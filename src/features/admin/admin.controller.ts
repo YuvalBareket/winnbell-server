@@ -29,6 +29,8 @@ import {
   getEntryVolumeService,
   getCampaignComparisonService,
   duplicateDrawService,
+  addBusinessToDrawService,
+  removeBusinessFromDrawService,
 } from './admin.service.js';
 
 export const getDashboardData = async (req: Request, res: Response) => {
@@ -443,5 +445,29 @@ export const duplicateDraw = async (req: Request, res: Response) => {
   } catch (error) {
     console.error('[admin.duplicateDraw]', error);
     res.status(500).json({ message: error instanceof Error ? error.message : 'Failed to duplicate draw' });
+  }
+};
+
+export const addBusinessToDraw = async (req: Request, res: Response): Promise<void> => {
+  const drawId = parseInt(req.params.drawId as string, 10);
+  const businessId = parseInt(req.params.businessId as string, 10);
+  if (!drawId || !businessId) { res.status(400).json({ message: 'Invalid IDs' }); return; }
+  try {
+    await addBusinessToDrawService(drawId, businessId);
+    res.status(201).json({ message: 'Business added to draw' });
+  } catch (err: any) {
+    res.status(400).json({ message: err.message || 'Failed to add business to draw' });
+  }
+};
+
+export const removeBusinessFromDraw = async (req: Request, res: Response): Promise<void> => {
+  const drawId = parseInt(req.params.drawId as string, 10);
+  const businessId = parseInt(req.params.businessId as string, 10);
+  if (!drawId || !businessId) { res.status(400).json({ message: 'Invalid IDs' }); return; }
+  try {
+    await removeBusinessFromDrawService(drawId, businessId);
+    res.status(204).send();
+  } catch (err: any) {
+    res.status(400).json({ message: err.message || 'Failed to remove business from draw' });
   }
 };

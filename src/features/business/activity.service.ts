@@ -101,8 +101,9 @@ export const getBusinessActivity = async (
 
   // ── Monthly cap ──
   const capRes = await pool.query(`
-    SELECT COALESCE(b.entry_cap, ps.global_entry_cap) AS monthly_cap
+    SELECT COALESCE(s.entries_per_location, ps.global_entry_cap) AS monthly_cap
     FROM business b
+    LEFT JOIN subscription s ON s.business_id = b.id
     LEFT JOIN platform_settings ps ON ps.id = 1
     WHERE b.id = $1
   `, [businessId]);

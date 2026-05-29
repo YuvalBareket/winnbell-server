@@ -25,6 +25,8 @@ router.post('/draws/:drawId/close', adminController.closeDraw);
 router.post('/draws/:drawId/pick-winner', adminController.pickWinner);
 router.post('/draws/:drawId/reopen', adminController.reopenDraw);
 router.get('/draws/:drawId/businesses', adminController.getDrawBusinesses);
+router.post('/draws/:drawId/businesses/:businessId', adminController.addBusinessToDraw);
+router.delete('/draws/:drawId/businesses/:businessId', adminController.removeBusinessFromDraw);
 router.get('/settings', adminController.getPlatformSettings);
 router.patch('/settings', adminController.updatePlatformSettings);
 

@@ -55,6 +55,6 @@ export const authenticateToken = async (
     req.user = { ...decoded, role: userCheck.rows[0].role };
     next();
   } catch (error) {
-    res.status(403).json({ message: 'Invalid or expired token.' });
+    res.status(401).json({ message: 'Invalid or expired token.' });
   }
 };

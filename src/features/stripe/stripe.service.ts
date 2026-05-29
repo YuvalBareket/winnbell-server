@@ -285,7 +285,6 @@ export const handleStripeWebhook = async (rawBody: Buffer, signature: string): P
           WHERE business_id = $4
         `, [status, currentPeriodEnd, cancelAtPeriodEnd, businessId]);
 
-        await pool.query(`UPDATE business SET is_subscribed = $1 WHERE id = $2`, [isActive, businessId]);
 
         if (isActive && previousStatus && previousStatus !== 'active') {
           const priceItem = subscription.items.data[0];
@@ -316,7 +315,12 @@ export const handleStripeWebhook = async (rawBody: Buffer, signature: string): P
           `UPDATE subscription SET status = 'Cancelled', updated_at = NOW() WHERE business_id = $1`,
           [businessId],
         );
-        await pool.query(`UPDATE business SET is_subscribed = false, is_participating = false WHERE id = $1`, [businessId]);
+        await pool.query(
+          `DELETE FROM draw_entry de
+           USING draw d
+           WHERE de.draw_id = d.id AND de.business_id = $1 AND d.status = 'Upcoming'`,
+          [businessId],
+        );
         console.log(`[Stripe] Business ${businessId} deactivated`);
       } catch (err: any) {
         console.error('[Stripe] ERROR in customer.subscription.deleted:', err.message);
@@ -449,10 +453,6 @@ async function activateFoundingMember(
             updated_at           = NOW()
     `, [businessId, periodEnd, monthlyEquivalent]);
 
-    await client.query(
-      `UPDATE business SET is_subscribed = true, entry_cap = 2500 WHERE id = $1`,
-      [businessId],
-    );
 
     await client.query('COMMIT');
     console.log(`[Founding] subscription row upserted for business ${businessId} (seat #${seatNumber})`);
@@ -498,64 +498,62 @@ async function cancelFoundingMembership(
   businessId: number,
   paymentIntentId: string,
 ): Promise<CancelResult> {
-  // Get all draw entries for this business
-  const drawResult = await pool.query(`
-    SELECT de.draw_id, d.status, d.draw_date
-    FROM draw_entry de
-    JOIN draw d ON d.id = de.draw_id
-    WHERE de.business_id = $1
-    ORDER BY d.draw_date ASC
-  `, [businessId]);
-
-  const allDraws = drawResult.rows as { draw_id: number; status: string; draw_date: Date }[];
-  const upcomingDraws = allDraws.filter(d => d.status === 'Upcoming');
-  const totalEnrolled = Math.max(allDraws.length, 12);
-
-  let refundType: CancelRefundType = 'none';
-  let refundAmount = 0;
-  let removedFromDraw = false;
+  // Get membership period to calculate time-based refund
+  const subResult = await pool.query(
+    `SELECT created_at, current_period_end FROM subscription WHERE business_id = $1`,
+    [businessId],
+  );
+  const sub = subResult.rows[0] as { created_at: Date; current_period_end: Date } | undefined;
 
   // Remove from all upcoming draws
-  if (upcomingDraws.length > 0) {
-    const upcomingIds = upcomingDraws.map(d => d.draw_id);
-    await pool.query(
-      `DELETE FROM draw_entry WHERE business_id = $1 AND draw_id = ANY($2::int[])`,
-      [businessId, upcomingIds],
-    );
-    removedFromDraw = true;
-  }
+  const deleteResult = await pool.query(
+    `DELETE FROM draw_entry de
+     USING draw d
+     WHERE de.draw_id = d.id AND de.business_id = $1 AND d.status = 'Upcoming'
+     RETURNING de.draw_id`,
+    [businessId],
+  );
+  const removedFromDraw = deleteResult.rowCount! > 0;
 
-  // Prorated refund: $1,000 × (remaining draws / total enrolled)
-  if (upcomingDraws.length > 0) {
-    const refundFraction = upcomingDraws.length / totalEnrolled;
-    const refundCents = Math.round(120000 * refundFraction);
-    refundAmount = refundCents / 100;
-    refundType = upcomingDraws.length === totalEnrolled ? 'full' : 'prorated';
+  // 50% refund of remaining time: $1,200 × (days_remaining / total_days) × 0.5
+  let refundType: CancelRefundType = 'none';
+  let refundAmount = 0;
 
-    try {
-      await stripe.refunds.create({ payment_intent: paymentIntentId, amount: refundCents });
-    } catch (err: any) {
-      console.error(`[Founding] Refund failed (non-fatal): ${err.message}`);
+  if (sub) {
+    const now = new Date();
+    const periodEnd = new Date(sub.current_period_end);
+    const periodStart = new Date(sub.created_at);
+    const totalMs = periodEnd.getTime() - periodStart.getTime();
+    const remainingMs = Math.max(0, periodEnd.getTime() - now.getTime());
+    const remainingFraction = totalMs > 0 ? remainingMs / totalMs : 0;
+    const refundCents = Math.round(120000 * remainingFraction * 0.5);
+
+    if (refundCents > 0) {
+      refundAmount = refundCents / 100;
+      refundType = remainingFraction >= 0.99 ? 'full' : 'prorated';
+
+      try {
+        await stripe.refunds.create({ payment_intent: paymentIntentId, amount: refundCents });
+      } catch (err: any) {
+        console.error(`[Founding] Stripe refund failed (non-fatal): ${err.message}`);
+      }
     }
-
-    await pool.query(`
-      UPDATE founding_member
-      SET refund_status = $1, refund_amount = $2
-      WHERE stripe_payment_intent_id = $3
-    `, [refundType === 'full' ? 'full' : 'partial', refundAmount, paymentIntentId]);
   }
 
-  // Deactivate subscription and business
+  // Remove founding_member record entirely — they had their chance, no longer a founding member
   await pool.query(
-    `UPDATE subscription SET status = 'Cancelled', cancel_at_period_end = false, updated_at = NOW() WHERE business_id = $1`,
-    [businessId],
-  );
-  await pool.query(
-    `UPDATE business SET is_subscribed = false, is_participating = false WHERE id = $1`,
+    `DELETE FROM founding_member WHERE business_id = $1`,
     [businessId],
   );
 
-  console.log(`[Founding] Business ${businessId} cancelled — removed from ${upcomingDraws.length} upcoming draws, refunded $${refundAmount}`);
+  // Cancel subscription immediately (one-time payment, nothing to cancel on Stripe)
+  await pool.query(
+    `UPDATE subscription SET status = 'Cancelled', cancel_at_period_end = false, updated_at = NOW()
+     WHERE business_id = $1`,
+    [businessId],
+  );
+
+  console.log(`[Founding] Business ${businessId} cancelled. Removed from ${deleteResult.rowCount} upcoming draws. Refunded $${refundAmount} (50% of remaining time).`);
   return { removedFromDraw, refundType, refundAmount };
 }
 
@@ -580,12 +578,6 @@ async function activateBusinessSubscription(
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-
-    const updateResult = await client.query(
-      `UPDATE business SET is_subscribed = true, entry_cap = $2 WHERE id = $1`,
-      [businessId, entriesPerLocation || null],
-    );
-    console.log(`[Stripe] business.is_subscribed updated, rows affected: ${updateResult.rowCount}`);
 
     await client.query(`
       INSERT INTO subscription
@@ -731,7 +723,7 @@ async function handleDrawParticipation(
           SELECT b.id AS business_id, COALESCE(s.fee_at_entry, 0) AS monthly_fee
           FROM business b
           JOIN subscription s ON s.business_id = b.id
-          WHERE b.is_subscribed = true AND s.status = 'Active' AND b.id != $1
+          WHERE s.status IN ('Active', 'Trialing') AND b.id != $1
         `, [businessId]);
 
         for (const sub of otherSubsResult.rows) {
@@ -865,7 +857,7 @@ export const resumeSubscription = async (userId: number): Promise<void> => {
 const ONBOARDING_CUTOFF_DAYS = 7;
 const CAMPAIGN_ONBOARDING_CUTOFF_DAYS = 7; // days before the 1st of next month where new signups are blocked
 
-export type CancelRefundType = 'full' | 'partial_40' | 'prorated' | 'none';
+export type CancelRefundType = 'full' | 'prorated' | 'none';
 
 export interface CancelResult {
   removedFromDraw: boolean;
@@ -900,107 +892,25 @@ export const cancelSubscription = async (userId: number): Promise<CancelResult> 
   const sub = subResult.rows[0];
   if (!sub) throw new Error('No active subscription found');
 
+  // Set cancel at period end on Stripe — business keeps access until period ends
   await stripe.subscriptions.update(sub.stripe_subscription_id, { cancel_at_period_end: true });
   await pool.query(
     `UPDATE subscription SET cancel_at_period_end = true, updated_at = NOW() WHERE id = $1`,
     [sub.id],
   );
 
-  const drawResult = await pool.query(`
-    SELECT d.id, d.status, d.draw_date
-    FROM draw_entry de
-    JOIN draw d ON d.id = de.draw_id
-    WHERE de.business_id = $1 AND d.status = 'Upcoming'
-  `, [sub.business_id]);
+  // Remove from next upcoming draw — no refund
+  const deleteResult = await pool.query(
+    `DELETE FROM draw_entry de
+     USING draw d
+     WHERE de.draw_id = d.id AND de.business_id = $1 AND d.status = 'Upcoming'
+     RETURNING de.draw_id`,
+    [sub.business_id],
+  );
+  const removedFromDraw = deleteResult.rowCount! > 0;
 
-  const nextDraw = drawResult.rows[0];
-  let removedFromDraw = false;
-  let refundType: CancelRefundType = 'none';
-  let refundAmount = 0;
-
-  if (nextDraw) {
-    const now = new Date();
-    const drawDate = new Date(nextDraw.draw_date);
-    const cutoffDate = new Date(drawDate);
-    cutoffDate.setDate(cutoffDate.getDate() - ONBOARDING_CUTOFF_DAYS);
-
-    if (now < cutoffDate) {
-      // ── Before cutoff: full draw removal + full refund ──────────────────────
-      refundType = 'full';
-      const poolClient = await pool.connect();
-      await poolClient.query('BEGIN');
-      try {
-        await poolClient.query(
-          `DELETE FROM draw_entry WHERE draw_id = $1 AND business_id = $2`,
-          [nextDraw.id, sub.business_id],
-        );
-        await poolClient.query('COMMIT');
-        removedFromDraw = true;
-      } catch (err) {
-        await poolClient.query('ROLLBACK');
-        throw err;
-      } finally {
-        poolClient.release();
-      }
-
-      // Issue full Stripe refund for current billing period
-      try {
-        const invoices = await stripe.invoices.list({ subscription: sub.stripe_subscription_id, limit: 1 });
-        const latestInvoice = invoices.data[0];
-        const paymentIntentId = (latestInvoice as any)?.payment_intent as string | null;
-        if (paymentIntentId && latestInvoice.amount_paid > 0) {
-          await stripe.refunds.create({ payment_intent: paymentIntentId });
-          refundAmount = latestInvoice.amount_paid / 100;
-        }
-      } catch (err: any) {
-        console.error(`[Cancel] Stripe full refund failed (non-fatal): ${err.message}`);
-      }
-
-      console.log(`[Cancel] Before cutoff — full removal + full refund $${refundAmount} for business ${sub.business_id}`);
-
-    } else if (now < drawDate) {
-      // ── After cutoff, before draw: remove from draw, 40% refund ─────────────
-      refundType = 'partial_40';
-      const poolClient = await pool.connect();
-      await poolClient.query('BEGIN');
-      try {
-        await poolClient.query(
-          `DELETE FROM draw_entry WHERE draw_id = $1 AND business_id = $2`,
-          [nextDraw.id, sub.business_id],
-        );
-        await poolClient.query('COMMIT');
-        removedFromDraw = true;
-      } catch (err) {
-        await poolClient.query('ROLLBACK');
-        throw err;
-      } finally {
-        poolClient.release();
-      }
-
-      // Issue 40% Stripe refund
-      try {
-        const invoices = await stripe.invoices.list({ subscription: sub.stripe_subscription_id, limit: 1 });
-        const latestInvoice = invoices.data[0];
-        const paymentIntentId = (latestInvoice as any)?.payment_intent as string | null;
-        if (paymentIntentId && latestInvoice.amount_paid > 0) {
-          const refundCents = Math.round(latestInvoice.amount_paid * 0.4);
-          await stripe.refunds.create({ payment_intent: paymentIntentId, amount: refundCents });
-          refundAmount = refundCents / 100;
-        }
-      } catch (err: any) {
-        console.error(`[Cancel] Stripe 40% refund failed (non-fatal): ${err.message}`);
-      }
-
-      console.log(`[Cancel] After cutoff — partial removal, 40% refund $${refundAmount} for business ${sub.business_id}`);
-
-    } else {
-      // ── After draw commenced: no removal, no refund ──────────────────────────
-      refundType = 'none';
-      console.log(`[Cancel] Draw already commenced — no removal, no refund for business ${sub.business_id}`);
-    }
-  }
-
-  return { removedFromDraw, refundType, refundAmount };
+  console.log(`[Cancel] Business ${sub.business_id} set to cancel at period end. Removed from ${deleteResult.rowCount} upcoming draw(s). No refund issued.`);
+  return { removedFromDraw, refundType: 'none', refundAmount: 0 };
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

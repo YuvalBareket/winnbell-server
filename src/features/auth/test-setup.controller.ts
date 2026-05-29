@@ -107,8 +107,8 @@ export const testSetup = async (req: Request, res: Response): Promise<void> => {
         );
         if (bizCheck.rows.length === 0) {
           const ins = await client.query(
-            `INSERT INTO business (user_id, name, sector, description, is_subscribed, is_participating)
-             VALUES ($1, $2, $3, $4, true, true) RETURNING id`,
+            `INSERT INTO business (user_id, name, sector, description)
+             VALUES ($1, $2, $3, $4) RETURNING id`,
             [userId, config.businessName, config.businessSector ?? 'Food',
               persona === 'david'
                 ? 'A neighborhood bakery offering fresh bread and pastries baked daily.'
@@ -117,11 +117,15 @@ export const testSetup = async (req: Request, res: Response): Promise<void> => {
           bizId = ins.rows[0].id;
         } else {
           bizId = bizCheck.rows[0].id;
-          await client.query(
-            `UPDATE business SET is_subscribed = true, is_participating = true WHERE id = $1`,
-            [bizId],
-          );
         }
+
+        // Ensure an Active subscription row exists
+        await client.query(
+          `INSERT INTO subscription (business_id, status, entries_per_location, fee_at_entry)
+           VALUES ($1, 'Active', NULL, 0)
+           ON CONFLICT (business_id) DO UPDATE SET status = 'Active'`,
+          [bizId],
+        );
 
         // Ensure at least one active location exists with valid lat/lon
         const locCheck = await client.query(

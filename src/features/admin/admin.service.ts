@@ -28,8 +28,8 @@ export const getBusinessesWithStats = async (params: {
         b.id,
         b.name,
         b.sector,
-        b.entry_cap,
-        b.is_subscribed,
+        s.entries_per_location,
+        (s.status IN ('Active', 'Trialing')) AS is_subscribed,
         u.full_name AS owner_name,
         u.email AS owner_email,
         s.status AS subscription_status,
@@ -44,7 +44,7 @@ export const getBusinessesWithStats = async (params: {
         SELECT business_id, COUNT(*) AS location_count FROM business_location GROUP BY business_id
       ) loc ON loc.business_id = b.id
       LEFT JOIN (
-        SELECT business_id, SUM(CASE WHEN UPPER(status) = 'ACTIVATED' THEN 1 ELSE 0 END) AS total_activated
+        SELECT business_id, SUM(CASE WHEN UPPER(status::text) = 'ACTIVATED' THEN 1 ELSE 0 END) AS total_activated
         FROM ticket GROUP BY business_id
       ) t ON t.business_id = b.id
       ${where}
@@ -85,23 +85,29 @@ export const createBusinessService = async (data: {
   location: string;
   latitude?: number;
   longitude?: number;
-  terms_text?: string;
 }) => {
   const pool = getPool();
-  const result = await pool.query(`
-    INSERT INTO business (user_id, name, sector, location, latitude, longitude, terms_text)
-    VALUES ($1, $2, $3, $4, $5, $6, $7)
-    RETURNING *
-  `, [
-    data.owner_user_id,
-    data.name,
-    data.sector,
-    data.location,
-    data.latitude ?? null,
-    data.longitude ?? null,
-    data.terms_text || 'Spend to get a ticket',
-  ]);
-  return result.rows[0];
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const bizResult = await client.query(
+      `INSERT INTO business (user_id, name, sector) VALUES ($1, $2, $3) RETURNING *`,
+      [data.owner_user_id, data.name, data.sector],
+    );
+    const business = bizResult.rows[0];
+    await client.query(
+      `INSERT INTO business_location (business_id, name, address, latitude, longitude, is_active)
+       VALUES ($1, $2, $3, $4, $5, true)`,
+      [business.id, data.name, data.location, data.latitude ?? null, data.longitude ?? null],
+    );
+    await client.query('COMMIT');
+    return business;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 };
 
 export const getAllDrawsService = async () => {
@@ -119,7 +125,7 @@ export const getAllDrawsService = async () => {
     LEFT JOIN (
       SELECT draw_id, COUNT(*) AS entry_count
       FROM ticket
-      WHERE UPPER(status) = 'ACTIVATED'
+      WHERE UPPER(status::text) = 'ACTIVATED'
       GROUP BY draw_id
     ) t ON t.draw_id = d.id
     ORDER BY d.draw_date DESC
@@ -221,7 +227,7 @@ export const createDrawService = async (data: {
       SELECT b.id AS business_id, COALESCE(s.fee_at_entry, 0) AS monthly_fee
       FROM business b
       JOIN subscription s ON s.business_id = b.id
-      WHERE b.is_subscribed = true AND s.status = 'Active'
+      WHERE s.status IN ('Active', 'Trialing')
     `);
 
     for (const sub of subsResult.rows) {
@@ -280,7 +286,6 @@ export const openDrawService = async (drawId: number): Promise<void> => {
     if (openCheck.rows.length > 0) throw new Error('A draw is already Open. Close it before opening another.');
 
     await client.query(`UPDATE draw SET status = 'Open', opened_at = NOW() WHERE id = $1`, [drawId]);
-    await client.query(`UPDATE business SET is_participating = true WHERE is_subscribed = true`);
     await client.query('COMMIT');
   } catch (err) {
     await client.query('ROLLBACK');
@@ -387,10 +392,10 @@ export const getAdminOverviewService = async () => {
 
   const [usersRes, bizRes, subRes, drawRes, ticketRes, flaggedRes] = await Promise.all([
     pool.query(`SELECT COUNT(*) AS total_users, SUM(CASE WHEN role='Business' THEN 1 ELSE 0 END) AS business_users, SUM(CASE WHEN role='User' THEN 1 ELSE 0 END) AS regular_users FROM "user" WHERE role != 'Admin'`),
-    pool.query(`SELECT COUNT(*) AS total, SUM(CASE WHEN is_subscribed=true THEN 1 ELSE 0 END) AS active FROM business`),
-    pool.query(`SELECT COUNT(*) AS active_subs, COALESCE(SUM(fee_at_entry), 0) AS total_fees FROM subscription WHERE UPPER(status) = 'ACTIVE'`),
-    pool.query(`SELECT id, name, prize_pool, draw_date FROM draw WHERE UPPER(status)='OPEN' ORDER BY draw_date ASC LIMIT 1`),
-    pool.query(`SELECT COUNT(*) AS total_tickets, SUM(CASE WHEN UPPER(status)='ACTIVATED' THEN 1 ELSE 0 END) AS activated FROM ticket WHERE draw_id=(SELECT id FROM draw WHERE UPPER(status)='OPEN' ORDER BY draw_date ASC LIMIT 1)`),
+    pool.query(`SELECT COUNT(DISTINCT b.id) AS total, COUNT(DISTINCT s.business_id) AS active FROM business b LEFT JOIN subscription s ON s.business_id = b.id AND s.status IN ('Active', 'Trialing')`),
+    pool.query(`SELECT COUNT(*) AS active_subs, COALESCE(SUM(fee_at_entry), 0) AS total_fees FROM subscription WHERE UPPER(status::text) = 'ACTIVE'`),
+    pool.query(`SELECT id, name, prize_pool, draw_date FROM draw WHERE UPPER(status::text)='OPEN' ORDER BY draw_date ASC LIMIT 1`),
+    pool.query(`SELECT COUNT(*) AS total_tickets, SUM(CASE WHEN UPPER(status::text)='ACTIVATED' THEN 1 ELSE 0 END) AS activated FROM ticket WHERE draw_id=(SELECT id FROM draw WHERE UPPER(status::text)='OPEN' ORDER BY draw_date ASC LIMIT 1)`),
     pool.query(`SELECT COUNT(*) AS flagged_users FROM "user" WHERE risk_score >= 20 AND role != 'Admin'`),
   ]);
 
@@ -427,8 +432,9 @@ export const getAllUsersService = async (params: {
     idx++;
   }
   if (role) {
+    const normalizedRole = role.charAt(0).toUpperCase() + role.slice(1).toLowerCase();
     conditions.push(`u.role = $${idx}`);
-    values.push(role);
+    values.push(normalizedRole);
     idx++;
   }
   if (riskLevel === 'high') {
@@ -445,13 +451,14 @@ export const getAllUsersService = async (params: {
     pool.query(
       `SELECT u.id, u.full_name, u.email, u.role, u.is_active, u.is_email_verified, u.created_at,
           u.risk_score, u.risk_last_flagged_at,
-          b.id AS business_id, b.name AS business_name, b.is_subscribed AS business_active,
+          b.id AS business_id, b.name AS business_name, (s2.status IN ('Active', 'Trialing')) AS business_active,
           (SELECT COUNT(*) FROM ticket t WHERE t.activated_by_user_id = u.id AND t.status = 'Activated'
-           AND t.draw_id = (SELECT id FROM draw WHERE UPPER(status)='OPEN' ORDER BY draw_date ASC LIMIT 1)
+           AND t.draw_id = (SELECT id FROM draw WHERE UPPER(status::text)='OPEN' ORDER BY draw_date ASC LIMIT 1)
           ) AS entry_count,
           (SELECT MAX(t2.activated_at) FROM ticket t2 WHERE t2.activated_by_user_id = u.id) AS last_active_at
        FROM "user" u
-       LEFT JOIN business b ON b.user_id = u.id
+       LEFT JOIN LATERAL (SELECT id, name FROM business WHERE user_id = u.id ORDER BY id LIMIT 1) b ON true
+       LEFT JOIN subscription s2 ON s2.business_id = b.id
        ${where}
        ORDER BY u.risk_score DESC, u.created_at DESC
        LIMIT $${idx} OFFSET $${idx + 1}`,
@@ -756,7 +763,7 @@ export const getEntryVolumeService = async (drawId?: number, businessId?: number
        DATE_TRUNC('day', activated_at)::date AS date,
        COUNT(*) AS count
      FROM ticket
-     WHERE UPPER(status) = 'ACTIVATED'
+     WHERE UPPER(status::text) = 'ACTIVATED'
        AND activated_at IS NOT NULL
        AND ($1::int IS NULL OR draw_id = $1)
        AND ($2::int IS NULL OR business_id = $2)
@@ -785,7 +792,7 @@ export const getCampaignComparisonService = async () => {
     FROM draw d
     LEFT JOIN (
       SELECT draw_id,
-        COUNT(*) FILTER (WHERE UPPER(status) = 'ACTIVATED') AS total_entries,
+        COUNT(*) FILTER (WHERE UPPER(status::text) = 'ACTIVATED') AS total_entries,
         COUNT(*) FILTER (WHERE is_quarantined = TRUE) AS quarantined
       FROM ticket GROUP BY draw_id
     ) t ON t.draw_id = d.id
@@ -837,7 +844,7 @@ export const getLocationBreakdownService = async (params: {
       `SELECT
          b.id AS business_id,
          b.name AS business_name,
-         b.entry_cap,
+         s_loc.entries_per_location AS entries_per_location,
          b.min_transaction_amount AS threshold,
          bl.id AS location_id,
          COALESCE(bl.name, 'Main Location') AS location_name,
@@ -858,10 +865,11 @@ export const getLocationBreakdownService = async (params: {
          ) AS pct_just_above_threshold
        FROM business b
        JOIN business_location bl ON bl.business_id = b.id AND bl.is_active = TRUE
+       LEFT JOIN subscription s_loc ON s_loc.business_id = b.id
        LEFT JOIN ticket t ON t.location_id = bl.id
        WHERE ($1::int IS NULL OR b.id = $1)
          AND ($2::text IS NULL OR b.name ILIKE '%' || $2 || '%' OR bl.name ILIKE '%' || $2 || '%')
-       GROUP BY b.id, b.name, b.entry_cap, b.min_transaction_amount, bl.id, bl.name, bl.address
+       GROUP BY b.id, b.name, s_loc.entries_per_location, b.min_transaction_amount, bl.id, bl.name, bl.address
        ORDER BY b.name, COALESCE(bl.name, 'Main Location')
        LIMIT $3 OFFSET $4`,
       [biz, q, limit, offset],
@@ -881,7 +889,7 @@ export const getLocationBreakdownService = async (params: {
     rows: rowsRes.rows.map((r) => ({
       business_id: r.business_id as number,
       business_name: r.business_name as string,
-      entry_cap: r.entry_cap ? parseInt(r.entry_cap) : null,
+      entries_per_location: r.entries_per_location ? parseInt(r.entries_per_location) : null,
       threshold: r.threshold ? parseFloat(r.threshold) : null,
       location_id: r.location_id as number,
       location_name: r.location_name as string,
@@ -899,6 +907,39 @@ export const getLocationBreakdownService = async (params: {
     limit,
     totalPages: Math.ceil(total / limit),
   };
+};
+
+export const addBusinessToDrawService = async (drawId: number, businessId: number): Promise<void> => {
+  const pool = getPool();
+  const drawCheck = await pool.query(`SELECT id, status FROM draw WHERE id = $1`, [drawId]);
+  if (!drawCheck.rows[0]) throw new Error('Draw not found');
+  const drawStatus = drawCheck.rows[0].status as string;
+  if (drawStatus !== 'Upcoming' && drawStatus !== 'Open') throw new Error('Can only add businesses to Upcoming or Open draws');
+
+  const subCheck = await pool.query(
+    `SELECT s.fee_at_entry FROM subscription s WHERE s.business_id = $1 AND s.status IN ('Active', 'Trialing') LIMIT 1`,
+    [businessId],
+  );
+  const feeAtEntry = subCheck.rows[0]?.fee_at_entry ?? 0;
+
+  await pool.query(
+    `INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, contribution_amount)
+     VALUES ($1, $2, $3, 0)
+     ON CONFLICT (draw_id, business_id) DO NOTHING`,
+    [drawId, businessId, feeAtEntry],
+  );
+};
+
+export const removeBusinessFromDrawService = async (drawId: number, businessId: number): Promise<void> => {
+  const pool = getPool();
+  const drawCheck = await pool.query(`SELECT id, status FROM draw WHERE id = $1`, [drawId]);
+  if (!drawCheck.rows[0]) throw new Error('Draw not found');
+  const drawStatus = drawCheck.rows[0].status as string;
+  if (drawStatus === 'Closed') throw new Error('Cannot remove businesses from a closed draw');
+  await pool.query(
+    `DELETE FROM draw_entry WHERE draw_id = $1 AND business_id = $2`,
+    [drawId, businessId],
+  );
 };
 
 export const getUserDetailService = async (userId: number) => {
@@ -919,9 +960,10 @@ export const getUserDetailService = async (userId: number) => {
         u.created_at,
         b.id AS business_id,
         b.name AS business_name,
-        b.is_subscribed AS business_active
+        (s3.status IN ('Active', 'Trialing')) AS business_active
       FROM "user" u
-      LEFT JOIN business b ON b.user_id = u.id
+      LEFT JOIN LATERAL (SELECT id, name FROM business WHERE user_id = u.id ORDER BY id LIMIT 1) b ON true
+      LEFT JOIN subscription s3 ON s3.business_id = b.id
       WHERE u.id = $1
     `, [userId]),
     pool.query(`
