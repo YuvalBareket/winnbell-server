@@ -1,0 +1,2 @@
+ALTER TABLE "user"
+  ADD COLUMN IF NOT EXISTS risk_last_decayed_at TIMESTAMP NULL;

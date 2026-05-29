@@ -8,7 +8,8 @@ export interface RiskEvaluation {
 }
 
 export interface DuplicateCheckResult {
-  isDuplicate: boolean;
+  isDuplicate: boolean;           // active (non-quarantined) match — hard blocks submission
+  isDuplicateQuarantined: boolean; // quarantined match — penalises but allows through
   matchedUserId?: number;
 }
 

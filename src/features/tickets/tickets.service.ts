@@ -7,7 +7,7 @@ import {
   ReceiptEntryInput,
 } from './tickets.types.js';
 
-const MAX_ENTRIES_PER_RECEIPT = 10;
+const MAX_ENTRIES_PER_RECEIPT = 3;
 import {
   evaluateUserRisk,
   updateUserRiskScore,
@@ -421,6 +421,7 @@ export const submitReceiptEntryService = async (
         (SELECT is_email_verified                FROM "user" WHERE id = $1)  AS is_email_verified,
         (SELECT risk_score                       FROM "user" WHERE id = $1)  AS risk_score,
         (SELECT risk_last_flagged_at             FROM "user" WHERE id = $1)  AS risk_last_flagged_at,
+        (SELECT risk_last_decayed_at             FROM "user" WHERE id = $1)  AS risk_last_decayed_at,
         (SELECT business_id                      FROM biz)                   AS business_id,
         (SELECT business_name                    FROM biz)                   AS business_name,
         (SELECT min_transaction_amount           FROM biz)                   AS min_transaction_amount,
@@ -553,12 +554,14 @@ export const submitReceiptEntryService = async (
     const preFetchedRisk: PreFetchedUserRisk = {
       storedScore: Number(pf.risk_score ?? 0),
       lastFlaggedAt: pf.risk_last_flagged_at ? new Date(pf.risk_last_flagged_at) : null,
+      lastDecayedAt: pf.risk_last_decayed_at ? new Date(pf.risk_last_decayed_at) : null,
     };
     const riskEval = await evaluateUserRisk(userId, {
       businessId: business_id,
       receiptIdentifier: input.receiptIdentifier,
       transactionAmount: input.transactionAmount,
       isDuplicateCrossUser: dupCheck.isDuplicate,
+      isDuplicateQuarantinedCrossUser: dupCheck.isDuplicateQuarantined,
       typingDurationMs: input.typingDurationMs,
       receiptInputMethod: input.receiptInputMethod,
     }, preFetchedRisk);

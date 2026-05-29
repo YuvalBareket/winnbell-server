@@ -20,8 +20,10 @@ export interface RiskContext {
   businessId: number;
   receiptIdentifier: string;
   transactionAmount: number;
-  /** Pre-computed cross-user duplicate result to avoid a redundant query. */
+  /** Active (non-quarantined) cross-user duplicate — triggers scaled penalty. */
   isDuplicateCrossUser?: boolean;
+  /** Quarantined cross-user duplicate — triggers scaled penalty but allows submission through. */
+  isDuplicateQuarantinedCrossUser?: boolean;
   typingDurationMs?: number;
   receiptInputMethod?: 'typed' | 'pasted';
 }
@@ -30,6 +32,7 @@ export interface RiskContext {
 export interface PreFetchedUserRisk {
   storedScore: number;
   lastFlaggedAt: Date | null;
+  lastDecayedAt: Date | null;
 }
 
 // ─── Core Functions ───────────────────────────────────────────────────────────
@@ -61,16 +64,37 @@ export const evaluateUserRisk = async (
   let storedScore: number;
   let lastFlaggedAt: Date | null;
 
+  let lastDecayedAt: Date | null;
+
   if (preFetched) {
     storedScore = preFetched.storedScore;
     lastFlaggedAt = preFetched.lastFlaggedAt;
+    lastDecayedAt = preFetched.lastDecayedAt;
   } else {
     const userResult = await pool.query(
-      `SELECT risk_score, risk_last_flagged_at FROM "user" WHERE id = $1`,
+      `SELECT risk_score, risk_last_flagged_at, risk_last_decayed_at FROM "user" WHERE id = $1`,
       [userId],
     );
     storedScore = Number(userResult.rows[0]?.risk_score ?? 0);
     lastFlaggedAt = userResult.rows[0]?.risk_last_flagged_at ?? null;
+    lastDecayedAt = userResult.rows[0]?.risk_last_decayed_at ?? null;
+  }
+
+  // Weekly passive decay: if 7+ days since last flag OR last decay, drop score by 1.
+  // Fires at most once per 7-day window regardless of how many submissions occur.
+  if (storedScore > 0) {
+    const lastActivityMs = Math.max(
+      lastFlaggedAt?.getTime() ?? 0,
+      lastDecayedAt?.getTime() ?? 0,
+    );
+    const daysSince = lastActivityMs === 0 ? Infinity : (Date.now() - lastActivityMs) / 86_400_000;
+    if (daysSince >= 7) {
+      await pool.query(
+        `UPDATE "user" SET risk_score = GREATEST(0, risk_score - 1), risk_last_decayed_at = NOW() WHERE id = $1`,
+        [userId],
+      );
+      storedScore = Math.max(0, storedScore - 1);
+    }
   }
 
   let delta = 0;
@@ -88,6 +112,20 @@ export const evaluateUserRisk = async (
       else multiplier = 1;
       delta += Math.round(base * multiplier);
       flags.push('duplicate_identifier_cross_user');
+    }
+
+    // Signal 1b: quarantined cross-user duplicate — same scaling, submission still allowed.
+    // Catches the two-account laundering pattern: Account A gets quarantined, Account B
+    // submits the same receipt. The entry goes through but the suspicion is recorded.
+    if (context.isDuplicateQuarantinedCrossUser) {
+      const base = 2;
+      let multiplier: number;
+      if (storedScore >= 20) multiplier = 2;
+      else if (storedScore >= 10) multiplier = 1.5;
+      else if (storedScore <= 4) multiplier = 0.5;
+      else multiplier = 1;
+      delta += Math.round(base * multiplier);
+      flags.push('quarantined_receipt_reuse');
     }
 
     // Merged signal query: 6 independent ticket reads → 1 round trip
@@ -251,13 +289,28 @@ export const updateUserRiskScore = async (
   client?: PoolClient,
   flags?: string[],
 ): Promise<void> => {
-  if (delta === 0) return;
   const db = client ?? getPool();
+
+  if (delta === 0) {
+    // Clean entry: increment streak counter, subtract 1 point every 6 clean submissions.
+    await db.query(
+      `UPDATE "user" SET
+         risk_clean_entries = risk_clean_entries + 1,
+         risk_score = GREATEST(0, risk_score -
+           CASE WHEN (risk_clean_entries + 1) % 6 = 0 THEN 1 ELSE 0 END
+         )
+       WHERE id = $1`,
+      [userId],
+    );
+    return;
+  }
+
   if (delta > 0 && flags && flags.length > 0) {
     await db.query(
       `UPDATE "user" SET
          risk_score           = GREATEST(0, risk_score + $1),
          risk_last_flagged_at = NOW(),
+         risk_clean_entries   = 0,
          risk_flags           = ARRAY(SELECT DISTINCT unnest(COALESCE(risk_flags, '{}') || $3::text[]))
        WHERE id = $2`,
       [delta, userId, flags],
@@ -265,7 +318,8 @@ export const updateUserRiskScore = async (
   } else {
     await db.query(
       `UPDATE "user" SET
-         risk_score           = GREATEST(0, risk_score + $1)
+         risk_score           = GREATEST(0, risk_score + $1),
+         risk_clean_entries   = 0
        WHERE id = $2`,
       [delta, userId],
     );
@@ -283,16 +337,20 @@ export const checkDuplicateReceiptIdentifier = async (
 ): Promise<DuplicateCheckResult> => {
   const db = client ?? getPool();
   const result = await db.query(
-    `SELECT activated_by_user_id FROM ticket
-     WHERE business_id = $1 AND receipt_identifier = $2 AND activated_by_user_id != $3
-       AND is_quarantined = FALSE
-     LIMIT 1`,
+    `SELECT
+       MAX(CASE WHEN is_quarantined = FALSE THEN activated_by_user_id END) AS active_user_id,
+       BOOL_OR(is_quarantined = FALSE)                                      AS has_active,
+       BOOL_OR(is_quarantined = TRUE)                                       AS has_quarantined
+     FROM ticket
+     WHERE business_id = $1 AND receipt_identifier = $2 AND activated_by_user_id != $3`,
     [businessId, receiptIdentifier, submittingUserId],
   );
-  if (result.rows.length > 0) {
-    return { isDuplicate: true, matchedUserId: result.rows[0].activated_by_user_id };
-  }
-  return { isDuplicate: false };
+  const row = result.rows[0];
+  return {
+    isDuplicate:            row.has_active      ?? false,
+    isDuplicateQuarantined: !row.has_active && (row.has_quarantined ?? false),
+    matchedUserId:          row.active_user_id ?? undefined,
+  };
 };
 
 /**
