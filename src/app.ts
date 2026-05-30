@@ -10,6 +10,7 @@ import drawsRoutes from './features/draws/draws.routes.js';
 import * as drawsController from './features/draws/draws.controller.js';
 import stripeWebhookRoutes from './features/stripe/stripe.routes.js';
 import notificationRoutes from './features/notifications/notifications.routes.js';
+import phoneRouter from './features/phone/phone.routes.js';
 import { Router } from 'express';
 import {
   getNearby,
@@ -114,5 +115,6 @@ app.use('/tickets', redeemLimiter, ticketsRoutes);
 app.use('/draws', drawsRoutes);
 app.use('/business', businessRoutes);
 app.use('/notifications', notificationRoutes);
+app.use('/api/phone', phoneRouter);
 
 export default app;

@@ -122,7 +122,12 @@ export const submitReceiptEntry = async (req: AuthRequest, res: Response) => {
       entryCount: result.entryCount,
     });
   } catch (error: unknown) {
-    res.status(400).json({ message: error instanceof Error ? error.message : 'Entry submission failed.' });
+    const msg = error instanceof Error ? error.message : 'Entry submission failed.';
+    if (msg === 'PHONE_NOT_VERIFIED') {
+      res.status(403).json({ message: 'PHONE_NOT_VERIFIED' });
+      return;
+    }
+    res.status(400).json({ message: msg });
   }
 };
 

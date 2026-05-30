@@ -264,9 +264,9 @@ export const activateFreeTicket = async (userId: number, claimIp?: string): Prom
     // no prior usage exists), which is equivalent to the original behaviour.
     // Also loads account age and email-verification status in the same round-trip.
     const eligibilityResult = await client.query(`
-      SELECT u.activated_at, usr.is_email_verified, usr.created_at AS account_created_at
+      SELECT u.activated_at, usr.is_email_verified, usr.is_phone_verified, usr.created_at AS account_created_at
       FROM (SELECT pg_advisory_xact_lock($1)) AS _lock
-      CROSS JOIN (SELECT is_email_verified, created_at FROM "user" WHERE id = $1) AS usr
+      CROSS JOIN (SELECT is_email_verified, is_phone_verified, created_at FROM "user" WHERE id = $1) AS usr
       LEFT JOIN LATERAL (
         SELECT activated_at FROM free_ticket_usage WHERE user_id = $1 AND status = 'approved'
         ORDER BY activated_at DESC LIMIT 1
@@ -283,6 +283,16 @@ export const activateFreeTicket = async (userId: number, claimIp?: string): Prom
       );
       await client.query('COMMIT');
       throw new Error('Please verify your email address before claiming a free entry.');
+    }
+
+    // Guard 1b: phone must be verified (ties free entry to a real person)
+    if (lastUsage && !lastUsage.is_phone_verified && process.env.PHONE_VERIFY_ENABLED === 'true') {
+      await client.query(
+        `INSERT INTO free_ticket_usage (user_id, status, rejection_reason, entries_created) VALUES ($1, 'rejected', 'phone_not_verified', 0)`,
+        [userId]
+      );
+      await client.query('COMMIT');
+      throw new Error('PHONE_NOT_VERIFIED');
     }
 
     // Guard 2: weekly usage check (1 free entry per user per week)
@@ -302,23 +312,6 @@ export const activateFreeTicket = async (userId: number, claimIp?: string): Prom
       }
     }
 
-    // Guard 4: IP-based cap — max 3 distinct users per IP per week (allows households, blocks bot farms)
-    if (claimIp) {
-      const ipCapResult = await client.query(
-        `SELECT COUNT(DISTINCT user_id) AS cnt FROM free_ticket_usage
-         WHERE claim_ip = $1 AND status = 'approved'
-           AND activated_at >= date_trunc('week', NOW())`,
-        [claimIp],
-      );
-      if (parseInt(ipCapResult.rows[0].cnt, 10) >= 3) {
-        await client.query(
-          `INSERT INTO free_ticket_usage (user_id, claim_ip, status, rejection_reason, entries_created) VALUES ($1, $2, 'rejected', 'ip_free_entry_limit', 0)`,
-          [userId, claimIp]
-        );
-        await client.query('COMMIT');
-        throw new Error('Free entry limit reached for your network this week.');
-      }
-    }
 
     const drawResult = await client.query(`
       SELECT id FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1
@@ -419,6 +412,7 @@ export const submitReceiptEntryService = async (
         )
       SELECT
         (SELECT is_email_verified                FROM "user" WHERE id = $1)  AS is_email_verified,
+        (SELECT is_phone_verified                FROM "user" WHERE id = $1)  AS is_phone_verified,
         (SELECT risk_score                       FROM "user" WHERE id = $1)  AS risk_score,
         (SELECT risk_last_flagged_at             FROM "user" WHERE id = $1)  AS risk_last_flagged_at,
         (SELECT risk_last_decayed_at             FROM "user" WHERE id = $1)  AS risk_last_decayed_at,
@@ -454,6 +448,9 @@ export const submitReceiptEntryService = async (
 
     if (!pf.is_email_verified) {
       throw new Error('Please verify your email address before submitting entries.');
+    }
+    if (!pf.is_phone_verified && process.env.PHONE_VERIFY_ENABLED === 'true') {
+      throw new Error('PHONE_NOT_VERIFIED');
     }
     if (!pf.business_id) {
       throw new Error('This business is not participating in the current campaign. Try a different location or check back next month.');

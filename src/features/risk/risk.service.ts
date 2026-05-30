@@ -132,7 +132,7 @@ export const evaluateUserRisk = async (
     const signalRes = await pool.query(
       `WITH
         v24h AS (
-          SELECT COUNT(*)::int AS cnt, COUNT(DISTINCT business_id)::int AS distinct_biz
+          SELECT COUNT(*)::int AS cnt
           FROM ticket
           WHERE activated_by_user_id = $1 AND entry_source = 'receipt'
             AND receipt_identifier IS NOT NULL
@@ -165,6 +165,15 @@ export const evaluateUserRisk = async (
             ORDER BY activated_at DESC LIMIT 5
           ) sub
         ),
+        seq24h AS (
+          SELECT COALESCE(json_agg(ri ORDER BY ts DESC), '[]'::json) AS ids
+          FROM (
+            SELECT receipt_identifier AS ri, activated_at AS ts FROM ticket
+            WHERE activated_by_user_id = $1 AND business_id = $2
+              AND activated_at >= NOW() - INTERVAL '24 hours'
+            ORDER BY activated_at DESC LIMIT 20
+          ) sub
+        ),
         probe AS (
           SELECT COUNT(*)::int AS cnt FROM ticket
           WHERE activated_by_user_id = $1 AND business_id = $2
@@ -177,11 +186,11 @@ export const evaluateUserRisk = async (
         )
       SELECT
         (SELECT cnt          FROM v24h)    AS v24h_count,
-        (SELECT distinct_biz FROM v24h)    AS v24h_distinct,
         (SELECT cnt          FROM v7d)     AS v7d_count,
         (SELECT cnt          FROM v30d)    AS v30d_count,
         (SELECT cnt          FROM rapid)   AS rapid_count,
         (SELECT ids          FROM seq)     AS seq_ids,
+        (SELECT ids          FROM seq24h)  AS seq24h_ids,
         (SELECT cnt          FROM probe)   AS probe_count,
         (SELECT avg_amount   FROM outlier) AS avg_amount`,
       [userId, businessId, receiptIdentifier, transactionAmount],
@@ -189,16 +198,17 @@ export const evaluateUserRisk = async (
 
     const sr = signalRes.rows[0];
     const recentCount  = Number(sr.v24h_count);
-    const distinctBiz  = Number(sr.v24h_distinct);
     const weeklyCount  = Number(sr.v7d_count);
     const monthlyCount = Number(sr.v30d_count);
     const rapidCount   = Number(sr.rapid_count);
-    const seqIds: (string | null)[] = Array.isArray(sr.seq_ids) ? sr.seq_ids : [];
+    const seqIds: (string | null)[]    = Array.isArray(sr.seq_ids)    ? sr.seq_ids    : [];
+    const seq24hIds: (string | null)[] = Array.isArray(sr.seq24h_ids) ? sr.seq24h_ids : [];
     const probeCount   = Number(sr.probe_count);
     const avgAmount    = sr.avg_amount != null ? parseFloat(sr.avg_amount) : null;
 
-    // Signal 2: submission velocity (last 24 hours)
-    const adjustedCount = distinctBiz >= 3 ? Math.floor(recentCount / 2) : recentCount;
+    // Signal 2: submission velocity (last 24 hours) — raw count, no business buffer.
+    // Daily hard cap is 5, so dampening by distinct businesses would neutralise the signal entirely.
+    const adjustedCount = recentCount;
     if (adjustedCount >= 4) {
       delta += 4;
       flags.push('high_submission_velocity');
@@ -241,6 +251,28 @@ export const evaluateUserRisk = async (
         if (closeCount >= 3) {
           delta += 4;
           flags.push('sequential_guessing');
+        }
+      }
+    }
+
+    // Signal: slow sequential guessing — same business, 24-hour window.
+    // Catches patient attackers probing one identifier per hour (invisible to the 10-min check).
+    // Higher threshold (4) and wider range (±10) vs the rapid check to reduce false positives.
+    if (seq24hIds.length >= 3 && !flags.includes('sequential_guessing')) {
+      const trailingNum = (s: string | null | undefined): number | null => {
+        if (!s) return null;
+        const m = s.match(/(\d+)$/);
+        return m ? parseInt(m[1], 10) : null;
+      };
+      const currentNum = trailingNum(receiptIdentifier);
+      if (currentNum !== null) {
+        const closeCount = seq24hIds.filter((ri) => {
+          const n = trailingNum(ri);
+          return n !== null && Math.abs(n - currentNum) <= 10 && n !== currentNum;
+        }).length;
+        if (closeCount >= 4) {
+          delta += 2;
+          flags.push('slow_sequential_guessing');
         }
       }
     }
