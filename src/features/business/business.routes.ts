@@ -22,7 +22,7 @@ import {
 } from './business.controller.js';
 import { getStats } from './stats.controller.js';
 import { getActivity, qualifyTicket } from './activity.controller.js';
-import { createCheckout, verifySession, getSubscription, cancelSub, resumeSub, getFoundingAvailability } from '../stripe/stripe.controller.js';
+import { createCheckout, verifySession, getSubscription, cancelSub, resumeSub, getFoundingAvailability, updatePlan } from '../stripe/stripe.controller.js';
 
 const router = Router();
 
@@ -56,5 +56,6 @@ router.post('/subscription/verify-session', requireRole('Business'), verifySessi
 router.get('/subscription', requireRole('Business'), getSubscription);
 router.post('/subscription/cancel', requireRole('Business'), cancelSub);
 router.post('/subscription/resume', requireRole('Business'), resumeSub);
+router.put('/subscription/plan', requireRole('Business'), updatePlan);
 
 export default router;

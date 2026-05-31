@@ -248,23 +248,42 @@ export const createDrawService = async (data: {
   }
 };
 
-export const getDrawBusinessesService = async (drawId: number) => {
+export const getDrawBusinessesService = async (
+  drawId: number,
+  page = 1,
+  limit = 25,
+  search = '',
+  sector = '',
+) => {
   const pool = getPool();
-  const result = await pool.query(`
-    SELECT
-      b.id,
-      b.name,
-      b.sector,
-      b.logo_url,
-      de.fee_at_entry,
-      de.contribution_amount,
-      de.created_at AS joined_at
-    FROM draw_entry de
-    JOIN business b ON b.id = de.business_id
-    WHERE de.draw_id = $1
-    ORDER BY b.name ASC
-  `, [drawId]);
-  return result.rows;
+  const offset = (page - 1) * limit;
+
+  const params: (string | number)[] = [drawId];
+  const filters: string[] = [];
+
+  if (search) filters.push(`LOWER(b.name) LIKE LOWER($${params.push('%' + search + '%')})`);
+  if (sector) filters.push(`b.sector = $${params.push(sector)}`);
+
+  const whereExtra = filters.length ? `AND ${filters.join(' AND ')}` : '';
+
+  const [rows, count] = await Promise.all([
+    pool.query(`
+      SELECT
+        b.id, b.name, b.sector, b.logo_url,
+        de.fee_at_entry, de.contribution_amount, de.created_at AS joined_at
+      FROM draw_entry de
+      JOIN business b ON b.id = de.business_id
+      WHERE de.draw_id = $1 ${whereExtra}
+      ORDER BY b.name ASC
+      LIMIT $${params.push(limit)} OFFSET $${params.push(offset)}
+    `, params),
+    pool.query(
+      `SELECT COUNT(*)::int AS total FROM draw_entry de JOIN business b ON b.id = de.business_id WHERE de.draw_id = $1 ${whereExtra}`,
+      params.slice(0, params.length - 2),
+    ),
+  ]);
+
+  return { rows: rows.rows, total: count.rows[0].total };
 };
 
 export const openDrawService = async (drawId: number): Promise<void> => {
@@ -646,13 +665,20 @@ export const getAdminAnalyticsService = async (businessId?: number, drawId?: num
        WHERE ($1::int IS NULL OR draw_id = $1)`,
       [draw],
     ),
-    // Fraud is always platform-wide
     pool.query(
       `SELECT
-         SUM(CASE WHEN risk_score >= 20 THEN 1 ELSE 0 END) AS high_risk,
-         SUM(CASE WHEN risk_score >= 10 AND risk_score < 20 THEN 1 ELSE 0 END) AS medium_risk,
-         SUM(CASE WHEN risk_score < 10 THEN 1 ELSE 0 END) AS low_risk
-       FROM "user" WHERE role = 'User'`,
+         SUM(CASE WHEN u.risk_score >= 20 THEN 1 ELSE 0 END) AS high_risk,
+         SUM(CASE WHEN u.risk_score >= 10 AND u.risk_score < 20 THEN 1 ELSE 0 END) AS medium_risk,
+         SUM(CASE WHEN u.risk_score < 10 THEN 1 ELSE 0 END) AS low_risk
+       FROM "user" u
+       WHERE u.role = 'User'
+         AND ($1::int IS NULL OR EXISTS (
+           SELECT 1 FROM ticket t WHERE t.activated_by_user_id = u.id AND t.business_id = $1
+         ))
+         AND ($2::int IS NULL OR EXISTS (
+           SELECT 1 FROM ticket t WHERE t.activated_by_user_id = u.id AND t.draw_id = $2
+         ))`,
+      [biz, draw],
     ),
     pool.query(
       `SELECT
@@ -692,13 +718,20 @@ export const getAdminAnalyticsService = async (businessId?: number, drawId?: num
        ) sub`,
       [biz, draw],
     ),
-    // User growth is always platform-wide
     pool.query(
       `SELECT
-         SUM(CASE WHEN created_at >= DATE_TRUNC('week', NOW()) THEN 1 ELSE 0 END) AS new_this_week,
-         SUM(CASE WHEN created_at >= DATE_TRUNC('month', NOW()) THEN 1 ELSE 0 END) AS new_this_month,
+         SUM(CASE WHEN u.created_at >= DATE_TRUNC('week', NOW()) THEN 1 ELSE 0 END) AS new_this_week,
+         SUM(CASE WHEN u.created_at >= DATE_TRUNC('month', NOW()) THEN 1 ELSE 0 END) AS new_this_month,
          COUNT(*) AS total
-       FROM "user" WHERE role != 'Admin'`,
+       FROM "user" u
+       WHERE u.role != 'Admin'
+         AND ($1::int IS NULL OR EXISTS (
+           SELECT 1 FROM ticket t WHERE t.activated_by_user_id = u.id AND t.business_id = $1
+         ))
+         AND ($2::int IS NULL OR EXISTS (
+           SELECT 1 FROM ticket t WHERE t.activated_by_user_id = u.id AND t.draw_id = $2
+         ))`,
+      [biz, draw],
     ),
   ]);
 
@@ -945,7 +978,7 @@ export const removeBusinessFromDrawService = async (drawId: number, businessId: 
 export const getBusinessDetailService = async (businessId: number) => {
   const pool = getPool();
 
-  const [bizRes, locationsRes, entriesRes] = await Promise.all([
+  const [bizRes, locationsRes, campaignRes] = await Promise.all([
     pool.query(`
       SELECT
         b.id,
@@ -998,54 +1031,73 @@ export const getBusinessDetailService = async (businessId: number) => {
 
     pool.query(`
       SELECT
-        t.id,
-        t.code,
-        t.status,
-        t.entry_source,
-        t.activated_at,
-        t.is_quarantined,
-        t.quarantine_reason,
-        t.risk_flags,
-        t.receipt_image_url,
-        t.image_validation_status,
-        t.risk_score_delta,
-        t.transaction_amount,
-        d.name AS draw_name,
         d.id AS draw_id,
-        u.full_name AS user_name,
-        u.email AS user_email,
-        u.id AS user_id,
-        bl.name AS location_name
+        COALESCE(d.name, 'Unknown') AS draw_name,
+        COUNT(*)::int AS count,
+        COUNT(*) FILTER (WHERE t.is_quarantined)::int AS quarantined
       FROM ticket t
       LEFT JOIN draw d ON d.id = t.draw_id
-      LEFT JOIN "user" u ON u.id = t.activated_by_user_id
-      LEFT JOIN business_location bl ON bl.id = t.location_id
       WHERE t.business_id = $1
-      ORDER BY t.activated_at DESC NULLS LAST
-      LIMIT 200
+      GROUP BY d.id, d.name
+      ORDER BY d.id DESC NULLS LAST
     `, [businessId]),
   ]);
 
   if (!bizRes.rows[0]) return null;
 
-  // Group entries by campaign
-  const byCampaign = new Map<string, { draw_id: number; draw_name: string; count: number; quarantined: number }>();
-  for (const e of entriesRes.rows) {
-    const key = String(e.draw_id ?? 'none');
-    if (!byCampaign.has(key)) {
-      byCampaign.set(key, { draw_id: e.draw_id, draw_name: e.draw_name ?? 'Unknown', count: 0, quarantined: 0 });
-    }
-    const c = byCampaign.get(key)!;
-    c.count++;
-    if (e.is_quarantined) c.quarantined++;
-  }
+  const campaignSummary = campaignRes.rows.map((r: any) => ({
+    draw_id: r.draw_id,
+    draw_name: r.draw_name,
+    count: r.count,
+    quarantined: r.quarantined,
+  }));
 
   return {
     business: bizRes.rows[0],
     locations: locationsRes.rows,
-    entries: entriesRes.rows,
-    campaignSummary: Array.from(byCampaign.values()).sort((a, b) => b.draw_id - a.draw_id),
+    campaignSummary,
   };
+};
+
+export const getBusinessEntriesService = async (
+  businessId: number,
+  drawId: number | null,
+  page: number,
+  limit: number,
+) => {
+  const pool = getPool();
+  const offset = (page - 1) * limit;
+  const params: (number)[] = [businessId, limit, offset];
+  const drawClause = drawId ? `AND t.draw_id = $${params.push(drawId)}` : '';
+
+  const countParams: (number)[] = [businessId];
+  const countDrawClause = drawId ? `AND draw_id = $${countParams.push(drawId)}` : '';
+
+  const [rowsRes, countRes] = await Promise.all([
+    pool.query(`
+      SELECT
+        t.id, t.code, t.status, t.entry_source, t.activated_at,
+        t.is_quarantined, t.quarantine_reason, t.risk_flags,
+        t.receipt_image_url, t.image_validation_status,
+        t.risk_score_delta, t.transaction_amount,
+        d.name AS draw_name, d.id AS draw_id,
+        u.full_name AS user_name, u.email AS user_email, u.id AS user_id,
+        bl.name AS location_name
+      FROM ticket t
+      LEFT JOIN draw d ON d.id = t.draw_id
+      LEFT JOIN "user" u ON u.id = t.activated_by_user_id
+      LEFT JOIN business_location bl ON bl.id = t.location_id
+      WHERE t.business_id = $1 ${drawClause}
+      ORDER BY t.activated_at DESC NULLS LAST
+      LIMIT $2 OFFSET $3
+    `, params),
+    pool.query(
+      `SELECT COUNT(*)::int AS total FROM ticket WHERE business_id = $1 ${countDrawClause}`,
+      countParams,
+    ),
+  ]);
+
+  return { rows: rowsRes.rows, total: countRes.rows[0].total };
 };
 
 export const adminImageDecisionService = async (

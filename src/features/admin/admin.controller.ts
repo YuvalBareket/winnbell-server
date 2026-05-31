@@ -32,6 +32,7 @@ import {
   addBusinessToDrawService,
   removeBusinessFromDrawService,
   getBusinessDetailService,
+  getBusinessEntriesService,
   adminImageDecisionService,
 } from './admin.service.js';
 
@@ -207,9 +208,13 @@ export const toggleUserActive = async (req: Request, res: Response) => {
 
 export const getDrawBusinesses = async (req: Request, res: Response) => {
   const drawId = parseInt(req.params.drawId as string, 10);
+  const page = parseInt((req.query.page as string) ?? '1', 10);
+  const limit = parseInt((req.query.limit as string) ?? '25', 10);
+  const search = (req.query.search as string) ?? '';
+  const sector = (req.query.sector as string) ?? '';
   try {
-    const businesses = await getDrawBusinessesService(drawId);
-    res.json(businesses);
+    const result = await getDrawBusinessesService(drawId, page, limit, search, sector);
+    res.json(result);
   } catch (error) {
     res.status(500).json({ message: 'Failed to fetch campaign businesses' });
   }
@@ -383,6 +388,19 @@ export const getBusinessDetail = async (req: Request, res: Response) => {
   } catch (error) {
     console.error('[admin.getBusinessDetail]', error);
     res.status(500).json({ message: 'Failed to fetch business detail' });
+  }
+};
+
+export const getBusinessEntries = async (req: Request, res: Response) => {
+  const businessId = parseInt(req.params.businessId as string, 10);
+  const drawId = req.query.drawId ? parseInt(req.query.drawId as string, 10) : null;
+  const page = parseInt((req.query.page as string) ?? '1', 10);
+  const limit = parseInt((req.query.limit as string) ?? '50', 10);
+  try {
+    const result = await getBusinessEntriesService(businessId, drawId, page, limit);
+    res.json(result);
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to fetch business entries' });
   }
 };
 

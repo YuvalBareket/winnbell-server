@@ -10,6 +10,7 @@ import {
   resumeSubscription,
   getBusinessForCheckout,
   TIER_PRICE_MAP,
+  updateSubscriptionPlan,
 } from './stripe.service.js';
 
 // GET /business/subscription/founding-availability  (public — no auth)
@@ -125,6 +126,25 @@ export const resumeSub = async (req: Request, res: Response) => {
   } catch (err: unknown) {
     console.error('[stripe.resumeSub]', err);
     res.status(400).json({ error: err instanceof Error ? err.message : 'Could not resume subscription. Please try again.' });
+  }
+};
+
+// PUT /business/subscription/plan
+// Body: { entries_per_location: number }
+export const updatePlan = async (req: Request, res: Response) => {
+  const userId = (req as any).user?.id;
+  if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return; }
+  const { entries_per_location } = req.body as { entries_per_location: number };
+  if (!entries_per_location || !Number.isInteger(entries_per_location) || entries_per_location < 1) {
+    res.status(400).json({ error: 'entries_per_location must be a positive integer' });
+    return;
+  }
+  try {
+    await updateSubscriptionPlan(userId, entries_per_location);
+    res.json({ success: true });
+  } catch (err: any) {
+    console.error('[stripe.updatePlan]', err);
+    res.status(400).json({ error: err.message ?? 'Failed to update plan' });
   }
 };
 

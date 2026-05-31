@@ -760,6 +760,110 @@ async function handleYearlyDrawParticipation(pool: Pool, businessId: number, mon
   }
 }
 
+// ─── Sync Subscription Quantity ───────────────────────────────────────────────
+// Called after adding/removing a location to keep Stripe quantity in sync.
+// Skips silently for founding members (no stripe_subscription_id).
+export const syncSubscriptionQuantity = async (userId: number, newLocationCount: number): Promise<void> => {
+  const pool = getPool();
+
+  const result = await pool.query(`
+    SELECT
+      s.stripe_subscription_id,
+      s.billing_interval,
+      s.entries_per_location,
+      b.id AS business_id
+    FROM business b
+    JOIN subscription s ON s.business_id = b.id
+    WHERE b.user_id = $1
+  `, [userId]);
+
+  const sub = result.rows[0];
+  if (!sub) throw new Error('No subscription found');
+  if (!sub.stripe_subscription_id) return; // founding member, no Stripe sub — skip
+
+  const interval = sub.billing_interval as 'monthly' | 'yearly';
+  const tierConfig = TIER_PRICE_MAP[sub.entries_per_location as number];
+  if (!tierConfig) throw new Error('Unknown tier');
+
+  const envKey = tierConfig[interval].envKey;
+  const priceId = process.env[envKey];
+  if (!priceId) throw new Error(`Stripe price ID not configured for tier ${sub.entries_per_location} (${interval})`);
+
+  const quantity = Math.max(1, newLocationCount);
+  const newFeePerLocation = tierConfig[interval].pricePerLocation;
+
+  const stripeSub = await stripe.subscriptions.retrieve(sub.stripe_subscription_id, { expand: ['items'] });
+  const itemId = stripeSub.items.data[0]?.id;
+  if (!itemId) throw new Error('Stripe subscription item not found');
+
+  await stripe.subscriptions.update(sub.stripe_subscription_id, {
+    items: [{ id: itemId, price: priceId, quantity }],
+    proration_behavior: 'create_prorations',
+  });
+
+  await pool.query(
+    `UPDATE subscription SET fee_at_entry = $1, updated_at = NOW() WHERE business_id = $2`,
+    [newFeePerLocation, sub.business_id],
+  );
+};
+
+// ─── Update Subscription Plan ─────────────────────────────────────────────────
+
+export const updateSubscriptionPlan = async (userId: number, newEntriesPerLocation: number): Promise<void> => {
+  const pool = getPool();
+
+  // Validate tier exists
+  const tierConfig = TIER_PRICE_MAP[newEntriesPerLocation];
+  if (!tierConfig) throw new Error('Invalid tier');
+
+  // Get current subscription + business + location count
+  const result = await pool.query(`
+    SELECT
+      s.stripe_subscription_id,
+      s.billing_interval,
+      s.entries_per_location AS current_entries_per_location,
+      s.status,
+      b.id AS business_id,
+      (SELECT COUNT(*)::int FROM business_location WHERE business_id = b.id AND is_active = TRUE) AS location_count
+    FROM business b
+    JOIN subscription s ON s.business_id = b.id
+    WHERE b.user_id = $1
+  `, [userId]);
+
+  const sub = result.rows[0];
+  if (!sub) throw new Error('No subscription found');
+  if (sub.status === 'Cancelled') throw new Error('Cannot update a cancelled subscription');
+  if (!sub.stripe_subscription_id) throw new Error('No Stripe subscription on record');
+  if (sub.current_entries_per_location === newEntriesPerLocation) throw new Error('Already on this tier');
+
+  const interval = sub.billing_interval as 'monthly' | 'yearly';
+  const envKey = tierConfig[interval].envKey;
+  const priceId = process.env[envKey];
+  if (!priceId) throw new Error(`Stripe price ID not configured for tier ${newEntriesPerLocation} (${interval})`);
+
+  const locationCount = Math.max(1, Number(sub.location_count));
+  const newFeePerLocation = tierConfig[interval].pricePerLocation;
+
+  // Fetch current Stripe subscription to get the item ID
+  const stripeSub = await stripe.subscriptions.retrieve(sub.stripe_subscription_id, { expand: ['items'] });
+  const itemId = stripeSub.items.data[0]?.id;
+  if (!itemId) throw new Error('Stripe subscription item not found');
+
+  // Update Stripe subscription — Stripe handles proration automatically
+  await stripe.subscriptions.update(sub.stripe_subscription_id, {
+    items: [{ id: itemId, price: priceId, quantity: locationCount }],
+    proration_behavior: 'create_prorations',
+  });
+
+  // Update DB
+  await pool.query(
+    `UPDATE subscription
+     SET entries_per_location = $1, fee_at_entry = $2, updated_at = NOW()
+     WHERE business_id = $3`,
+    [newEntriesPerLocation, newFeePerLocation, sub.business_id],
+  );
+};
+
 // ─── Get Subscription Details ─────────────────────────────────────────────────
 
 export const getSubscriptionDetails = async (userId: number) => {
@@ -776,6 +880,9 @@ export const getSubscriptionDetails = async (userId: number) => {
       d.prize_pool AS prize_amount,
       CASE WHEN fm.id IS NOT NULL THEN true ELSE false END AS is_founding,
       fm.seat_number AS founding_seat_number,
+      s.fee_at_entry,
+      s.entries_per_location,
+      (SELECT COUNT(*)::int FROM business_location WHERE business_id = b.id AND is_active = TRUE) AS active_location_count,
       (
         SELECT COUNT(*)::int
         FROM draw_entry de3

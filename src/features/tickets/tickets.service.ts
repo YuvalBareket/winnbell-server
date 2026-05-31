@@ -121,8 +121,9 @@ export const getUserTicketsService = async (userId: number, drawId: number) => {
   return { tickets: result.rows, effectiveCount };
 };
 
-export const getBusinessTicketsService = async (userId: number, drawId: number, locationId?: number) => {
+export const getBusinessTicketsService = async (userId: number, drawId: number, locationId?: number, page = 1, limit = 50) => {
   const pool = getPool();
+  const offset = (page - 1) * limit;
 
   // Get businessId, per-location cap, and active location count in one query
   const bizRes = await pool.query(
@@ -158,6 +159,8 @@ export const getBusinessTicketsService = async (userId: number, drawId: number, 
 
   const ticketParams: unknown[] = [userId, drawId];
   const locationClause = locationId ? (ticketParams.push(locationId), `AND t.location_id = $${ticketParams.length}`) : '';
+  ticketParams.push(limit, offset);
+  const limitClause = `LIMIT $${ticketParams.length - 1} OFFSET $${ticketParams.length}`;
   const result = await pool.query(
     `SELECT t.id, t.code, t.status, t.activated_at, t.is_quarantined,
             bl.name AS location_name, u.full_name AS activated_by_user, u.email AS activated_by_email
@@ -166,7 +169,7 @@ export const getBusinessTicketsService = async (userId: number, drawId: number, 
      LEFT JOIN business_location bl ON t.location_id = bl.id
      LEFT JOIN "user" u ON t.activated_by_user_id = u.id
      WHERE b.user_id = $1 AND t.draw_id = $2 ${locationClause}
-     ORDER BY t.created_at DESC`,
+     ORDER BY t.created_at DESC ${limitClause}`,
     ticketParams,
   );
 

@@ -13,6 +13,7 @@ router.get('/draws-all', adminController.getAllDraws);
 router.get('/users', adminController.getUsers);
 router.get('/users/:userId', adminController.getUserDetail);
 router.get('/businesses/:businessId', adminController.getBusinessDetail);
+router.get('/businesses/:businessId/entries', adminController.getBusinessEntries);
 router.patch('/users/:userId/role', adminController.updateUserRole);
 router.patch('/users/:userId/active', adminController.toggleUserActive);
 router.patch('/users/:userId/risk', adminController.setUserRisk);

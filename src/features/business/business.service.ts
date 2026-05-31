@@ -314,13 +314,7 @@ export const deleteBusinessLocation = async (locationId: number, ownerUserId: nu
 
   if (ownerCheck.rows.length === 0) throw new Error('UNAUTHORIZED_OR_INVALID_LOCATION');
 
-  const hasManager = ownerCheck.rows[0].manager_user_id !== null;
-
-  if (hasManager) {
-    await pool.query(`UPDATE business_location SET is_active = false WHERE id = $1`, [locationId]);
-  } else {
-    await pool.query(`DELETE FROM business_location WHERE id = $1`, [locationId]);
-  }
+  await pool.query(`UPDATE business_location SET is_active = false WHERE id = $1`, [locationId]);
 };
 
 export const updateBusinessLogo = async (ownerUserId: number, logoUrl: string): Promise<void> => {

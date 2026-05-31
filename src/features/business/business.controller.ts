@@ -21,6 +21,8 @@ import {
   updateCampaignSettings,
 } from './business.service.js';
 import { getPresignedUploadUrl } from '../../shared/s3.js';
+import { getPool } from '../../shared/db/db.js';
+import { syncSubscriptionQuantity } from '../stripe/stripe.service.js';
 
 export const getEntryMode = async (_req: Request, res: Response) => {
   try {
@@ -200,20 +202,47 @@ export const updateLocation = async (req: AuthRequest, res: Response): Promise<v
 };
 
 export const addLocation = async (req: AuthRequest, res: Response): Promise<void> => {
-  try {
-    const userId = req.user!.id;
-    const { name, address, lat, lon } = req.body as {
-      name: string;
-      address: string;
-      lat: number;
-      lon: number;
-    };
+  const userId = req.user!.id;
+  const { name, address, lat, lon } = req.body as {
+    name: string;
+    address: string;
+    lat: number;
+    lon: number;
+  };
 
+  let locationId: number | null = null;
+  try {
     const result = await addBusinessLocation(userId, { name, address, lat, lon });
-    res.status(201).json({ locationId: result.locationId });
+    locationId = result.locationId;
+
+    // Get new active location count and sync Stripe quantity
+    const pool = getPool();
+    const countResult = await pool.query(
+      `SELECT COUNT(*)::int AS cnt FROM business_location bl
+       JOIN business b ON b.id = bl.business_id
+       WHERE b.user_id = $1 AND bl.is_active = TRUE`,
+      [userId],
+    );
+    const newCount = Number(countResult.rows[0]?.cnt ?? 1);
+    await syncSubscriptionQuantity(userId, newCount);
+
+    res.status(201).json({ locationId });
   } catch (error: unknown) {
+    // Rollback: delete the newly created location if Stripe sync failed
+    if (locationId !== null) {
+      try {
+        const pool = getPool();
+        await pool.query(`DELETE FROM business_location WHERE id = $1`, [locationId]);
+      } catch {
+        // Rollback failure — log but don't overwrite the original error
+      }
+    }
     if (error instanceof Error && error.message === 'BUSINESS_NOT_FOUND') {
       res.status(404).json({ message: 'Business not found' });
+      return;
+    }
+    if (error instanceof Error && (error.message.includes('Stripe') || error.message.includes('subscription') || error.message.includes('tier'))) {
+      res.status(402).json({ message: 'Plan update failed. Location not added.', detail: error.message });
       return;
     }
     res.status(500).json({ message: 'Failed to add location' });
@@ -221,13 +250,49 @@ export const addLocation = async (req: AuthRequest, res: Response): Promise<void
 };
 
 export const deleteLocation = async (req: AuthRequest, res: Response): Promise<void> => {
+  const userId = req.user!.id;
+  const locId = Number(req.params.locationId);
+
   try {
-    const { locationId } = req.params;
-    await deleteBusinessLocation(Number(locationId), req.user!.id);
+    // Verify ownership + get current active location count before decrement
+    const pool = getPool();
+    const ownerCheck = await pool.query(
+      `SELECT bl.id FROM business_location bl
+       JOIN business b ON bl.business_id = b.id
+       WHERE bl.id = $1 AND b.user_id = $2 AND bl.is_active = TRUE`,
+      [locId, userId],
+    );
+    if (ownerCheck.rows.length === 0) {
+      res.status(403).json({ message: 'Forbidden' });
+      return;
+    }
+
+    const countResult = await pool.query(
+      `SELECT COUNT(*)::int AS cnt FROM business_location bl
+       JOIN business b ON b.id = bl.business_id
+       WHERE b.user_id = $1 AND bl.is_active = TRUE`,
+      [userId],
+    );
+    const currentCount = Number(countResult.rows[0]?.cnt ?? 1);
+    if (currentCount <= 1) {
+      res.status(400).json({ message: 'You must keep at least one active location.' });
+      return;
+    }
+    const newCount = currentCount - 1;
+
+    // Sync Stripe first — if it fails, abort without touching the DB
+    await syncSubscriptionQuantity(userId, newCount);
+
+    // Stripe succeeded — now remove from DB
+    await deleteBusinessLocation(locId, userId);
     res.status(200).json({ success: true });
   } catch (error: unknown) {
     if (error instanceof Error && error.message === 'UNAUTHORIZED_OR_INVALID_LOCATION') {
       res.status(403).json({ message: 'Forbidden' });
+      return;
+    }
+    if (error instanceof Error && (error.message.includes('Stripe') || error.message.includes('subscription') || error.message.includes('tier'))) {
+      res.status(402).json({ message: 'Plan update failed. Location not removed.', detail: error.message });
       return;
     }
     res.status(500).json({ message: 'Failed to delete location' });

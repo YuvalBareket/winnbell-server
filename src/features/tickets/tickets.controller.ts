@@ -39,7 +39,8 @@ export const getMyTickets = async (req: AuthRequest, res: Response) => {
         res.status(200).json({ tickets, totalCount: tickets.length, cap: null, effectiveCount: tickets.length });
       } else {
         // Business owner — optionally filtered by location
-        const { tickets, totalCount, cap, perLocationCap, activeLocationCount } = await ticketService.getBusinessTicketsService(userId, drawId, filterLocationId);
+        const page = req.query.page ? parseInt(req.query.page as string, 10) : 1;
+        const { tickets, totalCount, cap, perLocationCap, activeLocationCount } = await ticketService.getBusinessTicketsService(userId, drawId, filterLocationId, page);
         res.status(200).json({ tickets, totalCount, cap, perLocationCap, activeLocationCount, effectiveCount: tickets.length });
       }
     } else {

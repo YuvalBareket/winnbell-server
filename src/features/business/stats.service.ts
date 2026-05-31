@@ -149,7 +149,7 @@ export const getBusinessStats = async (
       AND t.business_id = $1
       AND t.entry_source = 'receipt'
       ${drawsLocParam ? `AND t.location_id = $${drawsLocParam}` : ''}
-    WHERE UPPER(d.status) IN ('OPEN', 'CLOSED')
+    WHERE d.status IN ('Open', 'Closed')
     GROUP BY d.id, d.name, d.draw_date, d.status
     ORDER BY d.draw_date DESC
   `, drawsParams);
