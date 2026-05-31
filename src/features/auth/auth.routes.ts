@@ -8,6 +8,7 @@ const router = Router();
 router.get('/region-config', authController.getRegionConfig);
 router.get('/region-check', authController.checkRegion);
 router.post('/register', authController.register);
+router.post('/check-email', authController.checkEmail);
 router.post('/login', authController.login);
 router.post('/sync', authController.syncUser);
 router.post('/change-password', authenticateToken, authController.changePassword);

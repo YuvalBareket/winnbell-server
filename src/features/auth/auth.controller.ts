@@ -36,6 +36,14 @@ export const register = async (
   }
 };
 
+export const checkEmail = async (req: Request, res: Response): Promise<void> => {
+  const { email } = req.body;
+  if (!email) { res.status(400).json({ message: 'Email required' }); return; }
+  const pool = getPool();
+  const result = await pool.query(`SELECT id FROM "user" WHERE email = $1`, [email.toLowerCase().trim()]);
+  res.json({ exists: result.rows.length > 0 });
+};
+
 export const login = async (req: Request, res: Response) => {
   try {
     const { email, password, inviteToken } = req.body;
