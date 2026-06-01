@@ -1,7 +1,4 @@
 import pg, { Pool, PoolClient } from 'pg';
-import dotenv from 'dotenv';
-
-dotenv.config();
 
 // TIMESTAMP WITHOUT TIME ZONE values are stored as UTC in Neon but pg parses them
 // using the Node.js process local timezone, which causes a shift when the server

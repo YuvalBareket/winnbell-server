@@ -347,11 +347,20 @@ export const updateUserRiskScore = async (
        WHERE id = $2`,
       [delta, userId, flags],
     );
-  } else {
+  } else if (delta > 0) {
+    // Positive delta without flags: update score, reset streak
     await db.query(
       `UPDATE "user" SET
          risk_score           = GREATEST(0, risk_score + $1),
          risk_clean_entries   = 0
+       WHERE id = $2`,
+      [delta, userId],
+    );
+  } else {
+    // Negative delta (reward): update score, preserve clean entry streak
+    await db.query(
+      `UPDATE "user" SET
+         risk_score = GREATEST(0, risk_score + $1)
        WHERE id = $2`,
       [delta, userId],
     );

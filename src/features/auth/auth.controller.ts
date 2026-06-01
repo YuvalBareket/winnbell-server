@@ -39,9 +39,13 @@ export const register = async (
 export const checkEmail = async (req: Request, res: Response): Promise<void> => {
   const { email } = req.body;
   if (!email) { res.status(400).json({ message: 'Email required' }); return; }
-  const pool = getPool();
-  const result = await pool.query(`SELECT id FROM "user" WHERE email = $1`, [email.toLowerCase().trim()]);
-  res.json({ exists: result.rows.length > 0 });
+  try {
+    const pool = getPool();
+    const result = await pool.query(`SELECT id FROM "user" WHERE email = $1`, [email.toLowerCase().trim()]);
+    res.json({ exists: result.rows.length > 0 });
+  } catch {
+    res.status(500).json({ message: 'Server error' });
+  }
 };
 
 export const login = async (req: Request, res: Response) => {
@@ -91,7 +95,7 @@ export const syncUser = async (req: Request, res: Response): Promise<void> => {
     // For OAuth sign-ins user_metadata.role is absent; fall back to req.body.role (set
     // from pendingRole localStorage by useSupabaseSync before calling syncUser).
     const roleFromToken = (meta['role'] as string | undefined) ?? (bodyRole as string | undefined);
-    const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.ip || '';
+    const ip = req.ip || '';
 
     const result = await authService.syncExternalUser(payload['sub'] as string, email, fullName, {
       role: roleFromToken,
@@ -103,6 +107,10 @@ export const syncUser = async (req: Request, res: Response): Promise<void> => {
   } catch (err: unknown) {
     if (err instanceof Error && err.message === 'REGION_RESTRICTED') {
       res.status(403).json({ message: 'REGION_RESTRICTED' });
+      return;
+    }
+    if (err instanceof Error && err.message === 'ACCOUNT_DELETED') {
+      res.status(403).json({ message: 'ACCOUNT_DELETED' });
       return;
     }
     console.error('Sync service error:', err instanceof Error ? err.message : err);
@@ -123,7 +131,7 @@ export const getRegionConfig = async (_req: Request, res: Response): Promise<voi
 
 export const checkRegion = async (req: Request, res: Response): Promise<void> => {
   try {
-    const ip = (req.headers['x-forwarded-for'] as string)?.split(',')[0]?.trim() || req.ip || '';
+    const ip = req.ip || '';
     const country = await authService.getCountryFromIp(ip);
     const pool = getPool();
     const result = await pool.query(`SELECT allowed_states FROM platform_settings WHERE id = 1`);
@@ -135,8 +143,66 @@ export const checkRegion = async (req: Request, res: Response): Promise<void> =>
   }
 };
 
+export const deleteAccount = async (req: Request, res: Response): Promise<void> => {
+  const userId = req.user?.id;
+  if (!userId) { res.status(401).json({ message: 'Unauthorized' }); return; }
+
+  try {
+    const pool = getPool();
+    // Prevent business owners from self-deleting (must contact support to avoid orphaned data)
+    const bizCheck = await pool.query(`SELECT id FROM business WHERE user_id = $1 LIMIT 1`, [userId]);
+    if (bizCheck.rows.length > 0) {
+      res.status(400).json({ message: 'Business accounts cannot be deleted here. Please contact support.' });
+      return;
+    }
+
+    // Grab external_auth_id before anonymizing so we can delete from Supabase
+    const userRow = await pool.query(`SELECT external_auth_id FROM "user" WHERE id = $1`, [userId]);
+    const externalAuthId: string | null = userRow.rows[0]?.external_auth_id ?? null;
+
+    // Anonymize PII — preserve tickets/entries for draw integrity
+    await pool.query(
+      `UPDATE "user" SET
+         full_name    = 'Deleted User',
+         email        = 'deleted_' || id::text || '@winnbell.invalid',
+         phone_number = NULL,
+         is_active    = FALSE,
+         role         = 'User'
+       WHERE id = $1`,
+      [userId],
+    );
+
+    // Remove from Supabase so the email is free for re-registration
+    if (externalAuthId && process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY) {
+      try {
+        const resp = await fetch(
+          `${process.env.SUPABASE_URL}/auth/v1/admin/users/${externalAuthId}`,
+          {
+            method: 'DELETE',
+            headers: {
+              Authorization: `Bearer ${process.env.SUPABASE_SERVICE_ROLE_KEY}`,
+              apikey: process.env.SUPABASE_SERVICE_ROLE_KEY,
+            },
+          },
+        );
+        if (!resp.ok) {
+          console.error('[deleteAccount] Supabase returned', resp.status, await resp.text().catch(() => ''));
+        }
+      } catch (supabaseErr) {
+        // Non-fatal: DB is already anonymized; log and continue
+        console.error('[deleteAccount] Supabase user deletion failed:', supabaseErr);
+      }
+    }
+
+    res.json({ success: true });
+  } catch (err) {
+    console.error('[deleteAccount]', err);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
 export const changePassword = async (req: Request, res: Response): Promise<void> => {
-  const userId = (req as any).user?.id;
+  const userId = req.user?.id;
   if (!userId) { res.status(401).json({ message: 'Unauthorized' }); return; }
 
   const { currentPassword, newPassword } = req.body;

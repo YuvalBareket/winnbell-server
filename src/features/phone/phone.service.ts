@@ -19,6 +19,12 @@ export const sendPhoneOtp = async (userId: number, phoneNumber: string): Promise
 
   const normalizedPhone = phoneNumber.startsWith('+') ? phoneNumber : `+1${phoneNumber.replace(/\D/g, '')}`;
 
+  // Validate E.164 format: + followed by 10-15 digits
+  const digits = normalizedPhone.replace(/\D/g, '');
+  if (digits.length < 10 || digits.length > 15) {
+    throw new Error('INVALID_PHONE');
+  }
+
   // Rate limit: max 3 OTP sends per phone number per hour
   const rateCheck = await pool.query(
     `SELECT COUNT(*)::int AS cnt FROM phone_otp

@@ -25,8 +25,10 @@ export const getNearbyBusinessesService = async (
 ): Promise<NearbyBusiness[]> => {
   const pool = getPool();
 
+  const cappedLimit = Math.min(limit, 100);
   const params: (number | string)[] = [minLat, maxLat, minLng, maxLng];
   const sectorClause = sector ? `AND b.sector = $${params.push(sector)}` : '';
+  const limitPlaceholder = `$${params.push(cappedLimit)}`;
 
   const query = `
     SELECT
@@ -65,7 +67,7 @@ export const getNearbyBusinessesService = async (
     ORDER BY
       (loc.latitude  - ($1 + $2) / 2.0) * (loc.latitude  - ($1 + $2) / 2.0) +
       (loc.longitude - ($3 + $4) / 2.0) * (loc.longitude - ($3 + $4) / 2.0)
-    LIMIT ${limit}
+    LIMIT ${limitPlaceholder}
   `;
 
   const result = await pool.query(query, params);
@@ -208,7 +210,7 @@ export const createManagerInviteLink = async (locationId: number, ownerUserId: n
 
   const businessId = businessRecord.business_id;
 
-  const token = await jwt.sign(
+  const token = jwt.sign(
     { locationId, businessId, type: 'MANAGER_INVITE' },
     process.env.JWT_SECRET as string,
     { expiresIn: '1h' },

@@ -78,6 +78,7 @@ export const getBusinessStats = async (
     FROM ticket
     WHERE business_id = $1 ${locationClause} ${drawClause}
       AND entry_source = 'receipt'
+      AND is_quarantined = FALSE
   `, baseParams);
 
   const { total_entries = 0, total_revenue = 0, avg_transaction = 0 } = summaryRes.rows[0] ?? {};
@@ -91,6 +92,7 @@ export const getBusinessStats = async (
     FROM ticket
     WHERE business_id = $1 ${locationClause} ${drawClause}
       AND entry_source = 'receipt'
+      AND is_quarantined = FALSE
       AND created_at >= NOW() - INTERVAL '30 days'
     GROUP BY TO_CHAR(created_at, 'YYYY-MM-DD')
     ORDER BY date
@@ -105,6 +107,7 @@ export const getBusinessStats = async (
     FROM ticket
     WHERE business_id = $1 ${locationClause} ${drawClause}
       AND entry_source = 'receipt'
+      AND is_quarantined = FALSE
       AND created_at >= NOW() - INTERVAL '12 months'
     GROUP BY TO_CHAR(created_at, 'YYYY-MM')
     ORDER BY month
@@ -125,6 +128,7 @@ export const getBusinessStats = async (
     LEFT JOIN ticket t ON t.location_id = bl.id
       AND t.business_id = $1
       AND t.entry_source = 'receipt'
+      AND t.is_quarantined = FALSE
       ${locDrawParam ? `AND t.draw_id = $${locDrawParam}` : ''}
     WHERE bl.business_id = $1
       ${locLocParam ? `AND bl.id = $${locLocParam}` : ''}

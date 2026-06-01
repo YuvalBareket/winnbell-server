@@ -21,51 +21,64 @@ import { validateReceiptAsync } from '../ocr/ocr.service.js';
 
 export const activateTicket = async (code: string, userId: number) => {
   const pool = getPool();
+  const client = await pool.connect();
 
-  const checkResult = await pool.query(`
-    SELECT t.id, t.status, t.business_id, t.location_id, t.draw_id, d.status as draw_status
-    FROM ticket t
-    LEFT JOIN draw d ON t.draw_id = d.id
-    WHERE t.code = $1
-  `, [code]);
+  try {
+    await client.query('BEGIN');
 
-  const ticket = checkResult.rows[0];
-  if (!ticket) throw new Error('Invalid ticket code.');
-  if (ticket.draw_status?.toUpperCase() !== 'OPEN') throw new Error('The draw for this ticket is already closed.');
+    const checkResult = await client.query(`
+      SELECT t.id, t.status, t.business_id, t.location_id, t.draw_id, d.status as draw_status
+      FROM ticket t
+      LEFT JOIN draw d ON t.draw_id = d.id
+      WHERE t.code = $1
+    `, [code]);
 
-  const ownerCheck = await pool.query(`
-    SELECT 1 FROM business WHERE id = $1 AND user_id = $2
-    UNION ALL
-    SELECT 1 FROM business_location WHERE id = $3 AND manager_user_id = $2
-    LIMIT 1
-  `, [ticket.business_id, userId, ticket.location_id]);
-  if (ownerCheck.rows.length > 0) {
-    throw new Error('Business owners and managers cannot activate tickets for their own business.');
+    const ticket = checkResult.rows[0];
+    if (!ticket) throw new Error('Invalid ticket code.');
+    if (ticket.draw_status?.toUpperCase() !== 'OPEN') throw new Error('The draw for this ticket is already closed.');
+
+    const ownerCheck = await client.query(`
+      SELECT 1 FROM business WHERE id = $1 AND user_id = $2
+      UNION ALL
+      SELECT 1 FROM business_location WHERE id = $3 AND manager_user_id = $2
+      LIMIT 1
+    `, [ticket.business_id, userId, ticket.location_id]);
+    if (ownerCheck.rows.length > 0) {
+      throw new Error('Business owners and managers cannot activate tickets for their own business.');
+    }
+
+    // Advisory lock on (userId, drawId) to prevent concurrent cap bypass
+    await client.query(`SELECT pg_advisory_xact_lock($1, $2)`, [userId, ticket.draw_id]);
+
+    const drawCapResult = await client.query(
+      `SELECT COUNT(*) AS count FROM ticket
+       WHERE activated_by_user_id = $1 AND draw_id = $2 AND is_quarantined = FALSE`,
+      [userId, ticket.draw_id],
+    );
+    if (parseInt(drawCapResult.rows[0].count, 10) >= 30) {
+      throw new Error('You have reached the maximum of 30 entries for this draw.');
+    }
+
+    const updateResult = await client.query(`
+      UPDATE ticket
+      SET status = 'Activated',
+          activated_by_user_id = $1,
+          activated_at = NOW()
+      WHERE code = $2
+        AND status = 'Issued'
+        AND draw_id IN (SELECT id FROM draw WHERE status = 'Open')
+    `, [userId, code]);
+
+    if (updateResult.rowCount === 0) throw new Error('This ticket has already been used or the draw is no longer open.');
+
+    await client.query('COMMIT');
+    return { message: 'Ticket activated successfully!' };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
   }
-
-  // Per-draw per-user ticket cap — use ticket.draw_id (already resolved above)
-  const drawCapResult = await pool.query(
-    `SELECT COUNT(*) AS count FROM ticket
-     WHERE activated_by_user_id = $1 AND draw_id = $2 AND is_quarantined = FALSE`,
-    [userId, ticket.draw_id],
-  );
-  if (parseInt(drawCapResult.rows[0].count, 10) >= 30) {
-    throw new Error('You have reached the maximum of 30 entries for this draw.');
-  }
-
-  const updateResult = await pool.query(`
-    UPDATE ticket
-    SET status = 'Activated',
-        activated_by_user_id = $1,
-        activated_at = NOW()
-    WHERE code = $2
-      AND status = 'Issued'
-      AND draw_id IN (SELECT id FROM draw WHERE status = 'Open')
-  `, [userId, code]);
-
-  if (updateResult.rowCount === 0) throw new Error('This ticket has already been used or the draw is no longer open.');
-
-  return { message: 'Ticket activated successfully!' };
 };
 
 export const getUserTicketsService = async (userId: number, drawId: number) => {

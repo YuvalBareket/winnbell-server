@@ -28,8 +28,8 @@ export const getEntryMode = async (_req: Request, res: Response) => {
   try {
     const result = await getEntryModeService();
     res.json(result);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Server error' });
   }
 };
 
@@ -37,8 +37,8 @@ export const getParticipating = async (_req: Request, res: Response) => {
   try {
     const result = await getParticipatingBusinessesService();
     res.json(result);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Server error' });
   }
 };
 
@@ -48,17 +48,21 @@ export const searchParticipatingLocations = async (req: Request, res: Response) 
     if (q.length < 2) { res.json([]); return; }
     const locations = await searchParticipatingLocationsService(q);
     res.json(locations);
-  } catch (err: any) {
-    res.status(500).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Server error' });
   }
 };
 
 export const getParticipatingLocationById = async (req: Request, res: Response) => {
   const locationId = Number(req.params.locationId);
   if (isNaN(locationId)) return res.status(400).json({ message: 'Invalid location ID' });
-  const location = await getParticipatingLocationByIdService(locationId);
-  if (!location) return res.status(404).json({ message: 'Location not found' });
-  res.json(location);
+  try {
+    const location = await getParticipatingLocationByIdService(locationId);
+    if (!location) return res.status(404).json({ message: 'Location not found' });
+    res.json(location);
+  } catch {
+    res.status(500).json({ message: 'Server error' });
+  }
 };
 
 export const getNearby = async (
@@ -370,6 +374,10 @@ export const createInviteLink = async (req: AuthRequest, res: Response): Promise
 
     res.json({ inviteLink });
   } catch (error: unknown) {
+    if (error instanceof Error && error.message === 'UNAUTHORIZED_OR_INVALID_LOCATION') {
+      res.status(403).json({ message: 'Forbidden' });
+      return;
+    }
     res.status(500).json({ message: 'Failed to generate invite link' });
   }
 };

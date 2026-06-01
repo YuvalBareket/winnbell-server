@@ -12,7 +12,7 @@ router.post('/check-email', authController.checkEmail);
 router.post('/login', authController.login);
 router.post('/sync', authController.syncUser);
 router.post('/change-password', authenticateToken, authController.changePassword);
-// Dev/test only — blocked in production
-router.post('/test-setup', testSetup);
+router.delete('/account', authenticateToken, authController.deleteAccount);
+// Dev/test only — registered in app.ts with NODE_ENV guard
 
 export default router;

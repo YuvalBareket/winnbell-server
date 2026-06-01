@@ -197,6 +197,7 @@ export const updateUserRole = async (req: Request, res: Response) => {
 
 export const toggleUserActive = async (req: Request, res: Response) => {
   const userId = parseInt(req.params.userId as string, 10);
+  if (isNaN(userId)) { res.status(400).json({ message: 'Invalid user ID' }); return; }
   const { is_active } = req.body;
   try {
     await toggleUserActiveService(userId, !!is_active);
@@ -393,9 +394,10 @@ export const getBusinessDetail = async (req: Request, res: Response) => {
 
 export const getBusinessEntries = async (req: Request, res: Response) => {
   const businessId = parseInt(req.params.businessId as string, 10);
+  if (isNaN(businessId)) { res.status(400).json({ message: 'Invalid business ID' }); return; }
   const drawId = req.query.drawId ? parseInt(req.query.drawId as string, 10) : null;
   const page = parseInt((req.query.page as string) ?? '1', 10);
-  const limit = parseInt((req.query.limit as string) ?? '50', 10);
+  const limit = Math.min(parseInt((req.query.limit as string) ?? '50', 10) || 50, 100);
   try {
     const result = await getBusinessEntriesService(businessId, drawId, page, limit);
     res.json(result);

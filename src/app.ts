@@ -94,6 +94,7 @@ app.use('/auth', authLimiter, authRoutes);
 
 // Public business discovery endpoints — accessible without login (e.g. browsing the map)
 const publicBusinessRouter = Router();
+publicBusinessRouter.use(publicLimiter);
 publicBusinessRouter.get('/nearby', getNearby);
 publicBusinessRouter.get('/participating', getParticipating);
 publicBusinessRouter.get('/participating/locations/search', searchParticipatingLocations);

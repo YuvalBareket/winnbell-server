@@ -302,6 +302,17 @@ export const syncExternalUser = async (
   try {
     await client.query('BEGIN');
 
+    // Detect deleted accounts before the upsert so we don't crash on the external_auth_id unique constraint.
+    // Check both by external_auth_id AND by email — a re-registered user gets a new Supabase ID
+    // but the same email, so the email check catches that bypass.
+    const deletedCheck = await client.query(
+      `SELECT id FROM "user" WHERE (external_auth_id = $1 OR email = $2) AND is_active = FALSE LIMIT 1`,
+      [externalId, email],
+    );
+    if (deletedCheck.rows.length > 0) {
+      throw new Error('ACCOUNT_DELETED');
+    }
+
     const upsertResult = await client.query(
       `INSERT INTO "user" (external_auth_id, email, full_name, role, is_active, is_email_verified, declared_state)
        VALUES ($1, $2, $3, $4, true, true, $5)

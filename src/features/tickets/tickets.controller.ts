@@ -234,8 +234,9 @@ export const getMyRiskLevel = async (req: AuthRequest, res: Response) => {
     const drawEntryCount = parseInt(drawCountResult.rows[0]?.total_count ?? '0', 10);
 
     const dailyResult = await pool.query(
-      `SELECT COUNT(*) AS count FROM ticket
+      `SELECT COUNT(DISTINCT receipt_identifier) AS count FROM ticket
        WHERE activated_by_user_id = $1 AND entry_source = 'receipt'
+         AND receipt_identifier IS NOT NULL
          AND activated_at >= NOW() - INTERVAL '24 hours'`,
       [userId],
     );

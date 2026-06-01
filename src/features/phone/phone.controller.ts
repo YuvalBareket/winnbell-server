@@ -2,7 +2,7 @@ import { Request, Response } from 'express';
 import * as phoneService from './phone.service.js';
 
 export const sendOtp = async (req: Request, res: Response): Promise<void> => {
-  const userId = (req as any).user?.id;
+  const userId = req.user?.id;
   if (!userId) { res.status(401).json({ message: 'Unauthorized' }); return; }
 
   const { phoneNumber } = req.body;
@@ -16,6 +16,10 @@ export const sendOtp = async (req: Request, res: Response): Promise<void> => {
     res.json({ success: true });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : '';
+    if (msg === 'INVALID_PHONE') {
+      res.status(400).json({ message: 'Invalid phone number format.' });
+      return;
+    }
     if (msg === 'TOO_MANY_SENDS') {
       res.status(429).json({ message: 'Too many verification requests. Please wait before trying again.' });
       return;
@@ -26,7 +30,7 @@ export const sendOtp = async (req: Request, res: Response): Promise<void> => {
 };
 
 export const verifyOtp = async (req: Request, res: Response): Promise<void> => {
-  const userId = (req as any).user?.id;
+  const userId = req.user?.id;
   if (!userId) { res.status(401).json({ message: 'Unauthorized' }); return; }
 
   const { code } = req.body;

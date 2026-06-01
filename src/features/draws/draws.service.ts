@@ -34,6 +34,7 @@ export const getDrawHistoryService = async () => {
     LEFT JOIN ticket t ON t.draw_id = d.id
     GROUP BY d.id, wt.id, u.id, b.id, bl.id
     ORDER BY d.draw_date DESC
+    LIMIT 50
   `);
   return result.rows;
 };

@@ -223,20 +223,14 @@ export const createDrawService = async (data: {
     const draw = drawResult.rows[0];
 
     // Auto-enroll all currently subscribed businesses into this draw
-    const subsResult = await client.query(`
-      SELECT b.id AS business_id, COALESCE(s.fee_at_entry, 0) AS monthly_fee
+    await client.query(`
+      INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, contribution_amount)
+      SELECT $1, b.id, COALESCE(s.fee_at_entry, 0), 0
       FROM business b
       JOIN subscription s ON s.business_id = b.id
       WHERE s.status IN ('Active', 'Trialing')
-    `);
-
-    for (const sub of subsResult.rows) {
-      await client.query(`
-        INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, contribution_amount)
-        VALUES ($1, $2, $3, 0)
-        ON CONFLICT (draw_id, business_id) DO NOTHING
-      `, [draw.id, sub.business_id, sub.monthly_fee]);
-    }
+      ON CONFLICT (draw_id, business_id) DO NOTHING
+    `, [draw.id]);
 
     await client.query('COMMIT');
     return draw;
@@ -316,34 +310,71 @@ export const openDrawService = async (drawId: number): Promise<void> => {
 
 export const closeDrawService = async (drawId: number): Promise<void> => {
   const pool = getPool();
-  const check = await pool.query(`SELECT id, status FROM draw WHERE id = $1`, [drawId]);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
 
-  if (check.rows.length === 0) throw new Error('Draw not found');
-  if (check.rows[0].status.toUpperCase() !== 'OPEN') throw new Error('Draw is not Open');
+    const check = await client.query(`SELECT id, status FROM draw WHERE id = $1 FOR UPDATE`, [drawId]);
 
-  await pool.query(`UPDATE draw SET status = 'Closed', closed_at = NOW() WHERE id = $1`, [drawId]);
+    if (check.rows.length === 0) throw new Error('Draw not found');
+    if (check.rows[0].status.toUpperCase() !== 'OPEN') throw new Error('Draw is not Open');
 
-  // Apply any pending threshold changes that businesses set during the active campaign
-  await pool.query(`
-    UPDATE business
-    SET min_transaction_amount         = pending_min_transaction_amount,
-        pending_min_transaction_amount = NULL
-    WHERE pending_min_transaction_amount IS NOT NULL
-  `);
+    await client.query(`UPDATE draw SET status = 'Closed', closed_at = NOW() WHERE id = $1`, [drawId]);
 
-  await decayAllUserRiskScores();
+    // Apply any pending threshold changes that businesses set during the active campaign
+    await client.query(`
+      UPDATE business
+      SET min_transaction_amount         = pending_min_transaction_amount,
+          pending_min_transaction_amount = NULL
+      WHERE pending_min_transaction_amount IS NOT NULL
+    `);
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  // Run outside the transaction so a failure here does not roll back the draw close
+  try {
+    await decayAllUserRiskScores();
+  } catch (err) {
+    console.error('[closeDrawService] decayAllUserRiskScores failed (draw was closed successfully):', err);
+  }
 };
 
 export const reopenDrawService = async (drawId: number): Promise<void> => {
   const pool = getPool();
-  const check = await pool.query(`SELECT id, status, winner_user_id FROM draw WHERE id = $1`, [drawId]);
-  if (check.rows.length === 0) throw new Error('Draw not found');
-  if (check.rows[0].status.toUpperCase() !== 'CLOSED') throw new Error('Draw is not Closed');
-  if (check.rows[0].winner_user_id !== null) throw new Error('Cannot reopen a draw that already has a winner');
-  // Check no other draw is already open
-  const openCheck = await pool.query(`SELECT id FROM draw WHERE status = 'Open'`);
-  if (openCheck.rows.length > 0) throw new Error('A draw is already Open. Close it before reopening another.');
-  await pool.query(`UPDATE draw SET status = 'Open', opened_at = COALESCE(opened_at, NOW()), closed_at = NULL WHERE id = $1`, [drawId]);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const check = await client.query(
+      `SELECT id, status, winner_user_id FROM draw WHERE id = $1 FOR UPDATE`,
+      [drawId],
+    );
+    if (check.rows.length === 0) throw new Error('Draw not found');
+    if (check.rows[0].status.toUpperCase() !== 'CLOSED') throw new Error('Draw is not Closed');
+    if (check.rows[0].winner_user_id !== null) throw new Error('Cannot reopen a draw that already has a winner');
+
+    // Atomically check for existing open draw
+    const openCheck = await client.query(`SELECT id FROM draw WHERE status = 'Open' FOR UPDATE SKIP LOCKED`);
+    if (openCheck.rows.length > 0) throw new Error('A draw is already Open. Close it before reopening another.');
+
+    await client.query(
+      `UPDATE draw SET status = 'Open', opened_at = COALESCE(opened_at, NOW()), closed_at = NULL WHERE id = $1`,
+      [drawId],
+    );
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 };
 
 export const pickDrawWinnerService = async (drawId: number): Promise<{
@@ -356,54 +387,66 @@ export const pickDrawWinnerService = async (drawId: number): Promise<{
   prizePool: number;
 }> => {
   const pool = getPool();
-  const check = await pool.query(`SELECT id, status, prize_pool, winner_user_id FROM draw WHERE id = $1`, [drawId]);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
 
-  if (check.rows.length === 0) throw new Error('Draw not found');
-  if (check.rows[0].status.toUpperCase() !== 'CLOSED') throw new Error('Draw is not Closed');
-  if (check.rows[0].winner_user_id !== null) {
-    throw new Error('Winner has already been picked for this draw');
+    const check = await client.query(`SELECT id, status, prize_pool, winner_user_id FROM draw WHERE id = $1 FOR UPDATE`, [drawId]);
+
+    if (check.rows.length === 0) throw new Error('Draw not found');
+    if (check.rows[0].status.toUpperCase() !== 'CLOSED') throw new Error('Draw is not Closed');
+    if (check.rows[0].winner_user_id !== null) {
+      throw new Error('Winner has already been picked for this draw');
+    }
+
+    const prizePool: number = check.rows[0].prize_pool;
+
+    const ticketResult = await client.query(`
+      SELECT
+        t.id AS ticket_id,
+        t.code,
+        t.activated_by_user_id,
+        u.full_name,
+        u.email,
+        b.name AS business_name,
+        bl.name AS location_name
+      FROM ticket t
+      JOIN "user" u ON t.activated_by_user_id = u.id AND u.risk_score < 20
+      LEFT JOIN business b ON t.business_id = b.id
+      LEFT JOIN business_location bl ON t.location_id = bl.id
+      WHERE t.draw_id = $1 AND t.status = 'Activated' AND t.is_quarantined = FALSE
+      ORDER BY random()
+      LIMIT 1
+    `, [drawId]);
+
+    if (ticketResult.rows.length === 0) throw new Error('No activated tickets in this draw');
+
+    const winner = ticketResult.rows[0];
+    const winnerId: number = winner.activated_by_user_id;
+    const winnerTicketId: number = winner.ticket_id;
+
+    await client.query(
+      `UPDATE draw SET winner_user_id = $1, winner_ticket_id = $2 WHERE id = $3`,
+      [winnerId, winnerTicketId, drawId],
+    );
+
+    await client.query('COMMIT');
+
+    return {
+      winnerId,
+      winnerName: winner.full_name,
+      winnerEmail: winner.email,
+      ticketCode: winner.code,
+      businessName: winner.business_name,
+      locationName: winner.location_name,
+      prizePool,
+    };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
   }
-
-  const prizePool: number = check.rows[0].prize_pool;
-
-  const ticketResult = await pool.query(`
-    SELECT
-      t.id AS ticket_id,
-      t.code,
-      t.activated_by_user_id,
-      u.full_name,
-      u.email,
-      b.name AS business_name,
-      bl.name AS location_name
-    FROM ticket t
-    JOIN "user" u ON t.activated_by_user_id = u.id AND u.risk_score < 20
-    LEFT JOIN business b ON t.business_id = b.id
-    LEFT JOIN business_location bl ON t.location_id = bl.id
-    WHERE t.draw_id = $1 AND t.status = 'Activated' AND t.is_quarantined = FALSE
-    ORDER BY random()
-    LIMIT 1
-  `, [drawId]);
-
-  if (ticketResult.rows.length === 0) throw new Error('No activated tickets in this draw');
-
-  const winner = ticketResult.rows[0];
-  const winnerId: number = winner.activated_by_user_id;
-  const winnerTicketId: number = winner.ticket_id;
-
-  await pool.query(
-    `UPDATE draw SET winner_user_id = $1, winner_ticket_id = $2 WHERE id = $3`,
-    [winnerId, winnerTicketId, drawId],
-  );
-
-  return {
-    winnerId,
-    winnerName: winner.full_name,
-    winnerEmail: winner.email,
-    ticketCode: winner.code,
-    businessName: winner.business_name,
-    locationName: winner.location_name,
-    prizePool,
-  };
 };
 
 export const getAdminOverviewService = async () => {
@@ -508,15 +551,15 @@ export const adminSetUserRiskService = async (userId: number, riskScore: number)
      WHERE id = $2 AND role != 'Admin'`,
     [clamped, userId],
   );
-  // Sync quarantine for the active draw
+  // Sync quarantine for all draws that haven't been drawn yet (Open and Closed without a winner)
   const drawResult = await pool.query(
-    `SELECT id FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1`,
+    `SELECT id FROM draw WHERE status IN ('Open', 'Closed') AND winner_user_id IS NULL`,
   );
-  const drawId = drawResult.rows[0]?.id;
-  if (drawId) {
-    // Import syncUserQuarantineState from risk service
+  if (drawResult.rows.length > 0) {
     const { syncUserQuarantineState } = await import('../risk/risk.service.js');
-    await syncUserQuarantineState(userId, drawId);
+    for (const row of drawResult.rows) {
+      await syncUserQuarantineState(userId, row.id);
+    }
   }
 };
 
@@ -1118,6 +1161,10 @@ export const adminImageDecisionService = async (
 
   const overrideable = ['passed', 'failed', 'ocr_error', 'pending'];
   if (!overrideable.includes(prevStatus)) throw new Error(`Cannot override image decision for status: ${prevStatus}`);
+
+  // Idempotency: prevent double-approve or double-reject from farming risk score
+  if (decision === 'approve' && prevStatus === 'passed') throw new Error('Image is already approved');
+  if (decision === 'reject' && prevStatus === 'failed') throw new Error('Image is already rejected');
 
   if (decision === 'approve') {
     // Reverse the +2 penalty if previously failed, then apply -3 reward

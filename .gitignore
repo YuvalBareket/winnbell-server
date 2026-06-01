@@ -17,6 +17,5 @@ migrate_*.mjs
 gettoken.js
 setup-test-accounts.cjs
 screens/
-schema.sql
 src/features/tickets/__tests__/multi_entry.test.ts
 src/features/tickets/__tests__/tickets.service.test.ts

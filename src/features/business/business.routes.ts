@@ -32,7 +32,7 @@ router.get('/participating', getParticipating);
 router.get('/participating/locations/search', searchParticipatingLocations);
 router.get('/participating/locations/:locationId', getParticipatingLocationById);
 router.get('/mode', getEntryMode);
-router.post('/address', getAddressController);
+// /address is handled by publicBusinessRouter in app.ts with rate limiter
 router.get('/subscription/founding-availability', getFoundingAvailability);
 
 // ── Authenticated routes ──

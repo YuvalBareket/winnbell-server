@@ -719,20 +719,14 @@ async function handleDrawParticipation(
       // Only catch up other businesses when creating the immediate next-month draw.
       // For future months (yearly pre-enrollment) each business will enroll via their own renewal.
       if (!skipEnrollOthers) {
-        const otherSubsResult = await client.query(`
-          SELECT b.id AS business_id, COALESCE(s.fee_at_entry, 0) AS monthly_fee
+        await client.query(`
+          INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, contribution_amount)
+          SELECT $1, b.id, COALESCE(s.fee_at_entry, 0), 0
           FROM business b
           JOIN subscription s ON s.business_id = b.id
-          WHERE s.status IN ('Active', 'Trialing') AND b.id != $1
-        `, [businessId]);
-
-        for (const sub of otherSubsResult.rows) {
-          await client.query(
-            `INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, contribution_amount) VALUES ($1, $2, $3, 0)
-             ON CONFLICT (draw_id, business_id) DO NOTHING`,
-            [newDraw.id, sub.business_id, sub.monthly_fee],
-          );
-        }
+          WHERE s.status IN ('Active', 'Trialing') AND b.id != $2
+          ON CONFLICT (draw_id, business_id) DO NOTHING
+        `, [newDraw.id, businessId]);
       }
 
       console.log(`[Draw] Created new draw ${newDraw.id} for ${targetYear}-${targetMonth} with ${skipEnrollOthers ? 1 : 'all'} businesses — prize pool set by admin`);

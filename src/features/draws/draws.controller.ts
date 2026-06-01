@@ -21,7 +21,8 @@ export const getDrawHistory = async (req: Request, res: Response) => {
 
 export const getDrawResult = async (req: Request, res: Response) => {
   try {
-    const drawId = parseInt(req.params.drawId as string);
+    const drawId = parseInt(req.params.drawId as string, 10);
+    if (isNaN(drawId)) { res.status(400).json({ message: 'Invalid draw ID' }); return; }
     const result = await getDrawResultService(drawId);
     res.status(200).json(result);
   } catch (error: unknown) {

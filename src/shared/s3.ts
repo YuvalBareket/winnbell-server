@@ -10,6 +10,7 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 //   R2_PUBLIC_URL          — Public bucket URL (e.g. https://pub-xxx.r2.dev or custom domain)
 
 const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+let s3Singleton: S3Client | null = null;
 
 export const getPresignedUploadUrl = async (
   contentType: string,
@@ -25,14 +26,17 @@ export const getPresignedUploadUrl = async (
     throw new Error('INVALID_CONTENT_TYPE');
   }
 
-  const client = new S3Client({
-    region: 'auto',
-    endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-    credentials: {
-      accessKeyId: R2_ACCESS_KEY_ID,
-      secretAccessKey: R2_SECRET_ACCESS_KEY,
-    },
-  });
+  if (!s3Singleton) {
+    s3Singleton = new S3Client({
+      region: 'auto',
+      endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+      credentials: {
+        accessKeyId: R2_ACCESS_KEY_ID,
+        secretAccessKey: R2_SECRET_ACCESS_KEY,
+      },
+    });
+  }
+  const client = s3Singleton;
 
   const ext = contentType.split('/')[1];
   const filename = `${crypto.randomUUID()}.${ext}`;

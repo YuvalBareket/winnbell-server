@@ -132,7 +132,7 @@ export const resumeSub = async (req: Request, res: Response) => {
 // PUT /business/subscription/plan
 // Body: { entries_per_location: number }
 export const updatePlan = async (req: Request, res: Response) => {
-  const userId = (req as any).user?.id;
+  const userId = req.user?.id;
   if (!userId) { res.status(401).json({ error: 'Unauthorized' }); return; }
   const { entries_per_location } = req.body as { entries_per_location: number };
   if (!entries_per_location || !Number.isInteger(entries_per_location) || entries_per_location < 1) {
