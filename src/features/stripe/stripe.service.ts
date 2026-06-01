@@ -772,7 +772,7 @@ export const syncSubscriptionQuantity = async (userId: number, newLocationCount:
   `, [userId]);
 
   const sub = result.rows[0];
-  if (!sub) throw new Error('No subscription found');
+  if (!sub) return; // no subscription yet — nothing to sync
   if (!sub.stripe_subscription_id) return; // founding member, no Stripe sub — skip
 
   const interval = sub.billing_interval as 'monthly' | 'yearly';

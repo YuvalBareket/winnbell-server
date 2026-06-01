@@ -94,11 +94,7 @@ export const getSubscription = async (req: Request, res: Response) => {
   try {
     const userId = req.user!.id;
     const details = await getSubscriptionDetails(userId);
-    if (!details) {
-      res.status(404).json({ error: 'No subscription found' });
-      return;
-    }
-    res.json(details);
+    res.json(details ?? null);
   } catch (err: unknown) {
     console.error('[stripe.getSubscription]', err);
     res.status(500).json({ error: 'Failed to retrieve subscription.' });

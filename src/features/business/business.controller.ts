@@ -216,11 +216,32 @@ export const addLocation = async (req: AuthRequest, res: Response): Promise<void
 
   let locationId: number | null = null;
   try {
+    const pool = getPool();
+
+    // Founding partners are limited to 3 locations
+    const foundingCheck = await pool.query(`
+      SELECT fm.id FROM founding_member fm
+      JOIN business b ON b.id = fm.business_id
+      WHERE b.user_id = $1
+    `, [userId]);
+
+    if (foundingCheck.rows.length > 0) {
+      const locCount = await pool.query(
+        `SELECT COUNT(*)::int AS cnt FROM business_location bl
+         JOIN business b ON b.id = bl.business_id
+         WHERE b.user_id = $1 AND bl.is_active = TRUE`,
+        [userId],
+      );
+      if (Number(locCount.rows[0]?.cnt ?? 0) >= 3) {
+        res.status(403).json({ message: 'Founding partner accounts are limited to 3 locations. Please contact support to upgrade your plan.' });
+        return;
+      }
+    }
+
     const result = await addBusinessLocation(userId, { name, address, lat, lon });
     locationId = result.locationId;
 
     // Get new active location count and sync Stripe quantity
-    const pool = getPool();
     const countResult = await pool.query(
       `SELECT COUNT(*)::int AS cnt FROM business_location bl
        JOIN business b ON b.id = bl.business_id
