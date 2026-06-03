@@ -909,8 +909,8 @@ export const getSubscriptionInvoices = async (userId: number): Promise<Subscript
       period_start: line.period?.start,
       period_end: line.period?.end,
     })),
-    invoice_pdf: invoice.invoice_pdf,
-    hosted_invoice_url: invoice.hosted_invoice_url,
+    invoice_pdf: invoice.invoice_pdf ?? null,
+    hosted_invoice_url: invoice.hosted_invoice_url ?? null,
   }));
 };
 
