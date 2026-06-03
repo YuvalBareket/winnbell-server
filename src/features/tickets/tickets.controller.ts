@@ -46,7 +46,7 @@ export const getMyTickets = async (req: AuthRequest, res: Response) => {
       }
     } else {
       const result = await ticketService.getUserTicketsService(userId, drawId);
-      res.status(200).json(result);
+      res.status(200).json({ ...result, totalCount: result.effectiveCount });
     }
   } catch (error: unknown) {
     res.status(400).json({ message: error instanceof Error ? error.message : 'Failed to get entries' });

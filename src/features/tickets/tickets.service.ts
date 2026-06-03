@@ -124,7 +124,7 @@ export const getUserTicketsService = async (userId: number, drawId: number) => {
   // Effective count: non-quarantined receipt/free/code tickets + all promo entries
   const countResult = await pool.query(
     `SELECT (
-       (SELECT COUNT(*)::int FROM ticket WHERE activated_by_user_id = $1 AND draw_id = $2 AND is_quarantined = FALSE)
+       (SELECT COUNT(*)::int FROM ticket WHERE activated_by_user_id = $1 AND draw_id = $2)
        + (SELECT COUNT(*)::int FROM promotional_entry WHERE user_id = $1 AND draw_id = $2)
      ) AS effective_count`,
     [userId, drawId],
