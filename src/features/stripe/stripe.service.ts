@@ -757,12 +757,13 @@ async function handleYearlyDrawParticipation(pool: Pool, businessId: number, mon
 // ─── Sync Subscription Quantity ───────────────────────────────────────────────
 // Called after adding/removing a location to keep Stripe quantity in sync.
 // Skips silently for founding members (no stripe_subscription_id).
-export const syncSubscriptionQuantity = async (userId: number, newLocationCount: number): Promise<void> => {
+export const syncSubscriptionQuantity = async (userId: number, newLocationCount: number, reason: 'location_added' | 'location_removed' = 'location_added'): Promise<void> => {
   const pool = getPool();
 
   const result = await pool.query(`
     SELECT
       s.stripe_subscription_id,
+      s.stripe_customer_id,
       s.billing_interval,
       s.entries_per_location,
       b.id AS business_id
@@ -785,19 +786,57 @@ export const syncSubscriptionQuantity = async (userId: number, newLocationCount:
 
   const quantity = Math.max(1, newLocationCount);
   const newFeePerLocation = tierConfig[interval].pricePerLocation;
+  // fee_at_entry always stores the monthly equivalent total (same convention as checkout)
+  const newTotalFee = interval === 'yearly'
+    ? (newFeePerLocation / 12) * quantity
+    : newFeePerLocation * quantity;
 
   const stripeSub = await stripe.subscriptions.retrieve(sub.stripe_subscription_id, { expand: ['items'] });
-  const itemId = stripeSub.items.data[0]?.id;
-  if (!itemId) throw new Error('Stripe subscription item not found');
+  const item = stripeSub.items.data[0];
+  if (!item) throw new Error('Stripe subscription item not found');
 
+  const changeLabel = reason === 'location_added'
+    ? `You added a location. Your plan now covers ${quantity} location${quantity !== 1 ? 's' : ''}.`
+    : `You removed a location. Your plan now covers ${quantity} location${quantity !== 1 ? 's' : ''}.`;
+
+  const originalQuantity = item.quantity ?? 1;
+  const originalPriceId = item.price.id;
+
+  // Step 1 — queue proration items on Stripe (no invoice yet)
   await stripe.subscriptions.update(sub.stripe_subscription_id, {
-    items: [{ id: itemId, price: priceId, quantity }],
+    items: [{ id: item.id, price: priceId, quantity }],
     proration_behavior: 'create_prorations',
   });
 
+  try {
+    // Step 2 — create draft invoice with description, finalize, and pay
+    const draftInvoice = await stripe.invoices.create({
+      customer: sub.stripe_customer_id,
+      subscription: sub.stripe_subscription_id,
+      description: changeLabel,
+      auto_advance: false,
+    });
+    const finalizedInvoice = await stripe.invoices.finalizeInvoice(draftInvoice.id);
+    if (finalizedInvoice.status === 'open') {
+      await stripe.invoices.pay(draftInvoice.id);
+    }
+  } catch (invoiceErr) {
+    // Roll back the subscription update so Stripe matches our DB
+    try {
+      await stripe.subscriptions.update(sub.stripe_subscription_id, {
+        items: [{ id: item.id, price: originalPriceId, quantity: originalQuantity }],
+        proration_behavior: 'none',
+      });
+    } catch (rollbackErr: any) {
+      console.error('[Stripe] Rollback failed after invoice error:', rollbackErr.message);
+    }
+    throw invoiceErr;
+  }
+
+  // Step 3 — only update DB after Stripe confirms everything succeeded
   await pool.query(
     `UPDATE subscription SET fee_at_entry = $1, updated_at = NOW() WHERE business_id = $2`,
-    [newFeePerLocation, sub.business_id],
+    [newTotalFee, sub.business_id],
   );
 };
 
@@ -814,6 +853,7 @@ export const updateSubscriptionPlan = async (userId: number, newEntriesPerLocati
   const result = await pool.query(`
     SELECT
       s.stripe_subscription_id,
+      s.stripe_customer_id,
       s.billing_interval,
       s.entries_per_location AS current_entries_per_location,
       s.status,
@@ -837,24 +877,60 @@ export const updateSubscriptionPlan = async (userId: number, newEntriesPerLocati
 
   const locationCount = Math.max(1, Number(sub.location_count));
   const newFeePerLocation = tierConfig[interval].pricePerLocation;
+  // fee_at_entry always stores the monthly equivalent total (same convention as checkout)
+  const newTotalFee = interval === 'yearly'
+    ? (newFeePerLocation / 12) * locationCount
+    : newFeePerLocation * locationCount;
 
-  // Fetch current Stripe subscription to get the item ID
+  // Fetch current Stripe subscription to get the item
   const stripeSub = await stripe.subscriptions.retrieve(sub.stripe_subscription_id, { expand: ['items'] });
-  const itemId = stripeSub.items.data[0]?.id;
-  if (!itemId) throw new Error('Stripe subscription item not found');
+  const item = stripeSub.items.data[0];
+  if (!item) throw new Error('Stripe subscription item not found');
 
-  // Update Stripe subscription — Stripe handles proration automatically
+  const oldTier = sub.current_entries_per_location as number;
+  const direction = newEntriesPerLocation > oldTier ? 'upgraded' : 'downgraded';
+  const changeLabel = `You ${direction} your plan from ${oldTier.toLocaleString()} to ${newEntriesPerLocation.toLocaleString()} entries per location.`;
+
+  const originalPriceId = item.price.id;
+  const originalQuantity = item.quantity ?? 1;
+
+  // Step 1 — queue proration items on Stripe (no invoice yet)
   await stripe.subscriptions.update(sub.stripe_subscription_id, {
-    items: [{ id: itemId, price: priceId, quantity: locationCount }],
-    proration_behavior: 'always_invoice',
+    items: [{ id: item.id, price: priceId, quantity: locationCount }],
+    proration_behavior: 'create_prorations',
   });
 
-  // Update DB
+  try {
+    // Step 2 — create draft invoice with description, finalize, and pay
+    const draftInvoice = await stripe.invoices.create({
+      customer: sub.stripe_customer_id,
+      subscription: sub.stripe_subscription_id,
+      description: changeLabel,
+      auto_advance: false,
+    });
+    const finalizedInvoice = await stripe.invoices.finalizeInvoice(draftInvoice.id);
+    if (finalizedInvoice.status === 'open') {
+      await stripe.invoices.pay(draftInvoice.id);
+    }
+  } catch (invoiceErr) {
+    // Roll back the subscription update so Stripe matches our DB
+    try {
+      await stripe.subscriptions.update(sub.stripe_subscription_id, {
+        items: [{ id: item.id, price: originalPriceId, quantity: originalQuantity }],
+        proration_behavior: 'none',
+      });
+    } catch (rollbackErr: any) {
+      console.error('[Stripe] Rollback failed after invoice error:', rollbackErr.message);
+    }
+    throw invoiceErr;
+  }
+
+  // Step 3 — only update DB after Stripe confirms everything succeeded
   await pool.query(
     `UPDATE subscription
      SET entries_per_location = $1, fee_at_entry = $2, updated_at = NOW()
      WHERE business_id = $3`,
-    [newEntriesPerLocation, newFeePerLocation, sub.business_id],
+    [newEntriesPerLocation, newTotalFee, sub.business_id],
   );
 };
 
@@ -874,6 +950,7 @@ export interface SubscriptionInvoice {
   amount_paid: number;
   amount_due: number;
   status: string | null;
+  invoice_description: string | null;
   description: InvoiceLineItem[];
   invoice_pdf: string | null;
   hosted_invoice_url: string | null;
@@ -902,6 +979,7 @@ export const getSubscriptionInvoices = async (userId: number): Promise<Subscript
     amount_paid: invoice.amount_paid / 100,
     amount_due: invoice.amount_due / 100,
     status: invoice.status,
+    invoice_description: invoice.description ?? null,
     description: invoice.lines.data.map(line => ({
       description: line.description,
       quantity: line.quantity ?? null,

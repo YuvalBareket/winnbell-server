@@ -249,7 +249,7 @@ export const addLocation = async (req: AuthRequest, res: Response): Promise<void
       [userId],
     );
     const newCount = Number(countResult.rows[0]?.cnt ?? 1);
-    await syncSubscriptionQuantity(userId, newCount);
+    await syncSubscriptionQuantity(userId, newCount, 'location_added');
 
     res.status(201).json({ locationId });
   } catch (error: unknown) {
@@ -306,7 +306,7 @@ export const deleteLocation = async (req: AuthRequest, res: Response): Promise<v
     const newCount = currentCount - 1;
 
     // Sync Stripe first — if it fails, abort without touching the DB
-    await syncSubscriptionQuantity(userId, newCount);
+    await syncSubscriptionQuantity(userId, newCount, 'location_removed');
 
     // Stripe succeeded — now remove from DB
     await deleteBusinessLocation(locId, userId);
