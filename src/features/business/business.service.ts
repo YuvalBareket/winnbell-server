@@ -22,13 +22,15 @@ export const getNearbyBusinessesService = async (
   maxLng: number,
   sector?: string,
   limit = 30,
+  name?: string,
 ): Promise<NearbyBusiness[]> => {
   const pool = getPool();
 
   const cappedLimit = Math.min(limit, 100);
   const params: (number | string)[] = [minLat, maxLat, minLng, maxLng];
   const sectorClause = sector ? `AND b.sector = $${params.push(sector)}` : '';
-  const limitPlaceholder = `$${params.push(cappedLimit)}`;
+  const nameClause = name ? `AND b.name ILIKE $${params.push(`%${name}%`)}` : '';
+  const limitPlaceholder = `$${params.push(name ? 100 : cappedLimit)}`;
 
   const query = `
     SELECT
@@ -51,7 +53,14 @@ export const getNearbyBusinessesService = async (
         SELECT COALESCE(json_agg(json_build_object('id', bl2.id, 'name', bl2.name, 'address', bl2.address) ORDER BY bl2.id), '[]'::json)
         FROM business_location bl2
         WHERE bl2.business_id = b.id AND bl2.is_active = true AND bl2.id != loc.id
-      ) AS other_locations
+      ) AS other_locations,
+      (
+        SELECT COUNT(*)::int FROM ticket t
+        WHERE t.business_id = b.id
+          AND t.location_id = loc.id
+          AND t.draw_id = (SELECT id FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1)
+          AND t.is_quarantined = FALSE
+      ) >= COALESCE(s.entries_per_location, (SELECT global_entry_cap FROM platform_settings WHERE id = 1)) AS cap_reached
     FROM business_location loc
     INNER JOIN business b ON loc.business_id = b.id
     JOIN subscription s ON s.business_id = b.id AND s.status IN ('Active', 'Trialing')
@@ -64,6 +73,7 @@ export const getNearbyBusinessesService = async (
       AND loc.latitude  BETWEEN $1 AND $2
       AND loc.longitude BETWEEN $3 AND $4
       ${sectorClause}
+      ${nameClause}
     ORDER BY
       (loc.latitude  - ($1 + $2) / 2.0) * (loc.latitude  - ($1 + $2) / 2.0) +
       (loc.longitude - ($3 + $4) / 2.0) * (loc.longitude - ($3 + $4) / 2.0)
@@ -386,7 +396,14 @@ export const searchParticipatingLocationsService = async (query: string): Promis
       b.logo_url,
       b.min_transaction_amount,
       b.pending_min_transaction_amount,
-      b.receipt_example_image_url
+      b.receipt_example_image_url,
+      (
+        SELECT COUNT(*)::int FROM ticket t
+        WHERE t.business_id = b.id
+          AND t.location_id = bl.id
+          AND t.draw_id = (SELECT id FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1)
+          AND t.is_quarantined = FALSE
+      ) >= COALESCE(s.entries_per_location, (SELECT global_entry_cap FROM platform_settings WHERE id = 1)) AS cap_reached
     FROM business_location bl
     JOIN business b ON bl.business_id = b.id
     JOIN subscription s ON s.business_id = b.id AND s.status IN ('Active', 'Trialing')

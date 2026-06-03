@@ -7,6 +7,7 @@ export interface INearbyQuery {
   maxLng: string;
   sector?: string;
   limit?: string;
+  name?: string;
 }
 
 /** Shape returned by the nearby search query */
@@ -27,6 +28,7 @@ export interface NearbyBusiness {
   website_url?: string | null;
   phone?: string | null;
   other_locations?: Array<{id: number; name: string; address: string}>;
+  cap_reached?: boolean;
 }
 
 /** Shape of each location in the FOR JSON subquery inside getMyBusinessData */
@@ -94,6 +96,7 @@ export interface ParticipatingLocation {
   logo_url: string | null;
   min_transaction_amount: number | null;
   receipt_example_image_url: string | null;
+  cap_reached?: boolean;
 }
 
 export type AddressSuggestion = {

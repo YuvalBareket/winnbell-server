@@ -674,7 +674,7 @@ export const submitReceiptEntryService = async (
       const bizCurrentCount = parseInt(bizCapCheck.rows[0].count, 10);
       const remainingBizEntries = entry_cap - bizCurrentCount;
       if (remainingBizEntries <= 0) {
-        throw new Error('This business has reached its entry cap for the current draw.');
+        throw new Error('We\'re sorry, this location has run out of entries for the current campaign. This is not your fault - try visiting another participating location!');
       }
       batchSize = Math.min(batchSize, remainingBizEntries);
     }
@@ -935,7 +935,7 @@ export const generateTicketService = async (user_id: number, location_id: number
         [business_id, drawId],
       );
       if (parseInt(capCheck.rows[0].count) >= entry_cap) {
-        throw new Error('Entry cap reached for this business in the current draw.');
+        throw new Error('We\'re sorry, this location has run out of entries for the current campaign. This is not your fault - try visiting another participating location!');
       }
     }
 
