@@ -18,6 +18,7 @@ import {
   searchParticipatingLocations,
   getEntryMode,
   getAddressController,
+  getAddressCoordsController,
 } from './features/business/business.controller.js';
 import { getFoundingAvailability } from './features/stripe/stripe.controller.js';
 import { testSetup } from './features/auth/test-setup.controller.js';
@@ -99,7 +100,8 @@ publicBusinessRouter.get('/nearby', getNearby);
 publicBusinessRouter.get('/participating', getParticipating);
 publicBusinessRouter.get('/participating/locations/search', searchParticipatingLocations);
 publicBusinessRouter.get('/mode', getEntryMode);
-publicBusinessRouter.post('/address', publicLimiter, getAddressController);
+publicBusinessRouter.post('/address', getAddressController);
+publicBusinessRouter.get('/address-coords', getAddressCoordsController);
 publicBusinessRouter.get('/subscription/founding-availability', getFoundingAvailability);
 app.use('/business', publicBusinessRouter);
 

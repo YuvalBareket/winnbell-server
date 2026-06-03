@@ -8,6 +8,7 @@ import {
   createManagerInviteLink,
   deleteBusinessLocation,
   getAddress,
+  getAddressCoords,
   getEntryModeService,
   getMyBusinessData,
   getNearbyBusinessesService,
@@ -102,6 +103,18 @@ export const getAddressController = async (req: Request, res: Response) => {
     res.status(400).json({ message });
   }
 };
+export const getAddressCoordsController = async (req: Request, res: Response) => {
+  try {
+    const placeId = String(req.query.placeId || '').trim();
+    if (!placeId) { res.status(400).json({ message: 'placeId required' }); return; }
+    const data = await getAddressCoords(placeId);
+    res.json(data);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : 'Bad request';
+    res.status(400).json({ message });
+  }
+};
+
 export const setupBusiness = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const userId = req.user!.id;

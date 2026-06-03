@@ -84,40 +84,59 @@ export const getNearbyBusinessesService = async (
   return result.rows;
 };
 
-export const getAddress = async (text: string): Promise<AddressSuggestion[]> => {
+// Returns label + placeId only — coordinates are fetched separately on selection
+export const getAddress = async (text: string): Promise<{ label: string; placeId: string }[]> => {
   const q = (text || '').trim();
   if (q.length < 3) return [];
 
   const apiKey = process.env.GOOGLE_PLACES_API;
   if (!apiKey) throw new Error('Missing GOOGLE_PLACES_API');
 
-  // Places API (New) — Text Search returns formattedAddress + coordinates in one call
-  const res = await fetch('https://places.googleapis.com/v1/places:searchText', {
+  const res = await fetch('https://places.googleapis.com/v1/places:autocomplete', {
     method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'X-Goog-Api-Key': apiKey,
-      'X-Goog-FieldMask': 'places.formattedAddress,places.location',
-    },
-    body: JSON.stringify({ textQuery: q, pageSize: 8 }),
+    headers: { 'Content-Type': 'application/json', 'X-Goog-Api-Key': apiKey },
+    body: JSON.stringify({
+      input: q,
+      includedPrimaryTypes: ['street_address', 'route', 'establishment', 'premise', 'point_of_interest'],
+    }),
   });
 
   if (!res.ok) {
     const body = await res.text().catch(() => '');
-    throw new Error(`Google Places error: ${res.status} ${res.statusText}${body ? ` - ${body}` : ''}`);
+    console.error(`Google Autocomplete error: ${res.status} ${res.statusText}${body ? ` - ${body}` : ''}`);
+    throw new Error('Address search unavailable');
   }
 
-  const data = (await res.json()) as GooglePlacesResponse;
+  const data = await res.json() as { suggestions?: Array<{ placePrediction?: { placeId?: string; text?: { text?: string } } }> };
 
-  const uniq = new Map<string, AddressSuggestion>();
-  for (const place of data.places ?? []) {
-    const label = (place as GooglePlaceResult).formattedAddress?.trim();
-    const loc = (place as GooglePlaceResult).location;
-    if (!label || typeof loc?.latitude !== 'number' || typeof loc?.longitude !== 'number') continue;
-    if (!uniq.has(label)) uniq.set(label, { label, lat: loc.latitude, lon: loc.longitude });
+  return (data.suggestions ?? [])
+    .map(s => s.placePrediction)
+    .filter((p): p is { placeId: string; text: { text: string } } => !!p?.placeId && !!p?.text?.text)
+    .slice(0, 6)
+    .map(p => ({ label: p.text.text, placeId: p.placeId }));
+};
+
+// Fetches coordinates for a selected placeId — called once when user picks a suggestion
+export const getAddressCoords = async (placeId: string): Promise<{ lat: number; lon: number; label: string }> => {
+  const apiKey = process.env.GOOGLE_PLACES_API;
+  if (!apiKey) throw new Error('Missing GOOGLE_PLACES_API');
+
+  const res = await fetch(
+    `https://places.googleapis.com/v1/places/${placeId}?fields=formattedAddress,location`,
+    { headers: { 'X-Goog-Api-Key': apiKey } },
+  );
+
+  if (!res.ok) {
+    console.error(`Google Place Details error: ${res.status}`);
+    throw new Error('Could not resolve address coordinates');
   }
 
-  return Array.from(uniq.values());
+  const data = await res.json() as { formattedAddress?: string; location?: { latitude: number; longitude: number } };
+  const label = data.formattedAddress?.trim();
+  const loc = data.location;
+  if (!label || typeof loc?.latitude !== 'number') throw new Error('Invalid place details response');
+
+  return { label, lat: loc.latitude, lon: loc.longitude };
 };
 
 export const createFullBusinessProfile = async (userId: number, data: BusinessSetupInput) => {
