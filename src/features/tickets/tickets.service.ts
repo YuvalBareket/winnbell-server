@@ -181,7 +181,7 @@ export const getBusinessTicketsService = async (userId: number, drawId: number, 
      INNER JOIN business b ON t.business_id = b.id
      LEFT JOIN business_location bl ON t.location_id = bl.id
      LEFT JOIN "user" u ON t.activated_by_user_id = u.id
-     WHERE b.user_id = $1 AND t.draw_id = $2 ${locationClause}
+     WHERE b.user_id = $1 AND t.draw_id = $2 AND t.is_quarantined = FALSE ${locationClause}
      ORDER BY t.created_at DESC ${limitClause}`,
     ticketParams,
   );
@@ -191,6 +191,21 @@ export const getBusinessTicketsService = async (userId: number, drawId: number, 
 
 export const getLocationTicketsService = async (userId: number, drawId: number) => {
   const pool = getPool();
+
+  const capRes = await pool.query(
+    `SELECT COALESCE(s.entries_per_location, ps.global_entry_cap) AS per_location_cap
+     FROM business_location bl
+     JOIN business b ON b.id = bl.business_id
+     LEFT JOIN subscription s ON s.business_id = b.id
+     LEFT JOIN platform_settings ps ON ps.id = 1
+     WHERE bl.manager_user_id = $1
+     LIMIT 1`,
+    [userId],
+  );
+  const perLocationCap: number | null = capRes.rows[0]?.per_location_cap != null
+    ? Number(capRes.rows[0].per_location_cap)
+    : null;
+
   const result = await pool.query(`
     SELECT
       t.id,
@@ -206,9 +221,11 @@ export const getLocationTicketsService = async (userId: number, drawId: number) 
     LEFT JOIN "user" u_act ON t.activated_by_user_id = u_act.id
     WHERE bl.manager_user_id = $1
     AND t.draw_id = $2
+    AND t.is_quarantined = FALSE
     ORDER BY t.created_at DESC
   `, [userId, drawId]);
-  return result.rows;
+
+  return { tickets: result.rows, perLocationCap };
 };
 
 export const checkFreeTicketEligibility = async (userId: number): Promise<FreeTicketStatus> => {
@@ -439,6 +456,7 @@ export const submitReceiptEntryService = async (
         (SELECT draw_opened_at                   FROM od)                    AS draw_opened_at,
         (SELECT EXISTS(SELECT 1 FROM platform_settings WHERE id = 1))        AS settings_exists,
         (SELECT global_entry_cap FROM platform_settings WHERE id = 1)        AS global_entry_cap,
+        (SELECT s.entries_per_location FROM subscription s WHERE s.business_id = (SELECT business_id FROM biz)) AS entries_per_location,
         EXISTS (
           SELECT 1 FROM business bx
           LEFT JOIN business_location blx ON blx.business_id = bx.id AND blx.id = $2
@@ -488,8 +506,10 @@ export const submitReceiptEntryService = async (
       : null;
     drawId = pf.draw_id;
     const draw_opened_at: Date = pf.draw_opened_at;
-    // If settings row missing, fall back to 500; if row exists with NULL, treat as unlimited
-    const entry_cap: number | null = pf.settings_exists ? pf.global_entry_cap : 500;
+    // Use subscription's per-location cap; fall back to global cap; fall back to 500 if no settings row
+    const entry_cap: number | null = pf.entries_per_location != null
+      ? Number(pf.entries_per_location)
+      : pf.settings_exists ? pf.global_entry_cap : 500;
 
     const entryCount = minTransactionAmount && minTransactionAmount > 0
       ? Math.min(Math.floor(input.transactionAmount / minTransactionAmount), MAX_ENTRIES_PER_RECEIPT)

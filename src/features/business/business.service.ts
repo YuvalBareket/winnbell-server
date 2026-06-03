@@ -143,7 +143,7 @@ export const createFullBusinessProfile = async (userId: number, data: BusinessSe
   }
 };
 
-export const getMyBusinessData = async (userId: number): Promise<MyBusinessData | undefined> => {
+export const getMyBusinessData = async (userId: number, managedLocationId?: number | null): Promise<MyBusinessData | undefined> => {
   const pool = getPool();
 
   const [bizResult, settingsResult] = await Promise.all([
@@ -184,13 +184,21 @@ export const getMyBusinessData = async (userId: number): Promise<MyBusinessData 
       FROM business b
       LEFT JOIN subscription s ON b.id = s.business_id
       WHERE b.user_id = $1
+         OR b.id IN (SELECT business_id FROM business_location WHERE manager_user_id = $1)
     `, [userId]),
     pool.query(`SELECT global_entry_cap FROM platform_settings WHERE id = 1`),
   ]);
 
   if (!bizResult.rows[0]) return undefined;
+
+  const row = bizResult.rows[0];
+
+  if (managedLocationId != null && Array.isArray(row.locations)) {
+    row.locations = row.locations.filter((l: { id: number }) => l.id === managedLocationId);
+  }
+
   return {
-    ...bizResult.rows[0],
+    ...row,
     global_entry_cap: settingsResult.rows[0]?.global_entry_cap ?? null,
   };
 };

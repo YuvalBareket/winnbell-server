@@ -1032,6 +1032,7 @@ export const getSubscriptionDetails = async (userId: number) => {
       LIMIT 1
     ) d ON true
     WHERE b.user_id = $1
+       OR b.id IN (SELECT business_id FROM business_location WHERE manager_user_id = $1)
   `, [userId]);
 
   return result.rows[0] ?? null;

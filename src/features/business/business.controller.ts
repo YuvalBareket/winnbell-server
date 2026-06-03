@@ -120,7 +120,8 @@ export const setupBusiness = async (req: AuthRequest, res: Response): Promise<vo
 export const getMyBusiness = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const userId = req.user!.id;
-    const business = await getMyBusinessData(userId);
+    const locationId = req.user!.location_id ?? null; // managers have this set
+    const business = await getMyBusinessData(userId, locationId);
 
     if (!business) {
       res.status(404).json({ message: 'Business profile not found' });

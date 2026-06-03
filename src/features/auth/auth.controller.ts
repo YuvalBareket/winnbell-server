@@ -113,6 +113,10 @@ export const syncUser = async (req: Request, res: Response): Promise<void> => {
       res.status(403).json({ message: 'ACCOUNT_DELETED' });
       return;
     }
+    if (err instanceof Error && (err.message.includes('invitation') || err.name === 'TokenExpiredError' || err.name === 'JsonWebTokenError')) {
+      res.status(400).json({ message: 'Your invitation link has expired or is invalid. Please request a new one.' });
+      return;
+    }
     console.error('Sync service error:', err instanceof Error ? err.message : err);
     res.status(500).json({ message: 'Server error' });
   }

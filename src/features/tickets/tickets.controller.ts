@@ -35,8 +35,9 @@ export const getMyTickets = async (req: AuthRequest, res: Response) => {
       const filterLocationId = req.query.location_id ? Number(req.query.location_id) : undefined;
       if (locationId) {
         // Location manager — scoped to their location only
-        const tickets = await ticketService.getLocationTicketsService(userId, drawId);
-        res.status(200).json({ tickets, totalCount: tickets.length, cap: null, effectiveCount: tickets.length });
+        const { tickets, perLocationCap } = await ticketService.getLocationTicketsService(userId, drawId);
+        const totalCount = tickets.filter((t: { is_quarantined: boolean }) => !t.is_quarantined).length;
+        res.status(200).json({ tickets, totalCount, cap: perLocationCap, perLocationCap, activeLocationCount: 1, effectiveCount: totalCount });
       } else {
         // Business owner — optionally filtered by location
         const page = req.query.page ? parseInt(req.query.page as string, 10) : 1;

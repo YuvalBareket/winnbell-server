@@ -123,7 +123,6 @@ export const getBusinessActivity = async (
   const feedParams: unknown[] = [businessId];
   const conditions: string[] = [
     'bl.business_id = $1',
-    't.is_quarantined = FALSE',
   ];
 
   if (dateRange === 'today') {
