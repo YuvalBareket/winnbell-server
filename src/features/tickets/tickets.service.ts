@@ -129,9 +129,9 @@ export const getUserTicketsService = async (userId: number, drawId: number) => {
      ) AS effective_count`,
     [userId, drawId],
   );
-  const effectiveCount: number = Number(countResult.rows[0]?.effective_count ?? 0);
+  const totalCount: number = Number(countResult.rows[0]?.effective_count ?? 0);
 
-  return { tickets: result.rows, effectiveCount };
+  return { tickets: result.rows, totalCount };
 };
 
 export const getBusinessTicketsService = async (userId: number, drawId: number, locationId?: number, page = 1, limit = 50) => {
