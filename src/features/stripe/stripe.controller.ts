@@ -11,6 +11,7 @@ import {
   getBusinessForCheckout,
   TIER_PRICE_MAP,
   updateSubscriptionPlan,
+  getSubscriptionInvoices,
 } from './stripe.service.js';
 
 // GET /business/subscription/founding-availability  (public — no auth)
@@ -141,6 +142,18 @@ export const updatePlan = async (req: Request, res: Response) => {
   } catch (err: any) {
     console.error('[stripe.updatePlan]', err);
     res.status(400).json({ error: err.message ?? 'Failed to update plan' });
+  }
+};
+
+// GET /business/subscription/invoices
+export const getInvoices = async (req: Request, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const invoices = await getSubscriptionInvoices(userId);
+    res.json(invoices);
+  } catch (err: unknown) {
+    console.error('[stripe.getInvoices]', err);
+    res.status(500).json({ error: 'Failed to retrieve invoices.' });
   }
 };
 

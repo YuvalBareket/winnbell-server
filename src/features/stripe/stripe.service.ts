@@ -846,7 +846,7 @@ export const updateSubscriptionPlan = async (userId: number, newEntriesPerLocati
   // Update Stripe subscription — Stripe handles proration automatically
   await stripe.subscriptions.update(sub.stripe_subscription_id, {
     items: [{ id: itemId, price: priceId, quantity: locationCount }],
-    proration_behavior: 'create_prorations',
+    proration_behavior: 'always_invoice',
   });
 
   // Update DB
@@ -856,6 +856,62 @@ export const updateSubscriptionPlan = async (userId: number, newEntriesPerLocati
      WHERE business_id = $3`,
     [newEntriesPerLocation, newFeePerLocation, sub.business_id],
   );
+};
+
+// ─── Get Subscription Invoices ────────────────────────────────────────────────
+
+export interface InvoiceLineItem {
+  description: string | null;
+  quantity: number | null;
+  amount: number;
+  period_start: number | undefined;
+  period_end: number | undefined;
+}
+
+export interface SubscriptionInvoice {
+  id: string;
+  date: number;
+  amount_paid: number;
+  amount_due: number;
+  status: string | null;
+  description: InvoiceLineItem[];
+  invoice_pdf: string | null;
+  hosted_invoice_url: string | null;
+}
+
+export const getSubscriptionInvoices = async (userId: number): Promise<SubscriptionInvoice[]> => {
+  const pool = getPool();
+
+  const result = await pool.query(
+    `SELECT s.stripe_customer_id FROM subscription s JOIN business b ON b.id = s.business_id WHERE b.user_id = $1`,
+    [userId],
+  );
+
+  const stripeCustomerId: string | null = result.rows[0]?.stripe_customer_id ?? null;
+  if (!stripeCustomerId) return [];
+
+  const invoiceList = await stripe.invoices.list({
+    customer: stripeCustomerId,
+    limit: 24,
+    expand: ['data.lines'],
+  });
+
+  return invoiceList.data.map((invoice): SubscriptionInvoice => ({
+    id: invoice.id,
+    date: invoice.created,
+    amount_paid: invoice.amount_paid / 100,
+    amount_due: invoice.amount_due / 100,
+    status: invoice.status,
+    description: invoice.lines.data.map(line => ({
+      description: line.description,
+      quantity: line.quantity ?? null,
+      amount: line.amount / 100,
+      period_start: line.period?.start,
+      period_end: line.period?.end,
+    })),
+    invoice_pdf: invoice.invoice_pdf,
+    hosted_invoice_url: invoice.hosted_invoice_url,
+  }));
 };
 
 // ─── Get Subscription Details ─────────────────────────────────────────────────
