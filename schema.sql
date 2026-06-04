@@ -472,6 +472,7 @@ CREATE INDEX idx_phone_otp_user ON phone_otp (user_id);
 -- ── user (query support) ─────────────────────────────────────────────────────
 
 CREATE INDEX idx_user_role ON "user" (role);
+CREATE UNIQUE INDEX idx_user_phone_unique ON "user" (phone_number) WHERE phone_number IS NOT NULL;
 
 -- =============================================================================
 -- Seed Data

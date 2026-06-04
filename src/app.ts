@@ -118,6 +118,6 @@ app.use('/tickets', redeemLimiter, ticketsRoutes);
 app.use('/draws', drawsRoutes);
 app.use('/business', businessRoutes);
 app.use('/notifications', notificationRoutes);
-app.use('/api/phone', phoneRouter);
+app.use('/phone', phoneRouter);
 
 export default app;

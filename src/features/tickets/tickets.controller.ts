@@ -204,10 +204,11 @@ export const getMyRiskLevel = async (req: AuthRequest, res: Response) => {
     const pool = getPool();
 
     const userResult = await pool.query(
-      `SELECT risk_score FROM "user" WHERE id = $1`,
+      `SELECT risk_score, is_phone_verified FROM "user" WHERE id = $1`,
       [userId],
     );
     const score: number = userResult.rows[0]?.risk_score ?? 0;
+    const isPhoneVerified: boolean = userResult.rows[0]?.is_phone_verified ?? false;
 
     // Mirror the exact throttle condition from submitReceiptEntryService:
     // high risk score AND already has a ticket in the last 24 hours
@@ -249,6 +250,7 @@ export const getMyRiskLevel = async (req: AuthRequest, res: Response) => {
       drawEntryCount,
       dailyCount,
       dailyLimit: 5,
+      isPhoneVerified,
     });
   } catch {
     res.status(500).json({ message: 'Failed to fetch risk level.' });

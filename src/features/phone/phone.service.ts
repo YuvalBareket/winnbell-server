@@ -1,14 +1,11 @@
-import { SNSClient, PublishCommand } from '@aws-sdk/client-sns';
+import twilio from 'twilio';
 import { getPool } from '../../shared/db/db.js';
 import crypto from 'crypto';
 
-const snsClient = new SNSClient({
-  region: process.env.AWS_SNS_REGION ?? 'us-east-1',
-  credentials: {
-    accessKeyId: process.env.AWS_SNS_ACCESS_KEY_ID!,
-    secretAccessKey: process.env.AWS_SNS_SECRET_ACCESS_KEY!,
-  },
-});
+const twilioClient = twilio(
+  process.env.TWILIO_ACCOUNT_SID!,
+  process.env.TWILIO_AUTH_TOKEN!,
+);
 
 const MAX_VERIFY_ATTEMPTS = 3;
 const OTP_EXPIRY_MINUTES = 10;
@@ -46,10 +43,11 @@ export const sendPhoneOtp = async (userId: number, phoneNumber: string): Promise
     [userId, normalizedPhone, code],
   );
 
-  await snsClient.send(new PublishCommand({
-    PhoneNumber: normalizedPhone,
-    Message: `Your Winnbell verification code is: ${code}. Valid for ${OTP_EXPIRY_MINUTES} minutes. Do not share this code.`,
-  }));
+  await twilioClient.messages.create({
+    to: normalizedPhone,
+    from: process.env.TWILIO_FROM_NUMBER!,
+    body: `Your Winnbell verification code is: ${code}. Valid for ${OTP_EXPIRY_MINUTES} minutes. Do not share this code.`,
+  });
 };
 
 export const verifyPhoneOtp = async (userId: number, code: string): Promise<void> => {
@@ -88,6 +86,16 @@ export const verifyPhoneOtp = async (userId: number, code: string): Promise<void
     if (otp.code !== code.trim()) {
       await client.query('COMMIT');
       throw new Error('INVALID_CODE');
+    }
+
+    // Check if phone number is already claimed by another user
+    const conflict = await client.query(
+      `SELECT id FROM "user" WHERE phone_number = $1 AND id != $2`,
+      [otp.phone_number, userId],
+    );
+    if (conflict.rows.length > 0) {
+      await client.query('COMMIT');
+      throw new Error('PHONE_ALREADY_TAKEN');
     }
 
     await client.query(

@@ -82,7 +82,7 @@ export const registerUser = async (
     const result = await client.query(
       `INSERT INTO "user" (full_name, email, password_hash, role, registration_ip)
        VALUES ($1, $2, $3, 'User', $4)
-       RETURNING id, role, full_name, email`,
+       RETURNING id, role, full_name, email, is_phone_verified`,
       [fullName, email, passwordHash, registrationIp ?? null],
     );
     const newUser = result.rows[0];
@@ -139,6 +139,7 @@ export const registerUser = async (
         role: newUser.role,
         location_id: locationId,
         requiresBusinessSetup: newUser.role === 'Business' && !inviteToken,
+        isPhoneVerified: newUser.is_phone_verified,
       },
     };
   } catch (error) {
@@ -157,7 +158,7 @@ export const loginUser = async (
   const pool = getPool();
 
   const result = await pool.query(
-    `SELECT id, email, password_hash, full_name, role FROM "user" WHERE email = $1 AND is_active = true`,
+    `SELECT id, email, password_hash, full_name, role, is_phone_verified FROM "user" WHERE email = $1 AND is_active = true`,
     [email],
   );
   const user = result.rows[0];
@@ -250,6 +251,7 @@ export const loginUser = async (
       requiresBusinessSetup: user.role === 'Business' && !locationId && !hasBusiness,
       businessIsActive,
       businessLogoUrl,
+      isPhoneVerified: user.is_phone_verified,
     },
   };
 };

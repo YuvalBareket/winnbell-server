@@ -48,6 +48,7 @@ export const verifyOtp = async (req: Request, res: Response): Promise<void> => {
     if (msg === 'OTP_EXPIRED') { res.status(400).json({ message: 'Verification code expired. Please request a new one.' }); return; }
     if (msg === 'TOO_MANY_ATTEMPTS') { res.status(429).json({ message: 'Too many failed attempts. Please request a new code.' }); return; }
     if (msg === 'INVALID_CODE') { res.status(400).json({ message: 'Invalid verification code.' }); return; }
+    if (msg === 'PHONE_ALREADY_TAKEN') { res.status(409).json({ message: 'This phone number is already linked to another account.' }); return; }
     console.error('[phone] verifyOtp error:', err);
     res.status(500).json({ message: 'Verification failed.' });
   }
