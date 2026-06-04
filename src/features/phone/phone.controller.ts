@@ -16,6 +16,10 @@ export const sendOtp = async (req: Request, res: Response): Promise<void> => {
     res.json({ success: true });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : '';
+    if (msg === 'PHONE_VERIFY_DISABLED') {
+      res.status(503).json({ message: 'Phone verification is not available yet. Please try again later.' });
+      return;
+    }
     if (msg === 'INVALID_PHONE') {
       res.status(400).json({ message: 'Invalid phone number format.' });
       return;

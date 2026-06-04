@@ -12,6 +12,10 @@ const OTP_EXPIRY_MINUTES = 10;
 const MAX_SENDS_PER_HOUR = 3;
 
 export const sendPhoneOtp = async (userId: number, phoneNumber: string): Promise<void> => {
+  if (process.env.PHONE_VERIFY_ENABLED !== 'true') {
+    throw new Error('PHONE_VERIFY_DISABLED');
+  }
+
   const pool = getPool();
 
   const normalizedPhone = phoneNumber.startsWith('+') ? phoneNumber : `+1${phoneNumber.replace(/\D/g, '')}`;
