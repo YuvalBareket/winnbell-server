@@ -78,7 +78,7 @@ export const sendPhoneOtp = async (userId: number, phoneNumber: string): Promise
     await twilioClient.messages.create({
       to: normalizedPhone,
       from: process.env.TWILIO_FROM_NUMBER!,
-      body: `Your Winnbell verification code is: ${code}. Valid for ${OTP_EXPIRY_MINUTES} minutes. Do not share this code. Reply STOP to opt out. Msg & data rates may apply.`,
+      body: `Winnbell code: ${code}. Expires in ${OTP_EXPIRY_MINUTES} min, do not share. Txt STOP to opt out. Msg & data rates may apply.`,
     });
   }
 };
