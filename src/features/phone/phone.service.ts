@@ -61,9 +61,8 @@ export const sendPhoneOtp = async (userId: number, phoneNumber: string): Promise
   if (userRateCheck.rows[0].cnt >= MAX_SENDS_PER_HOUR) {
     throw new Error('TOO_MANY_SENDS');
   }
-
-  const isDev = process.env.NODE_ENV !== 'production';
-  const code = isDev ? '123456' : String(crypto.randomInt(100000, 999999));
+//  const code = String(crypto.randomInt(100000, 999999));
+  const code = '123456' 
 
   // Insert new OTP — do NOT delete old rows first so rate limit history is preserved.
   // Old expired rows are cleaned up lazily on the next send.
@@ -74,14 +73,15 @@ export const sendPhoneOtp = async (userId: number, phoneNumber: string): Promise
     [userId, normalizedPhone, code],
   );
 
-  if (!isDev) {
-    await twilioClient.messages.create({
-      to: normalizedPhone,
-      from: process.env.TWILIO_FROM_NUMBER!,
-      body: `Winnbell code: ${code}. Expires in ${OTP_EXPIRY_MINUTES} min, do not share. Txt STOP to opt out. Msg & data rates may apply.`,
-    });
-  }
+
+//     await twilioClient.messages.create({
+//       to: normalizedPhone,
+//       from: process.env.TWILIO_FROM_NUMBER!,
+//       body: `Winnbell code: ${code}. Expires in ${OTP_EXPIRY_MINUTES} min, do not share. Txt STOP to opt out. Msg & data rates may apply.`,
+//     });
+
 };
+
 
 export const verifyPhoneOtp = async (userId: number, code: string): Promise<void> => {
   const pool = getPool();

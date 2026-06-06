@@ -14,6 +14,27 @@ export interface AuthRequest extends Request {
   user?: UserPayload;
 }
 
+export const requirePhoneVerified = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  const userId = req.user?.id;
+  if (!userId) { res.status(401).json({ message: 'Unauthorized' }); return; }
+
+  // Business and Admin roles are exempt — only regular users need phone verification
+  const role = req.user?.role;
+  if (role === 'Business' || role === 'Admin') { next(); return; }
+
+  const pool = getPool();
+  const result = await pool.query(`SELECT is_phone_verified FROM "user" WHERE id = $1`, [userId]);
+  if (!result.rows[0]?.is_phone_verified) {
+    res.status(403).json({ message: 'Phone verification required.' });
+    return;
+  }
+  next();
+};
+
 export const requireRole = (...roles: string[]) =>
   (req: AuthRequest, res: Response, next: NextFunction): void => {
     if (!req.user || !roles.includes(req.user.role)) {
