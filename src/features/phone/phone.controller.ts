@@ -20,6 +20,14 @@ export const sendOtp = async (req: Request, res: Response): Promise<void> => {
       res.status(503).json({ message: 'Phone verification is not available yet. Please try again later.' });
       return;
     }
+    if (msg === 'ALREADY_VERIFIED') {
+      res.status(400).json({ message: 'Your phone number is already verified.' });
+      return;
+    }
+    if (msg === 'PHONE_ALREADY_TAKEN') {
+      res.status(409).json({ message: 'This phone number is already linked to another account.' });
+      return;
+    }
     if (msg === 'INVALID_PHONE') {
       res.status(400).json({ message: 'Invalid phone number format.' });
       return;

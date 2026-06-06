@@ -24,6 +24,24 @@ export const sendPhoneOtp = async (userId: number, phoneNumber: string): Promise
     throw new Error('INVALID_PHONE');
   }
 
+  // Block if user is already verified — no need to re-send
+  const userCheck = await pool.query(
+    `SELECT is_phone_verified FROM "user" WHERE id = $1`,
+    [userId],
+  );
+  if (userCheck.rows[0]?.is_phone_verified) {
+    throw new Error('ALREADY_VERIFIED');
+  }
+
+  // Block if phone is already claimed by another user
+  const taken = await pool.query(
+    `SELECT id FROM "user" WHERE phone_number = $1 AND id != $2`,
+    [normalizedPhone, userId],
+  );
+  if (taken.rows.length > 0) {
+    throw new Error('PHONE_ALREADY_TAKEN');
+  }
+
   // Rate limit: max 3 OTP sends per phone number per hour
   const rateCheck = await pool.query(
     `SELECT COUNT(*)::int AS cnt FROM phone_otp
@@ -34,7 +52,18 @@ export const sendPhoneOtp = async (userId: number, phoneNumber: string): Promise
     throw new Error('TOO_MANY_SENDS');
   }
 
-  const code = String(crypto.randomInt(100000, 999999));
+  // Rate limit: max 3 OTP sends per user per hour (prevents multi-phone flooding)
+  const userRateCheck = await pool.query(
+    `SELECT COUNT(*)::int AS cnt FROM phone_otp
+     WHERE user_id = $1 AND created_at >= NOW() - INTERVAL '1 hour'`,
+    [userId],
+  );
+  if (userRateCheck.rows[0].cnt >= MAX_SENDS_PER_HOUR) {
+    throw new Error('TOO_MANY_SENDS');
+  }
+
+  const isDev = process.env.NODE_ENV !== 'production';
+  const code = isDev ? '123456' : String(crypto.randomInt(100000, 999999));
 
   // Insert new OTP — do NOT delete old rows first so rate limit history is preserved.
   // Old expired rows are cleaned up lazily on the next send.
@@ -45,11 +74,13 @@ export const sendPhoneOtp = async (userId: number, phoneNumber: string): Promise
     [userId, normalizedPhone, code],
   );
 
-  await twilioClient.messages.create({
-    to: normalizedPhone,
-    from: process.env.TWILIO_FROM_NUMBER!,
-    body: `Your Winnbell verification code is: ${code}. Valid for ${OTP_EXPIRY_MINUTES} minutes. Do not share this code.`,
-  });
+  if (!isDev) {
+    await twilioClient.messages.create({
+      to: normalizedPhone,
+      from: process.env.TWILIO_FROM_NUMBER!,
+      body: `Your Winnbell verification code is: ${code}. Valid for ${OTP_EXPIRY_MINUTES} minutes. Do not share this code. Reply STOP to opt out. Msg & data rates may apply.`,
+    });
+  }
 };
 
 export const verifyPhoneOtp = async (userId: number, code: string): Promise<void> => {

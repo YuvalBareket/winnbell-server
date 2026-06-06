@@ -79,6 +79,16 @@ const publicLimiter = rateLimit({
   message: { message: 'Too many requests, please slow down.' },
 });
 
+// OTP limiter — 50 per IP per hour. Handles shared networks (universities, offices)
+// while still blocking bot farms. Per-user + per-phone limits are the primary defense.
+const otpLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 50,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: 'Too many verification requests from this device. Please try again later.' },
+});
+
 // Stripe webhook must receive raw body — register BEFORE express.json()
 app.use('/webhooks/stripe', express.raw({ type: 'application/json' }), stripeWebhookRoutes);
 
@@ -118,6 +128,7 @@ app.use('/tickets', redeemLimiter, ticketsRoutes);
 app.use('/draws', drawsRoutes);
 app.use('/business', businessRoutes);
 app.use('/notifications', notificationRoutes);
+app.use('/phone/send-otp', otpLimiter);
 app.use('/phone', phoneRouter);
 
 export default app;
