@@ -118,6 +118,7 @@ app.use('/business', publicBusinessRouter);
 // Public draws endpoint — campaign info is public
 const publicDrawsRouter = Router();
 publicDrawsRouter.get('/active', drawsController.getActiveDraws);
+publicDrawsRouter.get('/:drawId', drawsController.getDrawById);
 app.use('/draws', publicDrawsRouter);
 
 // ── Authenticated routes ──

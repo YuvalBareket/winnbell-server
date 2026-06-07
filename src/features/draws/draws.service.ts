@@ -39,6 +39,16 @@ export const getDrawHistoryService = async () => {
   return result.rows;
 };
 
+export const getDrawByIdService = async (drawId: number) => {
+  const pool = getPool();
+  const result = await pool.query(`
+    SELECT id, name, prize_pool AS prize_amount, draw_date, status
+    FROM draw
+    WHERE id = $1
+  `, [drawId]);
+  return result.rows[0] ?? null;
+};
+
 export const getDrawResultService = async (drawId: number) => {
   const pool = getPool();
   const result = await pool.query(`
