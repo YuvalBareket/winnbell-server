@@ -203,46 +203,33 @@ export const getMyRiskLevel = async (req: AuthRequest, res: Response) => {
     const userId = req.user!.id;
     const pool = getPool();
 
-    const userResult = await pool.query(
-      `SELECT risk_score, is_phone_verified FROM "user" WHERE id = $1`,
+    // Single query: user info + daily receipt count + draw entry count
+    const result = await pool.query(
+      `SELECT
+         u.risk_score,
+         u.is_phone_verified,
+         (SELECT COUNT(DISTINCT t2.receipt_identifier)::int FROM ticket t2
+          WHERE t2.activated_by_user_id = $1 AND t2.entry_source = 'receipt'
+            AND t2.receipt_identifier IS NOT NULL
+            AND t2.activated_at >= NOW() - INTERVAL '24 hours') AS daily_count,
+         (
+           (SELECT COUNT(*)::int FROM ticket t3 JOIN draw d ON t3.draw_id = d.id
+            WHERE t3.activated_by_user_id = $1 AND d.status = 'Open' AND t3.is_quarantined = FALSE)
+           + (SELECT COUNT(*)::int FROM promotional_entry pe JOIN draw d2 ON pe.draw_id = d2.id
+              WHERE pe.user_id = $1 AND d2.status = 'Open')
+         ) AS draw_entry_count
+       FROM "user" u WHERE u.id = $1`,
       [userId],
     );
-    const score: number = userResult.rows[0]?.risk_score ?? 0;
-    const isPhoneVerified: boolean = userResult.rows[0]?.is_phone_verified ?? false;
 
-    // Mirror the exact throttle condition from submitReceiptEntryService:
-    // high risk score AND already has a ticket in the last 24 hours
-    let isThrottled = false;
-    if (score >= 20) {
-      const recentResult = await pool.query(
-        `SELECT COUNT(DISTINCT receipt_identifier) AS count FROM ticket
-         WHERE activated_by_user_id = $1 AND entry_source = 'receipt'
-           AND receipt_identifier IS NOT NULL
-           AND activated_at >= NOW() - INTERVAL '24 hours'`,
-        [userId],
-      );
-      isThrottled = parseInt(recentResult.rows[0].count, 10) >= 1;
-    }
+    const row = result.rows[0];
+    const score: number = row?.risk_score ?? 0;
+    const isPhoneVerified: boolean = row?.is_phone_verified ?? false;
+    const dailyCount: number = row?.daily_count ?? 0;
+    const drawEntryCount: number = row?.draw_entry_count ?? 0;
 
-    const drawCountResult = await pool.query(
-      `SELECT (
-         (SELECT COUNT(*)::int FROM ticket t JOIN draw d ON t.draw_id = d.id
-          WHERE t.activated_by_user_id = $1 AND d.status = 'Open' AND t.is_quarantined = FALSE)
-         + (SELECT COUNT(*)::int FROM promotional_entry pe JOIN draw d ON pe.draw_id = d.id
-            WHERE pe.user_id = $1 AND d.status = 'Open')
-       ) AS total_count`,
-      [userId],
-    );
-    const drawEntryCount = parseInt(drawCountResult.rows[0]?.total_count ?? '0', 10);
-
-    const dailyResult = await pool.query(
-      `SELECT COUNT(DISTINCT receipt_identifier) AS count FROM ticket
-       WHERE activated_by_user_id = $1 AND entry_source = 'receipt'
-         AND receipt_identifier IS NOT NULL
-         AND activated_at >= NOW() - INTERVAL '24 hours'`,
-      [userId],
-    );
-    const dailyCount = parseInt(dailyResult.rows[0]?.count ?? '0', 10);
+    // High risk + already submitted today = throttled
+    const isThrottled = score >= 20 && dailyCount >= 1;
 
     res.json({
       requiresImage: score > 9,

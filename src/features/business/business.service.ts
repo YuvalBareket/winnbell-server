@@ -433,9 +433,9 @@ export const searchParticipatingLocationsService = async (query: string): Promis
         WHERE de.business_id = b.id AND d.status = 'Open'
       )
       AND (
-        LOWER(b.name) LIKE LOWER($1) OR
-        LOWER(bl.name) LIKE LOWER($1) OR
-        LOWER(bl.address) LIKE LOWER($1)
+        b.name ILIKE $1 OR
+        bl.name ILIKE $1 OR
+        bl.address ILIKE $1
       )
     ORDER BY b.name ASC, bl.name ASC
     LIMIT 20`,

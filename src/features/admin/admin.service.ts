@@ -255,7 +255,7 @@ export const getDrawBusinessesService = async (
   const params: (string | number)[] = [drawId];
   const filters: string[] = [];
 
-  if (search) filters.push(`LOWER(b.name) LIKE LOWER($${params.push('%' + search + '%')})`);
+  if (search) filters.push(`b.name ILIKE $${params.push('%' + search + '%')}`);
   if (sector) filters.push(`b.sector = $${params.push(sector)}`);
 
   const whereExtra = filters.length ? `AND ${filters.join(' AND ')}` : '';
@@ -557,9 +557,7 @@ export const adminSetUserRiskService = async (userId: number, riskScore: number)
   );
   if (drawResult.rows.length > 0) {
     const { syncUserQuarantineState } = await import('../risk/risk.service.js');
-    for (const row of drawResult.rows) {
-      await syncUserQuarantineState(userId, row.id);
-    }
+    await Promise.all(drawResult.rows.map(row => syncUserQuarantineState(userId, row.id)));
   }
 };
 

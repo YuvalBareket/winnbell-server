@@ -209,8 +209,8 @@ export const toggleUserActive = async (req: Request, res: Response) => {
 
 export const getDrawBusinesses = async (req: Request, res: Response) => {
   const drawId = parseInt(req.params.drawId as string, 10);
-  const page = parseInt((req.query.page as string) ?? '1', 10);
-  const limit = parseInt((req.query.limit as string) ?? '25', 10);
+  const page = Math.max(1, parseInt((req.query.page as string) ?? '1', 10) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt((req.query.limit as string) ?? '25', 10) || 25));
   const search = (req.query.search as string) ?? '';
   const sector = (req.query.sector as string) ?? '';
   try {
@@ -396,8 +396,8 @@ export const getBusinessEntries = async (req: Request, res: Response) => {
   const businessId = parseInt(req.params.businessId as string, 10);
   if (isNaN(businessId)) { res.status(400).json({ message: 'Invalid business ID' }); return; }
   const drawId = req.query.drawId ? parseInt(req.query.drawId as string, 10) : null;
-  const page = parseInt((req.query.page as string) ?? '1', 10);
-  const limit = Math.min(parseInt((req.query.limit as string) ?? '50', 10) || 50, 100);
+  const page = Math.max(1, parseInt((req.query.page as string) ?? '1', 10) || 1);
+  const limit = Math.min(100, Math.max(1, parseInt((req.query.limit as string) ?? '50', 10) || 50));
   try {
     const result = await getBusinessEntriesService(businessId, drawId, page, limit);
     res.json(result);
