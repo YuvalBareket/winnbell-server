@@ -65,7 +65,7 @@ const registrationLimiter = rateLimit({
 
 const redeemLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
-  max: 15,
+  max: 30,
   standardHeaders: true,
   legacyHeaders: false,
   message: { message: 'Too many redemption attempts, please slow down.' },

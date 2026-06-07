@@ -151,13 +151,15 @@ export const getMyBusiness = async (req: AuthRequest, res: Response): Promise<vo
 
 export const updateBusiness = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const { businessSector, description, terms_text } = req.body as {
+    const { businessSector, description, terms_text, phone, website_url } = req.body as {
       businessSector: string;
       description: string;
       terms_text: string;
+      phone?: string;
+      website_url?: string;
     };
 
-    await updateBusinessProfile(req.user!.id, { businessSector, description, terms_text });
+    await updateBusinessProfile(req.user!.id, { businessSector, description, terms_text, phone, website_url });
     res.status(204).send();
   } catch (error: unknown) {
     if (error instanceof Error && error.message === 'BUSINESS_NOT_FOUND') {
