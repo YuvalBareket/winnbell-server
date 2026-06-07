@@ -176,11 +176,10 @@ export const getBusinessTicketsService = async (userId: number, drawId: number, 
   const limitClause = `LIMIT $${ticketParams.length - 1} OFFSET $${ticketParams.length}`;
   const result = await pool.query(
     `SELECT t.id, t.code, t.status, t.activated_at, t.is_quarantined,
-            bl.name AS location_name, u.full_name AS activated_by_user, u.email AS activated_by_email
+            bl.name AS location_name
      FROM ticket t
      INNER JOIN business b ON t.business_id = b.id
      LEFT JOIN business_location bl ON t.location_id = bl.id
-     LEFT JOIN "user" u ON t.activated_by_user_id = u.id
      WHERE b.user_id = $1 AND t.draw_id = $2 AND t.is_quarantined = FALSE ${locationClause}
      ORDER BY t.created_at DESC ${limitClause}`,
     ticketParams,
@@ -213,12 +212,9 @@ export const getLocationTicketsService = async (userId: number, drawId: number) 
       t.status,
       t.activated_at,
       t.is_quarantined,
-      bl.name as location_name,
-      u_act.full_name as activated_by_user,
-      u_act.email as activated_by_email
+      bl.name as location_name
     FROM ticket t
     INNER JOIN business_location bl ON t.location_id = bl.id
-    LEFT JOIN "user" u_act ON t.activated_by_user_id = u_act.id
     WHERE bl.manager_user_id = $1
     AND t.draw_id = $2
     AND t.is_quarantined = FALSE
