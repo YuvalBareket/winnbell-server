@@ -1,6 +1,6 @@
 import { Response } from 'express';
 import type { AuthRequest } from '../../shared/middleware/auth.middleware.js';
-import { saveSubscription, removeSubscription, sendToAll } from './notifications.service.js';
+import { saveSubscription, removeSubscription, sendToAudience, logNotification, getNotificationHistory } from './notifications.service.js';
 
 export const subscribe = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
@@ -41,20 +41,44 @@ export const unsubscribe = async (req: AuthRequest, res: Response): Promise<void
   }
 };
 
-// Admin-only: broadcast a push notification to all subscribers
+const VALID_AUDIENCES = ['all', 'users', 'businesses'] as const;
+type Audience = typeof VALID_AUDIENCES[number];
+
 export const broadcast = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const { title, body, url } = req.body as { title: string; body: string; url?: string };
+    const { title, body, url, audience = 'all' } = req.body as {
+      title: string;
+      body: string;
+      url?: string;
+      audience?: string;
+    };
 
     if (!title || !body) {
       res.status(400).json({ message: 'title and body are required.' });
       return;
     }
 
-    await sendToAll({ title, body, url });
-    res.status(200).json({ message: 'Notification sent.' });
+    if (!VALID_AUDIENCES.includes(audience as Audience)) {
+      res.status(400).json({ message: 'audience must be one of: all, users, businesses.' });
+      return;
+    }
+
+    const sentBy = req.user!.id;
+    const sentCount = await sendToAudience(audience as Audience, { title, body, url });
+    await logNotification(title, body, url, audience, sentCount, sentBy);
+    res.status(200).json({ message: 'Notification sent.', sent_count: sentCount });
   } catch (err: unknown) {
     console.error('[notifications] broadcast error:', err);
     res.status(500).json({ message: 'Failed to send notification.' });
+  }
+};
+
+export const getHistory = async (_req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const history = await getNotificationHistory();
+    res.status(200).json(history);
+  } catch (err: unknown) {
+    console.error('[notifications] getHistory error:', err);
+    res.status(500).json({ message: 'Failed to fetch notification history.' });
   }
 };

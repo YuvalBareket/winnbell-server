@@ -36,6 +36,9 @@ router.get('/promo-codes', adminController.getPromoCodes);
 router.post('/promo-codes', adminController.createPromoCode);
 router.patch('/promo-codes/:id/deactivate', adminController.deactivatePromoCode);
 
+router.post('/notifications/send', adminController.sendNotification);
+router.get('/notifications/history', adminController.getNotificationHistory);
+
 router.patch('/tickets/:ticketId/image-decision', adminController.adminImageDecision);
 router.get('/analytics', adminController.getAnalytics);
 router.get('/analytics/entry-volume', adminController.getEntryVolume);

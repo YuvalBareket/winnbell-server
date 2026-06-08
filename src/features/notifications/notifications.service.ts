@@ -83,3 +83,71 @@ export const sendToAll = async (payload: NotificationPayload): Promise<void> => 
     if (result.rows.length < BATCH_SIZE) break;
   }
 };
+
+type Audience = 'all' | 'users' | 'businesses';
+
+export const sendToAudience = async (audience: Audience, payload: NotificationPayload): Promise<number> => {
+  const pool = getPool();
+  const BATCH_SIZE = 500;
+  let offset = 0;
+  let totalSent = 0;
+
+  const baseQuery =
+    audience === 'all'
+      ? `SELECT ps.endpoint, ps.p256dh, ps.auth FROM push_subscription ps ORDER BY ps.id`
+      : `SELECT ps.endpoint, ps.p256dh, ps.auth
+         FROM push_subscription ps
+         JOIN "user" u ON u.id = ps.user_id
+         WHERE u.role = $3
+         ORDER BY ps.id`;
+
+  while (true) {
+    const params: (number | string)[] =
+      audience === 'all'
+        ? [BATCH_SIZE, offset]
+        : [BATCH_SIZE, offset, audience === 'users' ? 'User' : 'Business'];
+
+    const result = await pool.query(
+      `${baseQuery} LIMIT $1 OFFSET $2`,
+      params,
+    );
+    if (result.rows.length === 0) break;
+
+    await Promise.allSettled(
+      result.rows.map((sub) =>
+        webpush.sendNotification(
+          { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
+          JSON.stringify(payload),
+        ),
+      ),
+    );
+    totalSent += result.rows.length;
+    offset += result.rows.length;
+    if (result.rows.length < BATCH_SIZE) break;
+  }
+
+  return totalSent;
+};
+
+export const logNotification = async (
+  title: string,
+  body: string,
+  url: string | undefined,
+  audience: string,
+  sentCount: number,
+  sentBy: number,
+): Promise<void> => {
+  const pool = getPool();
+  await pool.query(
+    `INSERT INTO notification_log (title, body, url, audience, sent_count, sent_by) VALUES ($1, $2, $3, $4, $5, $6)`,
+    [title, body, url ?? null, audience, sentCount, sentBy],
+  );
+};
+
+export const getNotificationHistory = async (): Promise<object[]> => {
+  const pool = getPool();
+  const result = await pool.query(
+    `SELECT id, title, body, url, audience, sent_count, sent_by, created_at FROM notification_log ORDER BY created_at DESC LIMIT 50`,
+  );
+  return result.rows;
+};

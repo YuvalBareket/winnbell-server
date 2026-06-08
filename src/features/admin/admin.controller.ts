@@ -1,4 +1,6 @@
 import { Request, Response } from 'express';
+import type { AuthRequest } from '../../shared/middleware/auth.middleware.js';
+import { sendToAudience, logNotification, getNotificationHistory as getNotificationHistoryService } from '../notifications/notifications.service.js';
 import {
   closeDrawService,
   openDrawService,
@@ -523,5 +525,50 @@ export const removeBusinessFromDraw = async (req: Request, res: Response): Promi
     res.status(204).send();
   } catch (err: unknown) {
     res.status(400).json({ message: 'Failed to remove business from draw' });
+  }
+};
+
+const VALID_AUDIENCES = ['all', 'users', 'businesses'] as const;
+type Audience = typeof VALID_AUDIENCES[number];
+
+export const sendNotification = async (req: AuthRequest, res: Response): Promise<void> => {
+  const { title, body, url, audience = 'all' } = req.body as {
+    title: string;
+    body: string;
+    url?: string;
+    audience?: string;
+  };
+
+  if (!title || typeof title !== 'string') {
+    res.status(400).json({ message: 'title is required.' });
+    return;
+  }
+  if (!body || typeof body !== 'string') {
+    res.status(400).json({ message: 'body is required.' });
+    return;
+  }
+  if (!VALID_AUDIENCES.includes(audience as Audience)) {
+    res.status(400).json({ message: 'audience must be one of: all, users, businesses.' });
+    return;
+  }
+
+  try {
+    const sentBy = req.user!.id;
+    const sentCount = await sendToAudience(audience as Audience, { title, body, url });
+    await logNotification(title, body, url, audience, sentCount, sentBy);
+    res.status(200).json({ message: 'Notification sent.', sent_count: sentCount });
+  } catch (err: unknown) {
+    console.error('[admin.sendNotification]', err);
+    res.status(500).json({ message: 'Failed to send notification.' });
+  }
+};
+
+export const getNotificationHistory = async (_req: Request, res: Response): Promise<void> => {
+  try {
+    const history = await getNotificationHistoryService();
+    res.status(200).json(history);
+  } catch (err: unknown) {
+    console.error('[admin.getNotificationHistory]', err);
+    res.status(500).json({ message: 'Failed to fetch notification history.' });
   }
 };
