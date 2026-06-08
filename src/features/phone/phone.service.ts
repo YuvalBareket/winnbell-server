@@ -1,5 +1,6 @@
 import twilio from 'twilio';
 import { getPool } from '../../shared/db/db.js';
+import { invalidateUserAuth } from '../../shared/cache/cache.js';
 import crypto from 'crypto';
 
 const twilioClient = twilio(
@@ -138,6 +139,7 @@ export const verifyPhoneOtp = async (userId: number, code: string): Promise<void
 
     await client.query(`DELETE FROM phone_otp WHERE user_id = $1`, [userId]);
     await client.query('COMMIT');
+    invalidateUserAuth(userId);
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;

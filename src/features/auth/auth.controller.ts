@@ -5,6 +5,7 @@ import { createRemoteJWKSet, jwtVerify } from 'jose';
 import * as authService from './auth.service.js';
 import { RegisterRequest, AuthResponse } from './auth.types.js';
 import { getPool } from '../../shared/db/db.js';
+import { getPlatformSettings, invalidateUserAuth } from '../../shared/cache/cache.js';
 
 export const register = async (
   req: Request<{}, {}, RegisterRequest>,
@@ -125,9 +126,8 @@ export const syncUser = async (req: Request, res: Response): Promise<void> => {
 
 export const getRegionConfig = async (_req: Request, res: Response): Promise<void> => {
   try {
-    const pool = getPool();
-    const result = await pool.query(`SELECT allowed_states FROM platform_settings WHERE id = 1`);
-    const allowed_states: string[] = result.rows[0]?.allowed_states ?? [];
+    const settings = await getPlatformSettings();
+    const allowed_states: string[] = settings.allowed_states ?? [];
     res.json({ allowed_states });
   } catch {
     res.json({ allowed_states: [] });
@@ -138,9 +138,8 @@ export const checkRegion = async (req: Request, res: Response): Promise<void> =>
   try {
     const ip = req.ip || '';
     const country = await authService.getCountryFromIp(ip);
-    const pool = getPool();
-    const result = await pool.query(`SELECT allowed_states FROM platform_settings WHERE id = 1`);
-    const allowedStates: string[] = result.rows[0]?.allowed_states ?? [];
+    const settings = await getPlatformSettings();
+    const allowedStates: string[] = settings.allowed_states ?? [];
     const blocked = !!country && allowedStates.length > 0 && !allowedStates.includes(country);
     res.json({ blocked, country });
   } catch {
@@ -179,6 +178,7 @@ export const deleteAccount = async (req: Request, res: Response): Promise<void> 
        WHERE id = $1`,
       [userId],
     );
+    invalidateUserAuth(userId);
 
     // Remove from Supabase so the email is free for re-registration
     if (externalAuthId && process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE_KEY) {

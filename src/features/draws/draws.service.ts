@@ -1,6 +1,11 @@
 import { getPool } from '../../shared/db/db.js';
+import { publicCache } from '../../shared/cache/cache.js';
 
 export const getActiveDrawService = async () => {
+  const CACHE_KEY = 'draws:active';
+  const cached = publicCache.get(CACHE_KEY);
+  if (cached !== undefined) return cached;
+
   const pool = getPool();
   const result = await pool.query(`
     SELECT id, name, prize_pool AS prize_amount, draw_date, status
@@ -8,10 +13,15 @@ export const getActiveDrawService = async () => {
     WHERE status = 'Open'
     ORDER BY draw_date ASC
   `);
+  publicCache.set(CACHE_KEY, result.rows, 60);
   return result.rows;
 };
 
 export const getDrawHistoryService = async () => {
+  const CACHE_KEY = 'draws:history';
+  const cached = publicCache.get(CACHE_KEY);
+  if (cached !== undefined) return cached;
+
   const pool = getPool();
   const result = await pool.query(`
     SELECT
@@ -36,6 +46,7 @@ export const getDrawHistoryService = async () => {
     ORDER BY d.draw_date DESC
     LIMIT 50
   `);
+  publicCache.set(CACHE_KEY, result.rows, 300);
   return result.rows;
 };
 

@@ -1,5 +1,6 @@
 import { getPool, PoolClient } from '../../shared/db/db.js';
 import crypto from 'crypto';
+import { publicCache, invalidatePublicBusinessData } from '../../shared/cache/cache.js';
 import {
   ActivationResult,
   FreeTicketStatus,
@@ -72,6 +73,7 @@ export const activateTicket = async (code: string, userId: number) => {
     if (updateResult.rowCount === 0) throw new Error('This ticket has already been used or the draw is no longer open.');
 
     await client.query('COMMIT');
+    invalidatePublicBusinessData();
     return { message: 'Ticket activated successfully!' };
   } catch (err) {
     await client.query('ROLLBACK');
@@ -387,6 +389,7 @@ export const activateFreeTicket = async (userId: number, claimIp?: string): Prom
     `, [ticketCode, userId, activeDrawId]);
 
     await client.query('COMMIT');
+    invalidatePublicBusinessData();
 
     return {
       success: true,
@@ -750,6 +753,8 @@ export const submitReceiptEntryService = async (
     }
 
     await client.query('COMMIT');
+    invalidatePublicBusinessData();
+    publicCache.del(`business:location:${input.locationId}`);
 
     // Trigger async OCR validation — runs after commit, never blocks the response
     if (input.receiptImageUrl) {
@@ -877,6 +882,7 @@ export const activatePromotionalEntry = async (
     }
 
     await client.query('COMMIT');
+    invalidatePublicBusinessData();
     return { entryId: result.rows[0].id, drawName: draw.name };
   } catch (err) {
     await client.query('ROLLBACK');
@@ -943,6 +949,8 @@ export const generateTicketService = async (user_id: number, location_id: number
     `, [code, business_id, location_id, drawId]);
 
     await client.query('COMMIT');
+    invalidatePublicBusinessData();
+    publicCache.del(`business:location:${location_id}`);
     return { code };
   } catch (error) {
     await client.query('ROLLBACK');

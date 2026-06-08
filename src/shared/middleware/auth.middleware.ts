@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { getPool } from '../db/db.js';
+import { userCache } from '../cache/cache.js';
 
 // 1. Define the shape of the User object inside the token
 export interface UserPayload {
@@ -14,6 +15,8 @@ export interface AuthRequest extends Request {
   user?: UserPayload;
 }
 
+// Guards ticket mutation routes: checks both is_active and is_phone_verified in one query.
+// Business/Admin roles skip phone verification but still get the is_active check.
 export const requirePhoneVerified = async (
   req: AuthRequest,
   res: Response,
@@ -22,22 +25,66 @@ export const requirePhoneVerified = async (
   const userId = req.user?.id;
   if (!userId) { res.status(401).json({ message: 'Unauthorized' }); return; }
 
-  // Business and Admin roles are exempt — only regular users need phone verification
+  type GuardData = { is_active: boolean; is_phone_verified: boolean };
+  const guard = await getGuardData(userId, res);
+  if (!guard) return; // response already sent
+
+  if (!guard.is_active) {
+    res.status(401).json({ message: 'Account is deactivated.' });
+    return;
+  }
+
+  // Business and Admin roles are exempt from phone verification
   const role = req.user?.role;
-  if (role === 'Business' || role === 'Admin') { next(); return; }
+  if (role !== 'Business' && role !== 'Admin' && !guard.is_phone_verified) {
+    res.status(403).json({ message: 'Phone verification required.' });
+    return;
+  }
+
+  next();
+};
+
+// Guards business ticket generation: checks is_active only (no phone requirement).
+export const requireActive = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  const userId = req.user?.id;
+  if (!userId) { res.status(401).json({ message: 'Unauthorized' }); return; }
+
+  const guard = await getGuardData(userId, res);
+  if (!guard) return;
+
+  if (!guard.is_active) {
+    res.status(401).json({ message: 'Account is deactivated.' });
+    return;
+  }
+
+  next();
+};
+
+type GuardData = { is_active: boolean; is_phone_verified: boolean };
+
+async function getGuardData(userId: number, res: Response): Promise<GuardData | null> {
+  const cacheKey = `user:guard:${userId}`;
+  const cached = userCache.get<GuardData>(cacheKey);
+  if (cached) return cached;
 
   try {
     const pool = getPool();
-    const result = await pool.query(`SELECT is_phone_verified FROM "user" WHERE id = $1`, [userId]);
-    if (!result.rows[0]?.is_phone_verified) {
-      res.status(403).json({ message: 'Phone verification required.' });
-      return;
-    }
-    next();
+    const result = await pool.query(
+      `SELECT is_active, is_phone_verified FROM "user" WHERE id = $1`,
+      [userId],
+    );
+    const guard: GuardData = result.rows[0] ?? { is_active: false, is_phone_verified: false };
+    userCache.set(cacheKey, guard);
+    return guard;
   } catch {
     res.status(503).json({ message: 'Service temporarily unavailable.' });
+    return null;
   }
-};
+}
 
 export const requireRole = (...roles: string[]) =>
   (req: AuthRequest, res: Response, next: NextFunction): void => {
@@ -48,6 +95,8 @@ export const requireRole = (...roles: string[]) =>
     next();
   };
 
+// JWT-only verification. No DB query. Banned users are blocked at mutation
+// points (requirePhoneVerified / requireActive), not here.
 export const authenticateToken = async (
   req: AuthRequest,
   res: Response,
@@ -65,19 +114,7 @@ export const authenticateToken = async (
     const jwtSecret = process.env.JWT_SECRET;
     if (!jwtSecret) throw new Error('JWT_SECRET is not configured');
     const decoded = jwt.verify(token, jwtSecret) as UserPayload;
-
-    // Verify the account is still active in the database (catches banned/deactivated users)
-    const pool = getPool();
-    const userCheck = await pool.query(
-      `SELECT is_active, role FROM "user" WHERE id = $1`,
-      [decoded.id],
-    );
-    if (!userCheck.rows[0]?.is_active) {
-      res.status(401).json({ message: 'Account is deactivated.' });
-      return;
-    }
-
-    req.user = { ...decoded, role: userCheck.rows[0].role };
+    req.user = decoded;
     next();
   } catch (error) {
     res.status(401).json({ message: 'Invalid or expired token.' });

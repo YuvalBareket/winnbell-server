@@ -25,6 +25,7 @@
     "helmet": "^8.1.0",
     "jose": "^6.2.3",
     "jsonwebtoken": "^9.0.3",
+    "node-cache": "^5.1.2",
     "nodemailer": "^8.0.7",
     "pg": "^8.20.0",
     "stripe": "^21.0.1",

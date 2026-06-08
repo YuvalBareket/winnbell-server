@@ -1,4 +1,5 @@
 import { getPool } from '../../shared/db/db.js';
+import { getPlatformSettings, invalidatePlatformSettings, invalidatePublicBusinessData } from '../../shared/cache/cache.js';
 import { decayAllUserRiskScores } from '../risk/risk.service.js';
 
 export const getBusinessesWithStats = async (params: {
@@ -183,6 +184,7 @@ export const updateDrawService = async (
     `UPDATE draw SET ${updates.join(', ')} WHERE id = $${idx} RETURNING id, name, prize_pool AS prize_amount, draw_date, status`,
     values,
   );
+  invalidatePublicBusinessData();
   return result.rows[0];
 };
 
@@ -193,6 +195,7 @@ export const deleteDrawService = async (drawId: number) => {
   if (existing.rows[0].status !== 'Upcoming')
     throw new Error('Only upcoming campaigns can be deleted');
   await pool.query(`DELETE FROM draw WHERE id = $1`, [drawId]);
+  invalidatePublicBusinessData();
 };
 
 export const createDrawService = async (data: {
@@ -233,6 +236,7 @@ export const createDrawService = async (data: {
     `, [draw.id]);
 
     await client.query('COMMIT');
+    invalidatePublicBusinessData();
     return draw;
   } catch (err) {
     await client.query('ROLLBACK');
@@ -300,6 +304,7 @@ export const openDrawService = async (drawId: number): Promise<void> => {
 
     await client.query(`UPDATE draw SET status = 'Open', opened_at = NOW() WHERE id = $1`, [drawId]);
     await client.query('COMMIT');
+    invalidatePublicBusinessData();
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
@@ -330,6 +335,7 @@ export const closeDrawService = async (drawId: number): Promise<void> => {
     `);
 
     await client.query('COMMIT');
+    invalidatePublicBusinessData();
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
@@ -369,6 +375,7 @@ export const reopenDrawService = async (drawId: number): Promise<void> => {
     );
 
     await client.query('COMMIT');
+    invalidatePublicBusinessData();
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
@@ -431,6 +438,7 @@ export const pickDrawWinnerService = async (drawId: number): Promise<{
     );
 
     await client.query('COMMIT');
+    invalidatePublicBusinessData();
 
     return {
       winnerId,
@@ -585,11 +593,13 @@ export const getPlatformSettingsService = async (): Promise<{
   founding_member_cap: number;
   founding_phase_active: boolean;
 }> => {
-  const pool = getPool();
-  const result = await pool.query(
-    `SELECT global_entry_cap, allowed_states, founding_member_cap, founding_phase_active FROM platform_settings WHERE id = 1`,
-  );
-  return result.rows[0] ?? { global_entry_cap: null, allowed_states: ['FL'], founding_member_cap: 30, founding_phase_active: true };
+  const settings = await getPlatformSettings();
+  return {
+    global_entry_cap: (settings.global_entry_cap as number | undefined) ?? null,
+    allowed_states: settings.allowed_states ?? ['FL'],
+    founding_member_cap: settings.founding_member_cap ?? 30,
+    founding_phase_active: (settings as any).founding_phase_active ?? true,
+  };
 };
 
 export const getFoundingMembersTakenCount = async (): Promise<number> => {
@@ -618,6 +628,8 @@ export const updatePlatformSettingsService = async (
            updated_at            = NOW()`,
     [global_entry_cap, allowed_states ?? ['FL'], founding_member_cap ?? null, founding_phase_active ?? null],
   );
+  invalidatePlatformSettings();
+  invalidatePublicBusinessData();
 };
 
 export const getPromoCodesService = async () => {
@@ -898,6 +910,7 @@ export const duplicateDrawService = async (drawId: number) => {
      RETURNING id, name, prize_pool AS prize_amount, draw_date, status`,
     [`${name} (Copy)`, prize_pool],
   );
+  invalidatePublicBusinessData();
   return result.rows[0];
 };
 
@@ -1002,6 +1015,7 @@ export const addBusinessToDrawService = async (drawId: number, businessId: numbe
      ON CONFLICT (draw_id, business_id) DO NOTHING`,
     [drawId, businessId, feeAtEntry],
   );
+  invalidatePublicBusinessData();
 };
 
 export const removeBusinessFromDrawService = async (drawId: number, businessId: number): Promise<void> => {
@@ -1014,6 +1028,7 @@ export const removeBusinessFromDrawService = async (drawId: number, businessId: 
     `DELETE FROM draw_entry WHERE draw_id = $1 AND business_id = $2`,
     [drawId, businessId],
   );
+  invalidatePublicBusinessData();
 };
 
 export const getBusinessDetailService = async (businessId: number) => {

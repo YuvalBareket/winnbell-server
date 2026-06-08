@@ -1,4 +1,5 @@
 import { getPool } from '../../shared/db/db.js';
+import { statsCache, publicCache, invalidateMyBusiness, invalidatePublicBusinessData, getPlatformSettings } from '../../shared/cache/cache.js';
 import crypto from 'crypto';
 import {
   AddLocationInput,
@@ -24,6 +25,10 @@ export const getNearbyBusinessesService = async (
   limit = 30,
   name?: string,
 ): Promise<NearbyBusiness[]> => {
+  const CACHE_KEY = `business:nearby:${Math.round(minLat * 100)}:${Math.round(maxLat * 100)}:${Math.round(minLng * 100)}:${Math.round(maxLng * 100)}:${sector || 'all'}:${name || ''}`;
+  const cached = publicCache.get<NearbyBusiness[]>(CACHE_KEY);
+  if (cached !== undefined) return cached;
+
   const pool = getPool();
 
   const cappedLimit = Math.min(limit, 100);
@@ -62,6 +67,7 @@ export const getNearbyBusinessesService = async (
   `;
 
   const result = await pool.query(query, params);
+  publicCache.set(CACHE_KEY, result.rows);
   return result.rows;
 };
 
@@ -144,6 +150,7 @@ export const createFullBusinessProfile = async (userId: number, data: BusinessSe
     }
 
     await client.query('COMMIT');
+    invalidatePublicBusinessData();
     return { businessId };
   } catch (error) {
     await client.query('ROLLBACK');
@@ -154,9 +161,21 @@ export const createFullBusinessProfile = async (userId: number, data: BusinessSe
 };
 
 export const getMyBusinessData = async (userId: number, managedLocationId?: number | null): Promise<MyBusinessData | undefined> => {
+  const cacheKey = `business:my:${userId}`;
+  const cached = statsCache.get<MyBusinessData>(cacheKey);
+  if (cached) {
+    if (managedLocationId != null && Array.isArray(cached.locations)) {
+      return {
+        ...cached,
+        locations: cached.locations.filter((l: { id: number }) => l.id === managedLocationId),
+      };
+    }
+    return cached;
+  }
+
   const pool = getPool();
 
-  const [bizResult, settingsResult] = await Promise.all([
+  const [bizResult, platformSettings] = await Promise.all([
     pool.query(`
       SELECT
         b.id,
@@ -196,21 +215,27 @@ export const getMyBusinessData = async (userId: number, managedLocationId?: numb
       WHERE b.user_id = $1
          OR b.id IN (SELECT business_id FROM business_location WHERE manager_user_id = $1)
     `, [userId]),
-    pool.query(`SELECT global_entry_cap FROM platform_settings WHERE id = 1`),
+    getPlatformSettings(),
   ]);
 
   if (!bizResult.rows[0]) return undefined;
 
   const row = bizResult.rows[0];
+  const full: MyBusinessData = {
+    ...row,
+    global_entry_cap: platformSettings.global_entry_cap ?? null,
+  };
 
-  if (managedLocationId != null && Array.isArray(row.locations)) {
-    row.locations = row.locations.filter((l: { id: number }) => l.id === managedLocationId);
+  statsCache.set(cacheKey, full);
+
+  if (managedLocationId != null && Array.isArray(full.locations)) {
+    return {
+      ...full,
+      locations: full.locations.filter((l: { id: number }) => l.id === managedLocationId),
+    };
   }
 
-  return {
-    ...row,
-    global_entry_cap: settingsResult.rows[0]?.global_entry_cap ?? null,
-  };
+  return full;
 };
 
 export const createManagerInviteLink = async (locationId: number, ownerUserId: number) => {
@@ -266,6 +291,7 @@ export const removeLocationManagerService = async (locationId: number, ownerUser
     await client.query(`UPDATE business_location SET manager_user_id = NULL WHERE id = $1`, [locationId]);
     await client.query(`UPDATE "user" SET role = 'User' WHERE id = $1`, [managerId]);
     await client.query('COMMIT');
+    invalidatePublicBusinessData();
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
@@ -284,6 +310,9 @@ export const updateBusinessProfile = async (ownerUserId: number, data: UpdateBus
   `, [data.businessSector, data.description, data.terms_text, data.website_url ?? null, data.phone ?? null, ownerUserId]);
 
   if (result.rowCount === 0) throw new Error('BUSINESS_NOT_FOUND');
+
+  invalidateMyBusiness(ownerUserId);
+  invalidatePublicBusinessData();
 };
 
 export const updateBusinessLocation = async (
@@ -303,6 +332,9 @@ export const updateBusinessLocation = async (
   `, [data.name, data.address, data.lat, data.lon, locationId, ownerUserId]);
 
   if (result.rowCount === 0) throw new Error('UNAUTHORIZED_OR_INVALID_LOCATION');
+
+  invalidatePublicBusinessData();
+  publicCache.del('business:location:' + locationId);
 };
 
 export const addBusinessLocation = async (ownerUserId: number, data: AddLocationInput): Promise<{ locationId: number }> => {
@@ -319,6 +351,7 @@ export const addBusinessLocation = async (ownerUserId: number, data: AddLocation
     RETURNING id
   `, [businessId, data.name, data.address, data.lat, data.lon]);
 
+  invalidatePublicBusinessData();
   return { locationId: result.rows[0].id };
 };
 
@@ -335,6 +368,9 @@ export const deleteBusinessLocation = async (locationId: number, ownerUserId: nu
   if (ownerCheck.rows.length === 0) throw new Error('UNAUTHORIZED_OR_INVALID_LOCATION');
 
   await pool.query(`UPDATE business_location SET is_active = false WHERE id = $1`, [locationId]);
+
+  invalidatePublicBusinessData();
+  publicCache.del('business:location:' + locationId);
 };
 
 export const updateBusinessLogo = async (ownerUserId: number, logoUrl: string): Promise<void> => {
@@ -344,9 +380,16 @@ export const updateBusinessLogo = async (ownerUserId: number, logoUrl: string): 
     [logoUrl, ownerUserId],
   );
   if (result.rowCount === 0) throw new Error('BUSINESS_NOT_FOUND');
+
+  invalidateMyBusiness(ownerUserId);
+  invalidatePublicBusinessData();
 };
 
 export const getEntryModeService = async (): Promise<{ entry_mode: string }> => {
+  const CACHE_KEY = 'business:entry_mode';
+  const cached = publicCache.get<{ entry_mode: string }>(CACHE_KEY);
+  if (cached !== undefined) return cached;
+
   const pool = getPool();
   const result = await pool.query(
     `SELECT b.entry_mode FROM business b
@@ -358,10 +401,16 @@ export const getEntryModeService = async (): Promise<{ entry_mode: string }> => 
      )
      LIMIT 1`,
   );
-  return { entry_mode: result.rows[0]?.entry_mode ?? 'receipt' };
+  const value = { entry_mode: result.rows[0]?.entry_mode ?? 'receipt' };
+  publicCache.set(CACHE_KEY, value, 300);
+  return value;
 };
 
 export const getParticipatingBusinessesService = async () => {
+  const CACHE_KEY = 'business:participating';
+  const cached = publicCache.get(CACHE_KEY);
+  if (cached !== undefined) return cached;
+
   const pool = getPool();
 
   const result = await pool.query(`
@@ -380,7 +429,9 @@ export const getParticipatingBusinessesService = async () => {
   // All participating businesses share the same entry_mode; default to 'receipt' if none found
   const entry_mode = businesses[0]?.entry_mode ?? 'receipt';
 
-  return { entry_mode, businesses };
+  const value = { entry_mode, businesses };
+  publicCache.set(CACHE_KEY, value, 60);
+  return value;
 };
 
 export const searchParticipatingLocationsService = async (query: string): Promise<ParticipatingLocation[]> => {
@@ -426,6 +477,10 @@ export const searchParticipatingLocationsService = async (query: string): Promis
 };
 
 export const getParticipatingLocationByIdService = async (locationId: number): Promise<ParticipatingLocation | null> => {
+  const CACHE_KEY = `business:location:${locationId}`;
+  const cached = publicCache.get<ParticipatingLocation | null>(CACHE_KEY);
+  if (cached !== undefined) return cached;
+
   const pool = getPool();
   const result = await pool.query(
     `WITH open_draw AS (
@@ -471,7 +526,9 @@ export const getParticipatingLocationByIdService = async (locationId: number): P
       )`,
     [locationId],
   );
-  return result.rows[0] ?? null;
+  const value = result.rows[0] ?? null;
+  publicCache.set(CACHE_KEY, value, 15);
+  return value;
 };
 
 export const updateCampaignSettings = async (
@@ -526,6 +583,8 @@ export const updateCampaignSettings = async (
   }
 
   if (result.rowCount === 0) throw new Error('BUSINESS_NOT_FOUND');
+
+  invalidatePublicBusinessData();
   return { isPending: hasOpenDraw };
 };
 

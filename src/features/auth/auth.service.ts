@@ -2,10 +2,10 @@ import bcrypt from 'bcryptjs';
 import { getPool } from '../../shared/db/db.js';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
+import { getPlatformSettings, invalidateUserAuth } from '../../shared/cache/cache.js';
 const getAllowedStates = async (): Promise<string[]> => {
-  const pool = getPool();
-  const result = await pool.query(`SELECT allowed_states FROM platform_settings WHERE id = 1`);
-  return result.rows[0]?.allowed_states ?? [];
+  const settings = await getPlatformSettings();
+  return settings.allowed_states ?? [];
 };
 
 export const getCountryFromIp = async (ip: string): Promise<string | null> => {
@@ -131,6 +131,7 @@ export const registerUser = async (
     );
 
     await client.query('COMMIT');
+    invalidateUserAuth(newUser.id);
 
     const token = jwt.sign(
       { id: newUser.id, role: newUser.role, location_id: locationId },
@@ -205,6 +206,7 @@ export const loginUser = async (
           [user.id],
         );
         await client.query('COMMIT');
+        invalidateUserAuth(user.id);
         user.role = 'Business';
         locationId = decoded.locationId;
       }
@@ -292,6 +294,7 @@ export const changePasswordService = async (userId: number, currentPassword: str
   const salt = await bcrypt.genSalt(10);
   const newHash = await bcrypt.hash(newPassword, salt);
   await pool.query(`UPDATE "user" SET password_hash = $1 WHERE id = $2`, [newHash, userId]);
+  invalidateUserAuth(userId);
   // Revoke all refresh tokens so stolen sessions can't survive a password change
   await pool.query(`DELETE FROM refresh_token WHERE user_id = $1`, [userId]);
 };
@@ -425,6 +428,7 @@ export const syncExternalUser = async (
     );
 
     await client.query('COMMIT');
+    invalidateUserAuth(dbUser.id);
 
     return {
       message: 'Sync successful',

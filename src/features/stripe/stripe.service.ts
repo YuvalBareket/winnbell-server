@@ -2,6 +2,7 @@ import Stripe from 'stripe';
 import { Pool } from 'pg';
 import { getPool } from '../../shared/db/db.js';
 import { sendSubscriptionConfirmationEmail } from '../../shared/email/email.service.js';
+import { getPlatformSettings, publicCache, invalidatePublicBusinessData } from '../../shared/cache/cache.js';
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string);
 
@@ -50,10 +51,7 @@ export const createFoundingMemberCheckoutSession = async (
 ): Promise<{ url: string }> => {
   const pool = getPool();
 
-  const settingsResult = await pool.query(
-    `SELECT founding_member_cap, founding_phase_active FROM platform_settings WHERE id = 1`,
-  );
-  const settings = settingsResult.rows[0];
+  const settings = await getPlatformSettings();
   if (!settings?.founding_phase_active) throw new Error('Founding partner program is not currently active');
 
   const cap = settings.founding_member_cap as number;
@@ -97,16 +95,21 @@ export const createFoundingMemberCheckoutSession = async (
 export const getFoundingMemberCount = async (): Promise<{
   taken: number; remaining: number; cap: number; price: number; active: boolean;
 }> => {
+  const CACHE_KEY = 'founding:availability';
+  const cached = publicCache.get<{ taken: number; remaining: number; cap: number; price: number; active: boolean }>(CACHE_KEY);
+  if (cached !== undefined) return cached;
+
   const pool = getPool();
-  const [settingsResult, countResult] = await Promise.all([
-    pool.query(`SELECT founding_member_cap, founding_phase_active FROM platform_settings WHERE id = 1`),
+  const [settings, countResult] = await Promise.all([
+    getPlatformSettings(),
     pool.query(`SELECT COUNT(*)::int AS taken FROM founding_member`),
   ]);
-  const settings = settingsResult.rows[0] ?? { founding_member_cap: 30, founding_phase_active: true };
   const taken = countResult.rows[0]?.taken ?? 0;
   const cap = settings.founding_member_cap ?? 30;
-  const active = settings.founding_phase_active ?? true;
-  return { taken, remaining: Math.max(0, cap - taken), cap, price: 1000, active };
+  const active = (settings as any).founding_phase_active ?? true;
+  const value = { taken, remaining: Math.max(0, cap - taken), cap, price: 1000, active };
+  publicCache.set(CACHE_KEY, value, 60);
+  return value;
 };
 
 // ─── Create Checkout Session ──────────────────────────────────────────────────
@@ -185,6 +188,7 @@ export const verifyAndActivateSession = async (sessionId: string, userId: number
   if (session.mode === 'payment' && session.metadata?.founding === 'true') {
     const paymentIntentId = session.payment_intent as string;
     await activateFoundingMember(pool, businessId, paymentIntentId, sessionId);
+    invalidatePublicBusinessData();
     return;
   }
 
@@ -210,6 +214,7 @@ export const verifyAndActivateSession = async (sessionId: string, userId: number
   const entriesPerLocation = Number(session.metadata?.entries_per_location ?? 0);
 
   await activateBusinessSubscription(pool, businessId, subscription.id, customerId, priceId, currentPeriodEnd, monthlyEquivalentFee, entriesPerLocation, billingInterval);
+  invalidatePublicBusinessData();
 };
 
 // ─── Handle Webhook ───────────────────────────────────────────────────────────
@@ -246,6 +251,7 @@ export const handleStripeWebhook = async (rawBody: Buffer, signature: string): P
         if (session.mode === 'payment' && session.metadata?.founding === 'true') {
           const paymentIntentId = session.payment_intent as string;
           await activateFoundingMember(pool, businessId, paymentIntentId, session.id);
+          invalidatePublicBusinessData();
           console.log(`[Stripe] Webhook activated founding member for business ${businessId}`);
           break;
         }
@@ -267,6 +273,7 @@ export const handleStripeWebhook = async (rawBody: Buffer, signature: string): P
         const entriesPerLocation = Number(session.metadata?.entries_per_location ?? 0);
 
         await activateBusinessSubscription(pool, businessId, subscriptionId, customerId, priceId, currentPeriodEnd, monthlyEquivalentFee, entriesPerLocation, billingInterval);
+        invalidatePublicBusinessData();
         console.log(`[Stripe] Webhook activated business ${businessId}`);
       } catch (err: unknown) {
         console.error('[Stripe] ERROR in checkout.session.completed:', err instanceof Error ? err.message : err);
@@ -306,6 +313,7 @@ export const handleStripeWebhook = async (rawBody: Buffer, signature: string): P
             await handleDrawParticipation(pool, businessId, monthlyEquivalentFee);
           }
         }
+        invalidatePublicBusinessData();
       } catch (err: unknown) {
         console.error('[Stripe] ERROR in customer.subscription.updated:', err instanceof Error ? err.message : err);
         throw err;
@@ -329,6 +337,7 @@ export const handleStripeWebhook = async (rawBody: Buffer, signature: string): P
            WHERE de.draw_id = d.id AND de.business_id = $1 AND d.status = 'Upcoming'`,
           [businessId],
         );
+        invalidatePublicBusinessData();
         console.log(`[Stripe] Business ${businessId} deactivated`);
       } catch (err: unknown) {
         console.error('[Stripe] ERROR in customer.subscription.deleted:', err instanceof Error ? err.message : err);
@@ -379,6 +388,7 @@ export const handleStripeWebhook = async (rawBody: Buffer, signature: string): P
           `UPDATE subscription SET status = 'Past_Due', updated_at = NOW() WHERE stripe_subscription_id = $1`,
           [subscriptionId],
         );
+        invalidatePublicBusinessData();
       } catch (err: unknown) {
         console.error('[Stripe] ERROR in invoice.payment_failed:', err instanceof Error ? err.message : err);
         throw err;
@@ -562,6 +572,7 @@ async function cancelFoundingMembership(
     [businessId],
   );
 
+  invalidatePublicBusinessData();
   console.log(`[Founding] Business ${businessId} cancelled. Removed from ${deleteResult.rowCount} upcoming draws. Refunded $${refundAmount} (50% of remaining time).`);
   return { removedFromDraw, refundType, refundAmount };
 }
@@ -1095,6 +1106,8 @@ export const resumeSubscription = async (userId: number): Promise<void> => {
   } catch (err: unknown) {
     console.error(`[Stripe] Draw re-participation failed for business ${sub.business_id} (non-fatal):`, err instanceof Error ? err.message : err);
   }
+
+  invalidatePublicBusinessData();
 };
 
 // ─── Cancel Subscription ──────────────────────────────────────────────────────
@@ -1154,6 +1167,7 @@ export const cancelSubscription = async (userId: number): Promise<CancelResult> 
   );
   const removedFromDraw = deleteResult.rowCount! > 0;
 
+  invalidatePublicBusinessData();
   console.log(`[Cancel] Business ${sub.business_id} set to cancel at period end. Removed from ${deleteResult.rowCount} upcoming draw(s). No refund issued.`);
   return { removedFromDraw, refundType: 'none', refundAmount: 0 };
 };
