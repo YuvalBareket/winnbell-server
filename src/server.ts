@@ -2,6 +2,7 @@ import 'dotenv/config'; // 1. LOAD ENV VARS FIRST
 import { connectDB } from './shared/db/db.js';
 import app from './app.js';
 import { recoverStaleOcrJobs } from './features/ocr/ocr.service.js';
+import { cleanupExpiredRefreshTokens } from './features/auth/auth.service.js';
 
 const PORT = process.env.PORT || 3000;
 
@@ -26,6 +27,11 @@ const startServer = async () => {
     app.listen(PORT, () => {
       console.log(`🚀 Winnbell server running on port ${PORT}`);
     });
+
+    // Purge expired refresh tokens every 6 hours
+    setInterval(() => {
+      cleanupExpiredRefreshTokens().catch(err => console.error('[cleanup] refresh token purge failed:', err));
+    }, 6 * 60 * 60 * 1000);
   } catch (error) {
     console.error('Failed to start server:', error);
     process.exit(1);

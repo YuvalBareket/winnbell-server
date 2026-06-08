@@ -654,8 +654,8 @@ export const createPromoCodeService = async (
       [normalized, maxUses ?? null],
     );
     return result.rows[0];
-  } catch (err: any) {
-    if (err.code === '23505') throw new Error('A promo code with that name already exists.');
+  } catch (err: unknown) {
+    if (err instanceof Error && (err as Error & { code?: string }).code === '23505') throw new Error('A promo code with that name already exists.');
     throw err;
   }
 };

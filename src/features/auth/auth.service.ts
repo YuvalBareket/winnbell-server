@@ -121,17 +121,27 @@ export const registerUser = async (
       }
     }
 
+    const refreshToken = crypto.randomBytes(40).toString('hex');
+    const refreshHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
+    const refreshExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+
+    await client.query(
+      `INSERT INTO refresh_token (user_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
+      [newUser.id, refreshHash, refreshExpiry],
+    );
+
     await client.query('COMMIT');
 
     const token = jwt.sign(
       { id: newUser.id, role: newUser.role, location_id: locationId },
       process.env.JWT_SECRET as string,
-      { expiresIn: '7d' },
+      { expiresIn: '1h' },
     );
 
     return {
       message: 'User registered successfully',
       token,
+      refreshToken,
       user: {
         id: newUser.id,
         email: newUser.email,
@@ -235,12 +245,22 @@ export const loginUser = async (
   const token = jwt.sign(
     { id: user.id, role: user.role, location_id: locationId },
     process.env.JWT_SECRET as string,
-    { expiresIn: '7d' },
+    { expiresIn: '1h' },
+  );
+
+  const refreshToken = crypto.randomBytes(40).toString('hex');
+  const refreshHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
+  const refreshExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+
+  await pool.query(
+    `INSERT INTO refresh_token (user_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
+    [user.id, refreshHash, refreshExpiry],
   );
 
   return {
     message: 'Login successful',
     token,
+    refreshToken,
     user: {
       id: user.id,
       email: user.email,
@@ -272,6 +292,8 @@ export const changePasswordService = async (userId: number, currentPassword: str
   const salt = await bcrypt.genSalt(10);
   const newHash = await bcrypt.hash(newPassword, salt);
   await pool.query(`UPDATE "user" SET password_hash = $1 WHERE id = $2`, [newHash, userId]);
+  // Revoke all refresh tokens so stolen sessions can't survive a password change
+  await pool.query(`DELETE FROM refresh_token WHERE user_id = $1`, [userId]);
 };
 
 export const syncExternalUser = async (
@@ -387,17 +409,27 @@ export const syncExternalUser = async (
       businessId = bizResult.rows[0]?.id ?? null;
     }
 
-    await client.query('COMMIT');
-
     const internalToken = jwt.sign(
       { id: dbUser.id, role: dbUser.role, location_id: locationId },
       process.env.JWT_SECRET as string,
-      { expiresIn: '7d' },
+      { expiresIn: '1h' },
     );
+
+    const refreshToken = crypto.randomBytes(40).toString('hex');
+    const refreshHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
+    const refreshExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+
+    await client.query(
+      `INSERT INTO refresh_token (user_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
+      [dbUser.id, refreshHash, refreshExpiry],
+    );
+
+    await client.query('COMMIT');
 
     return {
       message: 'Sync successful',
       token: internalToken,
+      refreshToken,
       user: {
         ...dbUser,
         location_id: locationId,
@@ -413,4 +445,9 @@ export const syncExternalUser = async (
   } finally {
     client.release();
   }
+};
+
+export const cleanupExpiredRefreshTokens = async (): Promise<void> => {
+  const pool = getPool();
+  await pool.query('DELETE FROM refresh_token WHERE expires_at < NOW()');
 };

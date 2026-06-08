@@ -869,8 +869,8 @@ export const activatePromotionalEntry = async (
          RETURNING id`,
         [normalizedCode, userId, draw.id],
       );
-    } catch (err: any) {
-      if (err.code === '23505') {
+    } catch (err: unknown) {
+      if (err instanceof Error && (err as Error & { code?: string }).code === '23505') {
         throw new Error('You have already used this promotional code.');
       }
       throw err;

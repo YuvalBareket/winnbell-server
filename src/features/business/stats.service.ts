@@ -69,118 +69,123 @@ export const getBusinessStats = async (
   const locationClause = locParam ? `AND location_id = $${locParam}` : '';
   const drawClause = drawParam ? `AND draw_id = $${drawParam}` : '';
 
-  // --- Summary KPIs ---
-  const summaryRes = await pool.query(`
-    SELECT
-      COUNT(*) AS total_entries,
-      COALESCE(SUM(transaction_amount), 0) AS total_revenue,
-      COALESCE(AVG(transaction_amount), 0) AS avg_transaction
-    FROM ticket
-    WHERE business_id = $1 ${locationClause} ${drawClause}
-      AND entry_source = 'receipt'
-      AND is_quarantined = FALSE
-  `, baseParams);
-
-  const { total_entries = 0, total_revenue = 0, avg_transaction = 0 } = summaryRes.rows[0] ?? {};
-
-  // --- Daily breakdown (last 30 days) ---
-  const dailyRes = await pool.query(`
-    SELECT
-      TO_CHAR(created_at, 'YYYY-MM-DD') AS date,
-      COUNT(*) AS entries,
-      COALESCE(SUM(transaction_amount), 0) AS revenue
-    FROM ticket
-    WHERE business_id = $1 ${locationClause} ${drawClause}
-      AND entry_source = 'receipt'
-      AND is_quarantined = FALSE
-      AND created_at >= NOW() - INTERVAL '30 days'
-    GROUP BY TO_CHAR(created_at, 'YYYY-MM-DD')
-    ORDER BY date
-  `, baseParams);
-
-  // --- Monthly breakdown (last 12 months) ---
-  const monthlyRes = await pool.query(`
-    SELECT
-      TO_CHAR(created_at, 'YYYY-MM') AS month,
-      COUNT(*) AS entries,
-      COALESCE(SUM(transaction_amount), 0) AS revenue
-    FROM ticket
-    WHERE business_id = $1 ${locationClause} ${drawClause}
-      AND entry_source = 'receipt'
-      AND is_quarantined = FALSE
-      AND created_at >= NOW() - INTERVAL '12 months'
-    GROUP BY TO_CHAR(created_at, 'YYYY-MM')
-    ORDER BY month
-  `, baseParams);
-
-  // --- Per-location breakdown ---
+  // --- Per-location breakdown (needs its own param array) ---
   const locParams: unknown[] = [businessId];
   const locLocParam = scopedLocationId ? (locParams.push(scopedLocationId), locParams.length) : null;
   const locDrawParam = filterDrawId ? (locParams.push(filterDrawId), locParams.length) : null;
 
-  const locRes = await pool.query(`
-    SELECT
-      bl.id AS location_id,
-      bl.name AS location_name,
-      COUNT(t.id) AS entries,
-      COALESCE(SUM(t.transaction_amount), 0) AS revenue
-    FROM business_location bl
-    LEFT JOIN ticket t ON t.location_id = bl.id
-      AND t.business_id = $1
-      AND t.entry_source = 'receipt'
-      AND t.is_quarantined = FALSE
-      ${locDrawParam ? `AND t.draw_id = $${locDrawParam}` : ''}
-    WHERE bl.business_id = $1
-      ${locLocParam ? `AND bl.id = $${locLocParam}` : ''}
-    GROUP BY bl.id, bl.name
-    ORDER BY entries DESC
-  `, locParams);
-
-  // --- Per-draw breakdown ---
+  // --- Per-draw breakdown (needs its own param array) ---
   const drawsParams: unknown[] = [businessId];
   const drawsLocParam = scopedLocationId ? (drawsParams.push(scopedLocationId), drawsParams.length) : null;
 
-  const drawsRes = await pool.query(`
-    SELECT
-      d.id AS draw_id,
-      d.name AS draw_name,
-      TO_CHAR(d.draw_date, 'YYYY-MM-DD') AS draw_date,
-      d.status AS draw_status,
-      COUNT(t.id) AS entries,
-      COALESCE(SUM(t.transaction_amount), 0) AS revenue
-    FROM draw d
-    LEFT JOIN ticket t ON t.draw_id = d.id
-      AND t.business_id = $1
-      AND t.entry_source = 'receipt'
-      ${drawsLocParam ? `AND t.location_id = $${drawsLocParam}` : ''}
-    WHERE d.status IN ('Open', 'Closed')
-    GROUP BY d.id, d.name, d.draw_date, d.status
-    ORDER BY d.draw_date DESC
-  `, drawsParams);
-
-  // --- Customer growth (new unique customers per month, last 12 months) ---
-  // "new customer" = first time this user submitted a receipt for this business
+  // --- Customer growth (needs its own param array) ---
   const growthParams: unknown[] = [businessId];
   const growthLocParam = scopedLocationId ? (growthParams.push(scopedLocationId), growthParams.length) : null;
 
-  const growthRes = await pool.query(`
-    SELECT
-      TO_CHAR(DATE_TRUNC('month', first_submission), 'YYYY-MM') AS month,
-      COUNT(*) AS new_customers,
-      SUM(COUNT(*)) OVER (ORDER BY DATE_TRUNC('month', first_submission)) AS total_customers
-    FROM (
-      SELECT activated_by_user_id, MIN(created_at) AS first_submission
+  // Run all 5 independent queries in parallel
+  const [summaryRes, dailyRes, monthlyRes, locRes, drawsRes, growthRes] = await Promise.all([
+    // Summary KPIs
+    pool.query(`
+      SELECT
+        COUNT(*) AS total_entries,
+        COALESCE(SUM(transaction_amount), 0) AS total_revenue,
+        COALESCE(AVG(transaction_amount), 0) AS avg_transaction
       FROM ticket
-      WHERE business_id = $1
+      WHERE business_id = $1 ${locationClause} ${drawClause}
         AND entry_source = 'receipt'
-        AND activated_by_user_id IS NOT NULL
-        ${growthLocParam ? `AND location_id = $${growthLocParam}` : ''}
-      GROUP BY activated_by_user_id
-    ) first_subs
-    WHERE DATE_TRUNC('month', first_submission) >= DATE_TRUNC('month', NOW() - INTERVAL '11 months')
-    GROUP BY DATE_TRUNC('month', first_submission)
-    ORDER BY month
-  `, growthParams);
+        AND is_quarantined = FALSE
+    `, baseParams),
+
+    // Daily breakdown (last 30 days)
+    pool.query(`
+      SELECT
+        TO_CHAR(created_at, 'YYYY-MM-DD') AS date,
+        COUNT(*) AS entries,
+        COALESCE(SUM(transaction_amount), 0) AS revenue
+      FROM ticket
+      WHERE business_id = $1 ${locationClause} ${drawClause}
+        AND entry_source = 'receipt'
+        AND is_quarantined = FALSE
+        AND created_at >= NOW() - INTERVAL '30 days'
+      GROUP BY TO_CHAR(created_at, 'YYYY-MM-DD')
+      ORDER BY date
+    `, baseParams),
+
+    // Monthly breakdown (last 12 months)
+    pool.query(`
+      SELECT
+        TO_CHAR(created_at, 'YYYY-MM') AS month,
+        COUNT(*) AS entries,
+        COALESCE(SUM(transaction_amount), 0) AS revenue
+      FROM ticket
+      WHERE business_id = $1 ${locationClause} ${drawClause}
+        AND entry_source = 'receipt'
+        AND is_quarantined = FALSE
+        AND created_at >= NOW() - INTERVAL '12 months'
+      GROUP BY TO_CHAR(created_at, 'YYYY-MM')
+      ORDER BY month
+    `, baseParams),
+
+    // Per-location breakdown
+    pool.query(`
+      SELECT
+        bl.id AS location_id,
+        bl.name AS location_name,
+        COUNT(t.id) AS entries,
+        COALESCE(SUM(t.transaction_amount), 0) AS revenue
+      FROM business_location bl
+      LEFT JOIN ticket t ON t.location_id = bl.id
+        AND t.business_id = $1
+        AND t.entry_source = 'receipt'
+        AND t.is_quarantined = FALSE
+        ${locDrawParam ? `AND t.draw_id = $${locDrawParam}` : ''}
+      WHERE bl.business_id = $1
+        ${locLocParam ? `AND bl.id = $${locLocParam}` : ''}
+      GROUP BY bl.id, bl.name
+      ORDER BY entries DESC
+    `, locParams),
+
+    // Per-draw breakdown
+    pool.query(`
+      SELECT
+        d.id AS draw_id,
+        d.name AS draw_name,
+        TO_CHAR(d.draw_date, 'YYYY-MM-DD') AS draw_date,
+        d.status AS draw_status,
+        COUNT(t.id) AS entries,
+        COALESCE(SUM(t.transaction_amount), 0) AS revenue
+      FROM draw d
+      LEFT JOIN ticket t ON t.draw_id = d.id
+        AND t.business_id = $1
+        AND t.entry_source = 'receipt'
+        ${drawsLocParam ? `AND t.location_id = $${drawsLocParam}` : ''}
+      WHERE d.status IN ('Open', 'Closed')
+      GROUP BY d.id, d.name, d.draw_date, d.status
+      ORDER BY d.draw_date DESC
+    `, drawsParams),
+
+    // Customer growth (new unique customers per month, last 12 months)
+    pool.query(`
+      SELECT
+        TO_CHAR(DATE_TRUNC('month', first_submission), 'YYYY-MM') AS month,
+        COUNT(*) AS new_customers,
+        SUM(COUNT(*)) OVER (ORDER BY DATE_TRUNC('month', first_submission)) AS total_customers
+      FROM (
+        SELECT activated_by_user_id, MIN(created_at) AS first_submission
+        FROM ticket
+        WHERE business_id = $1
+          AND entry_source = 'receipt'
+          AND activated_by_user_id IS NOT NULL
+          ${growthLocParam ? `AND location_id = $${growthLocParam}` : ''}
+        GROUP BY activated_by_user_id
+      ) first_subs
+      WHERE DATE_TRUNC('month', first_submission) >= DATE_TRUNC('month', NOW() - INTERVAL '11 months')
+      GROUP BY DATE_TRUNC('month', first_submission)
+      ORDER BY month
+    `, growthParams),
+  ]);
+
+  const { total_entries = 0, total_revenue = 0, avg_transaction = 0 } = summaryRes.rows[0] ?? {};
 
   return {
     summary: {

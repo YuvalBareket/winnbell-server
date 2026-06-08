@@ -15,7 +15,7 @@ export const getStats = async (req: AuthRequest, res: Response): Promise<void> =
 
     const data = await getBusinessStats(userId, jwtLocationId, filterLocationId, filterDrawId);
     res.json(data);
-  } catch (err: any) {
-    res.status(500).json({ message: err.message || 'Failed to load stats' });
+  } catch (err: unknown) {
+    res.status(500).json({ message: 'Failed to load stats' });
   }
 };

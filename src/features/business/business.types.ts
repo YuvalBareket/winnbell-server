@@ -17,18 +17,9 @@ export interface NearbyBusiness {
   latitude: number;
   longitude: number;
   id: number;
-  description: string;
-  terms_text: string;
   name: string;
   sector: string;
   logo_url: string | null;
-  receipt_example_image_url: string | null;
-  min_transaction_amount: number | null;
-  distance_km: number;
-  website_url?: string | null;
-  phone?: string | null;
-  other_locations?: Array<{id: number; name: string; address: string}>;
-  cap_reached?: boolean;
 }
 
 /** Shape of each location in the FOR JSON subquery inside getMyBusinessData */
@@ -90,12 +81,20 @@ export interface ParticipatingLocation {
   location_id: number;
   location_name: string;
   address: string;
+  latitude: number;
+  longitude: number;
   business_id: number;
   business_name: string;
   sector: string;
   logo_url: string | null;
   min_transaction_amount: number | null;
+  pending_min_transaction_amount: number | null;
   receipt_example_image_url: string | null;
+  description: string;
+  terms_text: string;
+  phone: string | null;
+  website_url: string | null;
+  other_locations: Array<{ id: number; name: string; address: string }>;
   cap_reached?: boolean;
 }
 

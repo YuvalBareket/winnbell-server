@@ -15,6 +15,7 @@ import { Router } from 'express';
 import {
   getNearby,
   getParticipating,
+  getParticipatingLocationById,
   searchParticipatingLocations,
   getEntryMode,
   getAddressController,
@@ -109,6 +110,7 @@ publicBusinessRouter.use(publicLimiter);
 publicBusinessRouter.get('/nearby', getNearby);
 publicBusinessRouter.get('/participating', getParticipating);
 publicBusinessRouter.get('/participating/locations/search', searchParticipatingLocations);
+publicBusinessRouter.get('/participating/locations/:locationId', getParticipatingLocationById);
 publicBusinessRouter.get('/mode', getEntryMode);
 publicBusinessRouter.post('/address', getAddressController);
 publicBusinessRouter.get('/address-coords', getAddressCoordsController);

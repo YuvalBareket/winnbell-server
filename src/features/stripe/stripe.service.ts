@@ -220,11 +220,19 @@ export const handleStripeWebhook = async (rawBody: Buffer, signature: string): P
   let event: Stripe.Event;
   try {
     event = stripe.webhooks.constructEvent(rawBody, signature, webhookSecret);
-  } catch (err: any) {
-    throw new Error(`Webhook signature verification failed: ${err.message}`);
+  } catch (err: unknown) {
+    throw new Error(`Webhook signature verification failed: ${err instanceof Error ? err.message : 'Unknown error'}`);
   }
 
   const pool = getPool();
+
+  // Idempotency: atomic INSERT before processing — prevents race conditions
+  // on concurrent webhook delivery. If the row already exists, skip.
+  const claimed = await pool.query(
+    'INSERT INTO stripe_webhook_event (event_id, event_type) VALUES ($1, $2) ON CONFLICT (event_id) DO NOTHING RETURNING event_id',
+    [event.id, event.type],
+  );
+  if (claimed.rowCount === 0) return;
 
   switch (event.type) {
 
@@ -260,8 +268,8 @@ export const handleStripeWebhook = async (rawBody: Buffer, signature: string): P
 
         await activateBusinessSubscription(pool, businessId, subscriptionId, customerId, priceId, currentPeriodEnd, monthlyEquivalentFee, entriesPerLocation, billingInterval);
         console.log(`[Stripe] Webhook activated business ${businessId}`);
-      } catch (err: any) {
-        console.error('[Stripe] ERROR in checkout.session.completed:', err.message);
+      } catch (err: unknown) {
+        console.error('[Stripe] ERROR in checkout.session.completed:', err instanceof Error ? err.message : err);
         throw err;
       }
       break;
@@ -298,8 +306,8 @@ export const handleStripeWebhook = async (rawBody: Buffer, signature: string): P
             await handleDrawParticipation(pool, businessId, monthlyEquivalentFee);
           }
         }
-      } catch (err: any) {
-        console.error('[Stripe] ERROR in customer.subscription.updated:', err.message);
+      } catch (err: unknown) {
+        console.error('[Stripe] ERROR in customer.subscription.updated:', err instanceof Error ? err.message : err);
         throw err;
       }
       break;
@@ -322,8 +330,8 @@ export const handleStripeWebhook = async (rawBody: Buffer, signature: string): P
           [businessId],
         );
         console.log(`[Stripe] Business ${businessId} deactivated`);
-      } catch (err: any) {
-        console.error('[Stripe] ERROR in customer.subscription.deleted:', err.message);
+      } catch (err: unknown) {
+        console.error('[Stripe] ERROR in customer.subscription.deleted:', err instanceof Error ? err.message : err);
         throw err;
       }
       break;
@@ -354,8 +362,8 @@ export const handleStripeWebhook = async (rawBody: Buffer, signature: string): P
           await handleDrawParticipation(pool, businessId, monthlyEquivalentFee);
         }
         console.log(`[Stripe] Renewal draw participation updated for business ${businessId}`);
-      } catch (err: any) {
-        console.error('[Stripe] ERROR in invoice.payment_succeeded:', err.message);
+      } catch (err: unknown) {
+        console.error('[Stripe] ERROR in invoice.payment_succeeded:', err instanceof Error ? err.message : err);
         throw err;
       }
       break;
@@ -371,13 +379,14 @@ export const handleStripeWebhook = async (rawBody: Buffer, signature: string): P
           `UPDATE subscription SET status = 'Past_Due', updated_at = NOW() WHERE stripe_subscription_id = $1`,
           [subscriptionId],
         );
-      } catch (err: any) {
-        console.error('[Stripe] ERROR in invoice.payment_failed:', err.message);
+      } catch (err: unknown) {
+        console.error('[Stripe] ERROR in invoice.payment_failed:', err instanceof Error ? err.message : err);
         throw err;
       }
       break;
     }
   }
+
 };
 
 // ─── Founding Member: Activate ────────────────────────────────────────────────
@@ -423,8 +432,8 @@ async function activateFoundingMember(
       console.error(`[Founding] No seats available for business ${businessId} — issuing auto-refund`);
       try {
         await stripe.refunds.create({ payment_intent: paymentIntentId });
-      } catch (refundErr: any) {
-        console.error(`[Founding] Auto-refund failed: ${refundErr.message}`);
+      } catch (refundErr: unknown) {
+        console.error(`[Founding] Auto-refund failed: ${refundErr instanceof Error ? refundErr.message : refundErr}`);
       }
       throw new Error('All founding partner spots were claimed while your payment was processing. A full refund has been issued.');
     }
@@ -468,8 +477,8 @@ async function activateFoundingMember(
   try {
     const monthlyEquivalent = Math.round(120000 / 12) / 100;
     await handleDrawParticipation(pool, businessId, monthlyEquivalent);
-  } catch (err: any) {
-    console.error(`[Founding] Draw enrollment failed for business ${businessId} (non-fatal):`, err.message);
+  } catch (err: unknown) {
+    console.error(`[Founding] Draw enrollment failed for business ${businessId} (non-fatal):`, err instanceof Error ? err.message : err);
   }
 
   // Confirmation email — non-fatal
@@ -486,8 +495,8 @@ async function activateFoundingMember(
     if (biz?.email) {
       console.log(`[Founding] Business ${businessId} "${biz.name}" activated as Founding Partner #${biz.seat_number} of ${biz.cap} — email: ${biz.email}`);
     }
-  } catch (err: any) {
-    console.error(`[Founding] Email lookup failed for business ${businessId} (non-fatal):`, err.message);
+  } catch (err: unknown) {
+    console.error(`[Founding] Email lookup failed for business ${businessId} (non-fatal):`, err instanceof Error ? err.message : err);
   }
 }
 
@@ -534,8 +543,8 @@ async function cancelFoundingMembership(
 
       try {
         await stripe.refunds.create({ payment_intent: paymentIntentId, amount: refundCents });
-      } catch (err: any) {
-        console.error(`[Founding] Stripe refund failed (non-fatal): ${err.message}`);
+      } catch (err: unknown) {
+        console.error(`[Founding] Stripe refund failed (non-fatal): ${err instanceof Error ? err.message : err}`);
       }
     }
   }
@@ -612,8 +621,8 @@ async function activateBusinessSubscription(
     } else {
       await handleDrawParticipation(pool, businessId, monthlyEquivalentFee);
     }
-  } catch (err: any) {
-    console.error(`[Stripe] Draw participation failed for business ${businessId} (non-fatal):`, err.message);
+  } catch (err: unknown) {
+    console.error(`[Stripe] Draw participation failed for business ${businessId} (non-fatal):`, err instanceof Error ? err.message : err);
   }
 
   // Send confirmation email — non-fatal
@@ -636,8 +645,8 @@ async function activateBusinessSubscription(
         locationCount: Math.max(1, Number(biz.location_count)),
       });
     }
-  } catch (err: any) {
-    console.error(`[Stripe] Confirmation email failed for business ${businessId} (non-fatal):`, err.message);
+  } catch (err: unknown) {
+    console.error(`[Stripe] Confirmation email failed for business ${businessId} (non-fatal):`, err instanceof Error ? err.message : err);
   }
 }
 
@@ -748,8 +757,8 @@ async function handleYearlyDrawParticipation(pool: Pool, businessId: number, mon
       // Only enroll other businesses for the next-month draw (offset === 1).
       // Future months will be populated naturally as each business renews.
       await handleDrawParticipation(pool, businessId, monthlyEquivalent, target, offset > 1);
-    } catch (err: any) {
-      console.error(`[Draw] Yearly enrollment failed for business ${businessId} at month offset +${offset}:`, err.message);
+    } catch (err: unknown) {
+      console.error(`[Draw] Yearly enrollment failed for business ${businessId} at month offset +${offset}:`, err instanceof Error ? err.message : err);
     }
   }
 }
@@ -827,8 +836,8 @@ export const syncSubscriptionQuantity = async (userId: number, newLocationCount:
         items: [{ id: item.id, price: originalPriceId, quantity: originalQuantity }],
         proration_behavior: 'none',
       });
-    } catch (rollbackErr: any) {
-      console.error('[Stripe] Rollback failed after invoice error:', rollbackErr.message);
+    } catch (rollbackErr: unknown) {
+      console.error('[Stripe] Rollback failed after invoice error:', rollbackErr instanceof Error ? rollbackErr.message : rollbackErr);
     }
     throw invoiceErr;
   }
@@ -919,8 +928,8 @@ export const updateSubscriptionPlan = async (userId: number, newEntriesPerLocati
         items: [{ id: item.id, price: originalPriceId, quantity: originalQuantity }],
         proration_behavior: 'none',
       });
-    } catch (rollbackErr: any) {
-      console.error('[Stripe] Rollback failed after invoice error:', rollbackErr.message);
+    } catch (rollbackErr: unknown) {
+      console.error('[Stripe] Rollback failed after invoice error:', rollbackErr instanceof Error ? rollbackErr.message : rollbackErr);
     }
     throw invoiceErr;
   }
@@ -1083,8 +1092,8 @@ export const resumeSubscription = async (userId: number): Promise<void> => {
     } else {
       await handleDrawParticipation(pool, sub.business_id, monthlyEquivalentFee);
     }
-  } catch (err: any) {
-    console.error(`[Stripe] Draw re-participation failed for business ${sub.business_id} (non-fatal):`, err.message);
+  } catch (err: unknown) {
+    console.error(`[Stripe] Draw re-participation failed for business ${sub.business_id} (non-fatal):`, err instanceof Error ? err.message : err);
   }
 };
 

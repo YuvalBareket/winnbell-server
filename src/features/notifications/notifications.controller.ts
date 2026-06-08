@@ -17,7 +17,7 @@ export const subscribe = async (req: AuthRequest, res: Response): Promise<void> 
 
     await saveSubscription(userId, endpoint, keys);
     res.status(201).json({ message: 'Subscribed.' });
-  } catch (err) {
+  } catch (err: unknown) {
     console.error('[notifications] subscribe error:', err);
     res.status(500).json({ message: 'Failed to save subscription.' });
   }
@@ -35,7 +35,7 @@ export const unsubscribe = async (req: AuthRequest, res: Response): Promise<void
 
     await removeSubscription(userId, endpoint);
     res.status(200).json({ message: 'Unsubscribed.' });
-  } catch (err) {
+  } catch (err: unknown) {
     console.error('[notifications] unsubscribe error:', err);
     res.status(500).json({ message: 'Failed to remove subscription.' });
   }
@@ -53,7 +53,7 @@ export const broadcast = async (req: AuthRequest, res: Response): Promise<void> 
 
     await sendToAll({ title, body, url });
     res.status(200).json({ message: 'Notification sent.' });
-  } catch (err) {
+  } catch (err: unknown) {
     console.error('[notifications] broadcast error:', err);
     res.status(500).json({ message: 'Failed to send notification.' });
   }

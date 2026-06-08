@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
+import crypto from 'crypto';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 import * as authService from './auth.service.js';
 import { RegisterRequest, AuthResponse } from './auth.types.js';
@@ -164,6 +165,9 @@ export const deleteAccount = async (req: Request, res: Response): Promise<void> 
     const userRow = await pool.query(`SELECT external_auth_id FROM "user" WHERE id = $1`, [userId]);
     const externalAuthId: string | null = userRow.rows[0]?.external_auth_id ?? null;
 
+    // Revoke all refresh tokens before anonymizing
+    await pool.query(`DELETE FROM refresh_token WHERE user_id = $1`, [userId]);
+
     // Anonymize PII — preserve tickets/entries for draw integrity
     await pool.query(
       `UPDATE "user" SET
@@ -199,9 +203,70 @@ export const deleteAccount = async (req: Request, res: Response): Promise<void> 
     }
 
     res.json({ success: true });
-  } catch (err) {
+  } catch (err: unknown) {
     console.error('[deleteAccount]', err);
     res.status(500).json({ message: 'Server error' });
+  }
+};
+
+export const refreshTokenController = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { refreshToken } = req.body;
+    if (!refreshToken || typeof refreshToken !== 'string') {
+      res.status(400).json({ message: 'Refresh token required' });
+      return;
+    }
+
+    const pool = getPool();
+    const hash = crypto.createHash('sha256').update(refreshToken).digest('hex');
+
+    // Atomic consume: DELETE...RETURNING prevents race conditions on concurrent refresh
+    const result = await pool.query(
+      `DELETE FROM refresh_token WHERE token_hash = $1 AND expires_at > NOW() RETURNING id, user_id`,
+      [hash],
+    );
+    const row = result.rows[0];
+    if (!row) {
+      res.status(401).json({ message: 'Invalid or expired refresh token' });
+      return;
+    }
+
+    const userResult = await pool.query(
+      `SELECT id, role, is_active FROM "user" WHERE id = $1`,
+      [row.user_id],
+    );
+    const user = userResult.rows[0];
+    if (!user || !user.is_active) {
+      await pool.query('DELETE FROM refresh_token WHERE user_id = $1', [row.user_id]);
+      res.status(401).json({ message: 'Account deactivated' });
+      return;
+    }
+
+    const locResult = await pool.query(
+      `SELECT bl.id AS location_id FROM business_location bl WHERE bl.manager_user_id = $1 AND bl.is_active = TRUE LIMIT 1`,
+      [user.id],
+    );
+    const locationId = locResult.rows[0]?.location_id ?? null;
+
+    const newToken = jwt.sign(
+      { id: user.id, role: user.role, location_id: locationId },
+      process.env.JWT_SECRET as string,
+      { expiresIn: '1h' },
+    );
+
+    const newRefreshToken = crypto.randomBytes(40).toString('hex');
+    const newRefreshHash = crypto.createHash('sha256').update(newRefreshToken).digest('hex');
+    const newRefreshExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+
+    await pool.query(
+      `INSERT INTO refresh_token (user_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
+      [user.id, newRefreshHash, newRefreshExpiry],
+    );
+
+    res.json({ token: newToken, refreshToken: newRefreshToken });
+  } catch (err: unknown) {
+    console.error('[refreshToken]', err instanceof Error ? err.message : err);
+    res.status(500).json({ message: 'Token refresh failed' });
   }
 };
 

@@ -30,7 +30,7 @@ export const getEntryMode = async (_req: Request, res: Response) => {
     const result = await getEntryModeService();
     res.json(result);
   } catch (err: unknown) {
-    res.status(500).json({ error: err instanceof Error ? err.message : 'Server error' });
+    res.status(500).json({ error: 'Server error' });
   }
 };
 
@@ -39,7 +39,7 @@ export const getParticipating = async (_req: Request, res: Response) => {
     const result = await getParticipatingBusinessesService();
     res.json(result);
   } catch (err: unknown) {
-    res.status(500).json({ error: err instanceof Error ? err.message : 'Server error' });
+    res.status(500).json({ error: 'Server error' });
   }
 };
 
@@ -50,7 +50,7 @@ export const searchParticipatingLocations = async (req: Request, res: Response) 
     const locations = await searchParticipatingLocationsService(q);
     res.json(locations);
   } catch (err: unknown) {
-    res.status(500).json({ error: err instanceof Error ? err.message : 'Server error' });
+    res.status(500).json({ error: 'Server error' });
   }
 };
 
@@ -99,8 +99,7 @@ export const getAddressController = async (req: Request, res: Response) => {
     const data = await getAddress(text);
     res.json(data);
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Bad request';
-    res.status(400).json({ message });
+    res.status(400).json({ message: 'Bad request' });
   }
 };
 export const getAddressCoordsController = async (req: Request, res: Response) => {
@@ -110,8 +109,7 @@ export const getAddressCoordsController = async (req: Request, res: Response) =>
     const data = await getAddressCoords(placeId);
     res.json(data);
   } catch (err: unknown) {
-    const message = err instanceof Error ? err.message : 'Bad request';
-    res.status(400).json({ message });
+    res.status(400).json({ message: 'Bad request' });
   }
 };
 
@@ -126,8 +124,7 @@ export const setupBusiness = async (req: AuthRequest, res: Response): Promise<vo
       businessId: result.businessId,
     });
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : 'Internal Server Error';
-    res.status(500).json({ message });
+    res.status(500).json({ message: 'Internal Server Error' });
   }
 };
 
@@ -144,8 +141,7 @@ export const getMyBusiness = async (req: AuthRequest, res: Response): Promise<vo
 
     res.json(business);
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : 'Internal Server Error';
-    res.status(500).json({ message });
+    res.status(500).json({ message: 'Internal Server Error' });
   }
 };
 
@@ -181,6 +177,13 @@ export const updateCampaignSettingsController = async (req: AuthRequest, res: Re
       min_transaction_amount,
     };
     if ('receipt_example_image_url' in req.body) {
+      if (receipt_example_image_url) {
+        const r2Base = process.env.R2_PUBLIC_URL;
+        if (!r2Base || !String(receipt_example_image_url).startsWith(r2Base + '/')) {
+          res.status(400).json({ message: 'Invalid receipt example image URL.' });
+          return;
+        }
+      }
       data.receipt_example_image_url = receipt_example_image_url ?? null;
     }
 
@@ -284,7 +287,7 @@ export const addLocation = async (req: AuthRequest, res: Response): Promise<void
       return;
     }
     if (error instanceof Error && (error.message.includes('Stripe') || error.message.includes('subscription') || error.message.includes('tier'))) {
-      res.status(402).json({ message: 'Plan update failed. Location not added.', detail: error.message });
+      res.status(402).json({ message: 'Plan update failed. Location not added.' });
       return;
     }
     res.status(500).json({ message: 'Failed to add location' });
@@ -334,7 +337,7 @@ export const deleteLocation = async (req: AuthRequest, res: Response): Promise<v
       return;
     }
     if (error instanceof Error && (error.message.includes('Stripe') || error.message.includes('subscription') || error.message.includes('tier'))) {
-      res.status(402).json({ message: 'Plan update failed. Location not removed.', detail: error.message });
+      res.status(402).json({ message: 'Plan update failed. Location not removed.' });
       return;
     }
     res.status(500).json({ message: 'Failed to delete location' });
@@ -382,8 +385,8 @@ export const getUploadUrl = async (req: AuthRequest, res: Response): Promise<voi
 export const updateLogo = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { key } = req.body as { key: string };
-    if (!key || typeof key !== 'string' || key.includes('..') || key.includes('/')) {
-      res.status(400).json({ message: 'key is required' });
+    if (!key || typeof key !== 'string' || !/^[a-f0-9-]{36}\.(jpeg|jpg|png|webp)$/.test(key)) {
+      res.status(400).json({ message: 'Invalid file key.' });
       return;
     }
     if (!process.env.R2_PUBLIC_URL) {

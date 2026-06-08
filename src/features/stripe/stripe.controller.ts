@@ -110,7 +110,7 @@ export const cancelSub = async (req: Request, res: Response) => {
     res.json(result);
   } catch (err: unknown) {
     console.error('[stripe.cancelSub]', err);
-    res.status(400).json({ error: err instanceof Error ? err.message : 'Cancellation failed. Please try again.' });
+    res.status(400).json({ error: 'Cancellation failed. Please try again.' });
   }
 };
 
@@ -122,7 +122,7 @@ export const resumeSub = async (req: Request, res: Response) => {
     res.json({ resumed: true });
   } catch (err: unknown) {
     console.error('[stripe.resumeSub]', err);
-    res.status(400).json({ error: err instanceof Error ? err.message : 'Could not resume subscription. Please try again.' });
+    res.status(400).json({ error: 'Could not resume subscription. Please try again.' });
   }
 };
 
@@ -139,9 +139,9 @@ export const updatePlan = async (req: Request, res: Response) => {
   try {
     await updateSubscriptionPlan(userId, entries_per_location);
     res.json({ success: true });
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error('[stripe.updatePlan]', err);
-    res.status(400).json({ error: err.message ?? 'Failed to update plan' });
+    res.status(400).json({ error: 'Failed to update plan' });
   }
 };
 
@@ -167,7 +167,7 @@ export const stripeWebhook = async (req: Request, res: Response) => {
   try {
     await handleStripeWebhook(req.body as Buffer, signature);
     res.json({ received: true });
-  } catch (err: any) {
-    res.status(400).json({ error: err.message });
+  } catch (err: unknown) {
+    res.status(400).json({ error: 'Webhook processing failed.' });
   }
 };

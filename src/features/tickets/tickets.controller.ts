@@ -16,7 +16,7 @@ export const redeemCode = async (req: AuthRequest, res: Response) => {
     const result = await ticketService.activateTicket(code, userId);
     res.status(200).json(result);
   } catch (error: unknown) {
-    res.status(400).json({ message: error instanceof Error ? error.message : 'Redeem failed' });
+    res.status(400).json({ message: 'Redeem failed' });
   }
 };
 
@@ -49,7 +49,7 @@ export const getMyTickets = async (req: AuthRequest, res: Response) => {
       res.status(200).json(result);
     }
   } catch (error: unknown) {
-    res.status(400).json({ message: error instanceof Error ? error.message : 'Failed to get entries' });
+    res.status(400).json({ message: 'Failed to get entries' });
   }
 };
 
@@ -69,7 +69,7 @@ export const activate = async (req: AuthRequest, res: Response) => {
     const result = await ticketService.activateFreeTicket(userId, req.ip);
     res.status(201).json(result);
   } catch (error: unknown) {
-    res.status(400).json({ message: error instanceof Error ? error.message : 'Activation failed' });
+    res.status(400).json({ message: 'Activation failed' });
   }
 };
 
@@ -104,6 +104,14 @@ export const submitReceiptEntry = async (req: AuthRequest, res: Response) => {
       }
     }
 
+    if (receiptImageUrl) {
+      const r2Base = process.env.R2_PUBLIC_URL;
+      if (!r2Base || !String(receiptImageUrl).startsWith(r2Base + '/receipt-images/')) {
+        res.status(400).json({ message: 'Invalid receipt image URL.' });
+        return;
+      }
+    }
+
     const result = await ticketService.submitReceiptEntryService(userId, {
       locationId: Number(locationId),
       receiptIdentifier: String(receiptIdentifier).trim(),
@@ -124,12 +132,11 @@ export const submitReceiptEntry = async (req: AuthRequest, res: Response) => {
       entryCount: result.entryCount,
     });
   } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : 'Entry submission failed.';
-    if (msg === 'PHONE_NOT_VERIFIED') {
+    if (error instanceof Error && error.message === 'PHONE_NOT_VERIFIED') {
       res.status(403).json({ message: 'PHONE_NOT_VERIFIED' });
       return;
     }
-    res.status(400).json({ message: msg });
+    res.status(400).json({ message: 'Entry submission failed.' });
   }
 };
 
@@ -164,9 +171,9 @@ export const generateTicket = async (req: AuthRequest, res: Response) => {
 
     res.status(201).json({ success: true, code: result.code });
   } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : 'Failed to generate ticket';
+    const msg = error instanceof Error ? error.message : '';
     const status = msg.includes('Unauthorized') || msg.includes('cannot') ? 403 : 400;
-    res.status(status).json({ message: msg });
+    res.status(status).json({ message: 'Failed to generate ticket' });
   }
 };
 
@@ -177,7 +184,7 @@ export const getReceiptUploadUrl = async (req: AuthRequest, res: Response) => {
     const publicUrl = `${process.env.R2_PUBLIC_URL}/receipt-images/${key}`;
     res.json({ uploadUrl, publicUrl });
   } catch (err: unknown) {
-    res.status(500).json({ message: err instanceof Error ? err.message : 'Failed to generate upload URL.' });
+    res.status(500).json({ message: 'Failed to generate upload URL.' });
   }
 };
 
@@ -194,7 +201,7 @@ export const activatePromotional = async (req: AuthRequest, res: Response) => {
     const result = await ticketService.activatePromotionalEntry(userId, code);
     res.status(201).json({ success: true, ...result });
   } catch (error: unknown) {
-    res.status(400).json({ message: error instanceof Error ? error.message : 'Promotional entry failed.' });
+    res.status(400).json({ message: 'Promotional entry failed.' });
   }
 };
 

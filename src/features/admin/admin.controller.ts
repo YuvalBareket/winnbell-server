@@ -111,8 +111,7 @@ export const updateDraw = async (req: Request, res: Response) => {
     const draw = await updateDrawService(drawId, { name, prize_amount: prize_amount ? Number(prize_amount) : undefined, draw_date });
     res.json(draw);
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Failed to update campaign';
-    res.status(400).json({ message });
+    res.status(400).json({ message: 'Failed to update campaign' });
   }
 };
 
@@ -126,8 +125,7 @@ export const deleteDraw = async (req: Request, res: Response) => {
     await deleteDrawService(drawId);
     res.status(204).send();
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Failed to delete campaign';
-    res.status(400).json({ message });
+    res.status(400).json({ message: 'Failed to delete campaign' });
   }
 };
 
@@ -137,7 +135,7 @@ export const openDraw = async (req: Request, res: Response) => {
     await openDrawService(drawId);
     res.status(200).json({ message: 'Campaign opened successfully' });
   } catch (error) {
-    res.status(500).json({ message: error instanceof Error ? error.message : 'Failed to open campaign' });
+    res.status(500).json({ message: 'Failed to open campaign' });
   }
 };
 
@@ -147,7 +145,7 @@ export const closeDraw = async (req: Request, res: Response) => {
     await closeDrawService(drawId);
     res.status(200).json({ message: 'Campaign closed successfully' });
   } catch (error) {
-    res.status(500).json({ message: error instanceof Error ? error.message : 'Failed to close campaign' });
+    res.status(500).json({ message: 'Failed to close campaign' });
   }
 };
 
@@ -191,7 +189,7 @@ export const updateUserRole = async (req: Request, res: Response) => {
     await updateUserRoleService(userId, role);
     res.status(200).json({ message: 'Role updated' });
   } catch (error) {
-    res.status(400).json({ message: error instanceof Error ? error.message : 'Failed to update role' });
+    res.status(400).json({ message: 'Failed to update role' });
   }
 };
 
@@ -277,8 +275,7 @@ export const pickWinner = async (req: Request, res: Response) => {
     const winner = await pickDrawWinnerService(drawId);
     res.status(200).json(winner);
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Failed to pick winner';
-    res.status(500).json({ message });
+    res.status(500).json({ message: 'Failed to pick winner' });
   }
 };
 
@@ -288,8 +285,7 @@ export const reopenDraw = async (req: Request, res: Response) => {
     await reopenDrawService(drawId);
     res.status(200).json({ message: 'Campaign reopened successfully' });
   } catch (error) {
-    const message = error instanceof Error ? error.message : 'Failed to reopen campaign';
-    res.status(500).json({ message });
+    res.status(500).json({ message: 'Failed to reopen campaign' });
   }
 };
 
@@ -313,7 +309,7 @@ export const createPromoCode = async (req: Request, res: Response) => {
     const result = await createPromoCodeService(code, max_uses);
     res.status(201).json(result);
   } catch (error) {
-    res.status(400).json({ message: error instanceof Error ? error.message : 'Failed to create promo code' });
+    res.status(400).json({ message: 'Failed to create promo code' });
   }
 };
 
@@ -369,7 +365,7 @@ export const setUserRisk = async (req: Request, res: Response) => {
     await adminSetUserRiskService(userId, risk_score);
     res.status(200).json({ message: 'Risk score updated' });
   } catch (error) {
-    res.status(500).json({ message: error instanceof Error ? error.message : 'Failed to update risk score' });
+    res.status(500).json({ message: 'Failed to update risk score' });
   }
 };
 
@@ -485,7 +481,7 @@ export const duplicateDraw = async (req: Request, res: Response) => {
     res.status(201).json(draw);
   } catch (error) {
     console.error('[admin.duplicateDraw]', error);
-    res.status(500).json({ message: error instanceof Error ? error.message : 'Failed to duplicate draw' });
+    res.status(500).json({ message: 'Failed to duplicate draw' });
   }
 };
 
@@ -500,9 +496,9 @@ export const adminImageDecision = async (req: Request, res: Response): Promise<v
   try {
     await adminImageDecisionService(ticketId, decision);
     res.status(200).json({ message: `Image ${decision}d` });
-  } catch (err: any) {
+  } catch (err: unknown) {
     console.error('[admin.adminImageDecision]', err);
-    res.status(400).json({ message: err.message || 'Failed to update image decision' });
+    res.status(400).json({ message: 'Failed to update image decision' });
   }
 };
 
@@ -513,8 +509,8 @@ export const addBusinessToDraw = async (req: Request, res: Response): Promise<vo
   try {
     await addBusinessToDrawService(drawId, businessId);
     res.status(201).json({ message: 'Business added to draw' });
-  } catch (err: any) {
-    res.status(400).json({ message: err.message || 'Failed to add business to draw' });
+  } catch (err: unknown) {
+    res.status(400).json({ message: 'Failed to add business to draw' });
   }
 };
 
@@ -525,7 +521,7 @@ export const removeBusinessFromDraw = async (req: Request, res: Response): Promi
   try {
     await removeBusinessFromDrawService(drawId, businessId);
     res.status(204).send();
-  } catch (err: any) {
-    res.status(400).json({ message: err.message || 'Failed to remove business from draw' });
+  } catch (err: unknown) {
+    res.status(400).json({ message: 'Failed to remove business from draw' });
   }
 };

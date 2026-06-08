@@ -20,8 +20,8 @@ export const getActivity = async (req: AuthRequest, res: Response): Promise<void
 
     const data = await getBusinessActivity(userId, jwtLocationId, filterLocationId, dateRange, cursor, limit);
     res.json(data);
-  } catch (err: any) {
-    res.status(500).json({ message: err.message || 'Failed to load activity' });
+  } catch (err: unknown) {
+    res.status(500).json({ message: 'Failed to load activity' });
   }
 };
 
@@ -43,7 +43,8 @@ export const qualifyTicket = async (req: AuthRequest, res: Response): Promise<vo
 
     await setTicketQualification(ticketId, userId, jwtLocationId, disqualify);
     res.status(200).json({ success: true });
-  } catch (err: any) {
-    res.status(err.status ?? 500).json({ message: err.message || 'Failed to update ticket' });
+  } catch (err: unknown) {
+    const status = (err instanceof Error && 'status' in err) ? ((err as Error & { status: number }).status ?? 500) : 500;
+    res.status(status).json({ message: 'Failed to update ticket' });
   }
 };

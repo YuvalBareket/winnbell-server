@@ -26,13 +26,17 @@ export const requirePhoneVerified = async (
   const role = req.user?.role;
   if (role === 'Business' || role === 'Admin') { next(); return; }
 
-  const pool = getPool();
-  const result = await pool.query(`SELECT is_phone_verified FROM "user" WHERE id = $1`, [userId]);
-  if (!result.rows[0]?.is_phone_verified) {
-    res.status(403).json({ message: 'Phone verification required.' });
-    return;
+  try {
+    const pool = getPool();
+    const result = await pool.query(`SELECT is_phone_verified FROM "user" WHERE id = $1`, [userId]);
+    if (!result.rows[0]?.is_phone_verified) {
+      res.status(403).json({ message: 'Phone verification required.' });
+      return;
+    }
+    next();
+  } catch {
+    res.status(503).json({ message: 'Service temporarily unavailable.' });
   }
-  next();
 };
 
 export const requireRole = (...roles: string[]) =>

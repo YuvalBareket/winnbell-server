@@ -39,28 +39,9 @@ export const getNearbyBusinessesService = async (
       loc.latitude,
       loc.longitude,
       b.id,
-      b.description,
-      b.terms_text,
       b.name,
       b.sector,
-      b.logo_url,
-      b.receipt_example_image_url,
-      b.min_transaction_amount,
-      b.pending_min_transaction_amount,
-      b.website_url,
-      b.phone,
-      (
-        SELECT COALESCE(json_agg(json_build_object('id', bl2.id, 'name', bl2.name, 'address', bl2.address) ORDER BY bl2.id), '[]'::json)
-        FROM business_location bl2
-        WHERE bl2.business_id = b.id AND bl2.is_active = true AND bl2.id != loc.id
-      ) AS other_locations,
-      (
-        SELECT COUNT(*)::int FROM ticket t
-        WHERE t.business_id = b.id
-          AND t.location_id = loc.id
-          AND t.draw_id = (SELECT id FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1)
-          AND t.is_quarantined = FALSE
-      ) >= COALESCE(s.entries_per_location, (SELECT global_entry_cap FROM platform_settings WHERE id = 1)) AS cap_reached
+      b.logo_url
     FROM business_location loc
     INNER JOIN business b ON loc.business_id = b.id
     JOIN subscription s ON s.business_id = b.id AND s.status IN ('Active', 'Trialing')
@@ -447,17 +428,38 @@ export const searchParticipatingLocationsService = async (query: string): Promis
 export const getParticipatingLocationByIdService = async (locationId: number): Promise<ParticipatingLocation | null> => {
   const pool = getPool();
   const result = await pool.query(
-    `SELECT
+    `WITH open_draw AS (
+      SELECT id FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1
+    )
+    SELECT
       bl.id AS location_id,
       bl.name AS location_name,
       bl.address,
+      bl.latitude,
+      bl.longitude,
       b.id AS business_id,
       b.name AS business_name,
       b.sector,
       b.logo_url,
       b.min_transaction_amount,
       b.pending_min_transaction_amount,
-      b.receipt_example_image_url
+      b.receipt_example_image_url,
+      b.description,
+      b.terms_text,
+      b.phone,
+      b.website_url,
+      (
+        SELECT COALESCE(json_agg(json_build_object('id', bl2.id, 'name', bl2.name, 'address', bl2.address) ORDER BY bl2.id), '[]'::json)
+        FROM business_location bl2
+        WHERE bl2.business_id = b.id AND bl2.is_active = true AND bl2.id != bl.id
+      ) AS other_locations,
+      (
+        SELECT COUNT(*)::int FROM ticket t
+        WHERE t.business_id = b.id
+          AND t.location_id = bl.id
+          AND t.draw_id = (SELECT id FROM open_draw)
+          AND t.is_quarantined = FALSE
+      ) >= COALESCE(s.entries_per_location, (SELECT global_entry_cap FROM platform_settings WHERE id = 1)) AS cap_reached
     FROM business_location bl
     JOIN business b ON bl.business_id = b.id
     JOIN subscription s ON s.business_id = b.id AND s.status IN ('Active', 'Trialing')
