@@ -24,6 +24,7 @@ import {
 import { getPresignedUploadUrl } from '../../shared/s3.js';
 import { getPool } from '../../shared/db/db.js';
 import { syncSubscriptionQuantity } from '../stripe/stripe.service.js';
+import { validateLengths } from '../../shared/validation.js';
 
 export const getEntryMode = async (_req: Request, res: Response) => {
   try {
@@ -47,6 +48,7 @@ export const searchParticipatingLocations = async (req: Request, res: Response) 
   try {
     const q = String(req.query.q || '').trim();
     if (q.length < 2) { res.json([]); return; }
+    if (q.length > 200) { res.status(400).json({ message: 'Search query is too long.' }); return; }
     const locations = await searchParticipatingLocationsService(q);
     res.json(locations);
   } catch (err: unknown) {
@@ -76,6 +78,9 @@ export const getNearby = async (
     if (!minLat || !maxLat || !minLng || !maxLng) {
       return res.status(400).json({ message: 'Bounding box params required' });
     }
+    if (name && String(name).length > 200) {
+      return res.status(400).json({ message: 'Name filter is too long.' });
+    }
 
     const businesses = await getNearbyBusinessesService(
       parseFloat(minLat),
@@ -96,6 +101,8 @@ export const getNearby = async (
 export const getAddressController = async (req: Request, res: Response) => {
   try {
     const text = String(req.query.q || '').trim();
+    if (text.length < 2) { res.json([]); return; }
+    if (text.length > 200) { res.status(400).json({ message: 'Search query is too long.' }); return; }
     const data = await getAddress(text);
     res.json(data);
   } catch (err: unknown) {
@@ -106,6 +113,7 @@ export const getAddressCoordsController = async (req: Request, res: Response) =>
   try {
     const placeId = String(req.query.placeId || '').trim();
     if (!placeId) { res.status(400).json({ message: 'placeId required' }); return; }
+    if (placeId.length > 500) { res.status(400).json({ message: 'placeId is too long.' }); return; }
     const data = await getAddressCoords(placeId);
     res.json(data);
   } catch (err: unknown) {
@@ -116,6 +124,27 @@ export const getAddressCoordsController = async (req: Request, res: Response) =>
 export const setupBusiness = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const userId = req.user!.id;
+    const { businessName, businessSector, description, terms_text, phone, website_url } = req.body;
+    const lenErr = validateLengths([
+      ['Business name', businessName, 150],
+      ['Sector', businessSector, 50],
+      ['Description', description, 2000],
+      ['Terms', terms_text, 5000],
+      ['Phone', phone, 20],
+      ['Website URL', website_url, 500],
+    ]);
+    if (lenErr) { res.status(400).json({ message: lenErr }); return; }
+
+    // Validate location names/addresses inside the locations array
+    const locations: Array<{ name?: string; address?: string }> = req.body.locations ?? [];
+    for (const loc of locations) {
+      const locErr = validateLengths([
+        ['Location name', loc.name, 200],
+        ['Location address', loc.address, 500],
+      ]);
+      if (locErr) { res.status(400).json({ message: locErr }); return; }
+    }
+
     const result = await createFullBusinessProfile(userId, req.body);
 
     res.status(201).json({
@@ -154,6 +183,15 @@ export const updateBusiness = async (req: AuthRequest, res: Response): Promise<v
       phone?: string;
       website_url?: string;
     };
+
+    const lenErr = validateLengths([
+      ['Sector', businessSector, 50],
+      ['Description', description, 2000],
+      ['Terms', terms_text, 5000],
+      ['Phone', phone, 20],
+      ['Website URL', website_url, 500],
+    ]);
+    if (lenErr) { res.status(400).json({ message: lenErr }); return; }
 
     await updateBusinessProfile(req.user!.id, { businessSector, description, terms_text, phone, website_url });
     res.status(204).send();
@@ -208,6 +246,9 @@ export const updateLocation = async (req: AuthRequest, res: Response): Promise<v
       lon: number;
     };
 
+    const lenErr = validateLengths([['Location name', name, 200], ['Address', address, 500]]);
+    if (lenErr) { res.status(400).json({ message: lenErr }); return; }
+
     await updateBusinessLocation(Number(locationId), req.user!.id, {
       name,
       address,
@@ -233,6 +274,9 @@ export const addLocation = async (req: AuthRequest, res: Response): Promise<void
     lat: number;
     lon: number;
   };
+
+  const lenErr = validateLengths([['Location name', name, 200], ['Address', address, 500]]);
+  if (lenErr) { res.status(400).json({ message: lenErr }); return; }
 
   let locationId: number | null = null;
   try {

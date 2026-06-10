@@ -3,6 +3,7 @@ import * as ticketService from './tickets.service.js';
 import { getBusinessLocationsByUserId } from '../business/business.service.js';
 import { getPool } from '../../shared/db/db.js';
 import { AuthRequest } from '../../shared/middleware/auth.middleware.js';
+import { validateLength } from '../../shared/validation.js';
 
 export const redeemCode = async (req: AuthRequest, res: Response) => {
   try {
@@ -197,6 +198,8 @@ export const activatePromotional = async (req: AuthRequest, res: Response) => {
       res.status(400).json({ message: 'code is required.' });
       return;
     }
+    const codeErr = validateLength('Promo code', code, 100);
+    if (codeErr) { res.status(400).json({ message: codeErr }); return; }
 
     const result = await ticketService.activatePromotionalEntry(userId, code);
     res.status(201).json({ success: true, ...result });

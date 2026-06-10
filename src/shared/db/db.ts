@@ -31,6 +31,16 @@ export const connectDB = async () => {
     const client = await pool.connect();
     client.release();
     console.log('✅ Connected to PostgreSQL (Neon)');
+
+    // Graceful shutdown: close all connections before exit
+    const shutdown = async (signal: string) => {
+      console.log(`[DB] ${signal} received, closing pool...`);
+      await pool.end();
+      process.exit(0);
+    };
+    process.on('SIGTERM', () => shutdown('SIGTERM'));
+    process.on('SIGINT', () => shutdown('SIGINT'));
+
     return pool;
   } catch (err) {
     console.error('❌ Database connection failed:', err);

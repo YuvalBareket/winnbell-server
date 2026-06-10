@@ -1,6 +1,7 @@
 import { Response } from 'express';
 import type { AuthRequest } from '../../shared/middleware/auth.middleware.js';
 import { saveSubscription, removeSubscription, sendToAudience, logNotification, getNotificationHistory } from './notifications.service.js';
+import { validateLengths } from '../../shared/validation.js';
 
 export const subscribe = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
@@ -14,6 +15,12 @@ export const subscribe = async (req: AuthRequest, res: Response): Promise<void> 
       res.status(400).json({ message: 'Invalid subscription object.' });
       return;
     }
+    const lenErr = validateLengths([
+      ['Endpoint', endpoint, 500],
+      ['p256dh key', keys.p256dh, 200],
+      ['Auth key', keys.auth, 100],
+    ]);
+    if (lenErr) { res.status(400).json({ message: lenErr }); return; }
 
     await saveSubscription(userId, endpoint, keys);
     res.status(201).json({ message: 'Subscribed.' });
@@ -62,6 +69,12 @@ export const broadcast = async (req: AuthRequest, res: Response): Promise<void> 
       res.status(400).json({ message: 'audience must be one of: all, users, businesses.' });
       return;
     }
+    const lenErr = validateLengths([
+      ['Title', title, 200],
+      ['Body', body, 2000],
+      ['URL', url, 500],
+    ]);
+    if (lenErr) { res.status(400).json({ message: lenErr }); return; }
 
     const sentBy = req.user!.id;
     const sentCount = await sendToAudience(audience as Audience, { title, body, url });

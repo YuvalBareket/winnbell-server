@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import type { AuthRequest } from '../../shared/middleware/auth.middleware.js';
+import { validateLengths } from '../../shared/validation.js';
 import { sendToAudience, logNotification, getNotificationHistory as getNotificationHistoryService } from '../notifications/notifications.service.js';
 import {
   closeDrawService,
@@ -47,6 +48,7 @@ export const getDashboardData = async (req: Request, res: Response) => {
     const page = Math.max(1, parseInt(req.query.page as string) || 1);
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 25));
     const search = (req.query.search as string) || undefined;
+    if (search && search.length > 200) { res.status(400).json({ message: 'Search query is too long.' }); return; }
     const stats = await getBusinessesWithStats({ page, limit, search });
     res.status(200).json(stats);
   } catch (error) {
@@ -67,6 +69,13 @@ export const getDraws = async (req: Request, res: Response) => {
 
 export const createBusiness = async (req: Request, res: Response) => {
   try {
+    const { name: bizName, sector, description } = req.body as { name?: string; sector?: string; description?: string };
+    const lenErr = validateLengths([
+      ['Business name', bizName, 150],
+      ['Sector', sector, 50],
+      ['Description', description, 2000],
+    ]);
+    if (lenErr) { res.status(400).json({ message: lenErr }); return; }
     const business = await createBusinessService(req.body);
     res.status(201).json(business);
   } catch (error: unknown) {
@@ -84,12 +93,14 @@ export const getAllDraws = async (req: Request, res: Response) => {
 };
 
 export const createDraw = async (req: Request, res: Response) => {
-  const { prize_amount } = req.body as { prize_amount?: number };
+  const { prize_amount, name } = req.body as { prize_amount?: number; name?: string };
   const parsed = Number(prize_amount);
   if (!prize_amount || isNaN(parsed) || parsed <= 0) {
     res.status(400).json({ message: 'prize_amount must be a positive number' });
     return;
   }
+  const lenErr = validateLengths([['Campaign name', name, 150]]);
+  if (lenErr) { res.status(400).json({ message: lenErr }); return; }
   try {
     const draw = await createDrawService(req.body);
     res.status(201).json(draw);
@@ -113,6 +124,8 @@ export const updateDraw = async (req: Request, res: Response) => {
     res.status(400).json({ message: 'prize_amount must be a positive number' });
     return;
   }
+  const lenErr = validateLengths([['Campaign name', name, 150]]);
+  if (lenErr) { res.status(400).json({ message: lenErr }); return; }
   try {
     const draw = await updateDrawService(drawId, { name, prize_amount: prize_amount ? Number(prize_amount) : undefined, draw_date });
     res.json(draw);
@@ -168,6 +181,7 @@ export const getUsers = async (req: Request, res: Response) => {
   const page = Math.max(1, parseInt(req.query.page as string) || 1);
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 50));
   const search = typeof req.query.search === 'string' && req.query.search.trim() ? req.query.search.trim() : undefined;
+  if (search && search.length > 200) { res.status(400).json({ message: 'Search query is too long.' }); return; }
   const role = typeof req.query.role === 'string' && req.query.role ? req.query.role : undefined;
   const riskLevel = ['high', 'medium', 'low'].includes(req.query.riskLevel as string)
     ? (req.query.riskLevel as 'high' | 'medium' | 'low')
@@ -217,6 +231,7 @@ export const getDrawBusinesses = async (req: Request, res: Response) => {
   const limit = Math.min(100, Math.max(1, parseInt((req.query.limit as string) ?? '25', 10) || 25));
   const search = (req.query.search as string) ?? '';
   const sector = (req.query.sector as string) ?? '';
+  if (search.length > 200 || sector.length > 50) { res.status(400).json({ message: 'Search or sector filter is too long.' }); return; }
   try {
     const result = await getDrawBusinessesService(drawId, page, limit, search, sector);
     res.json(result);
@@ -260,6 +275,13 @@ export const updatePlatformSettings = async (req: Request, res: Response) => {
       const taken = await getFoundingMembersTakenCount();
       if (parsed < taken) {
         res.status(400).json({ message: `Cannot set cap below current founding member count (${taken})` });
+        return;
+      }
+    }
+
+    if (allowed_states !== undefined) {
+      if (!Array.isArray(allowed_states) || allowed_states.some(s => typeof s !== 'string' || s.length > 10)) {
+        res.status(400).json({ message: 'allowed_states must be an array of short string codes.' });
         return;
       }
     }
@@ -327,6 +349,8 @@ export const createPromoCode = async (req: Request, res: Response) => {
     res.status(400).json({ message: 'code is required' });
     return;
   }
+  const lenErr = validateLengths([['Promo code', code, 100]]);
+  if (lenErr) { res.status(400).json({ message: lenErr }); return; }
   try {
     const result = await createPromoCodeService(code, max_uses);
     res.status(201).json(result);
@@ -448,6 +472,7 @@ export const getLocationBreakdown = async (req: Request, res: Response) => {
   const rawPage = req.query.page;
   const rawLimit = req.query.limit;
   const search = typeof req.query.search === 'string' ? req.query.search : undefined;
+  if (search && search.length > 200) { res.status(400).json({ message: 'Search query is too long.' }); return; }
 
   const businessId = rawBiz ? parseInt(rawBiz as string, 10) : undefined;
   const page = rawPage ? parseInt(rawPage as string, 10) : 1;
@@ -604,6 +629,12 @@ export const sendNotification = async (req: AuthRequest, res: Response): Promise
     res.status(400).json({ message: 'audience must be one of: all, users, businesses.' });
     return;
   }
+  const lenErr = validateLengths([
+    ['Title', title, 200],
+    ['Body', body, 2000],
+    ['URL', url, 500],
+  ]);
+  if (lenErr) { res.status(400).json({ message: lenErr }); return; }
 
   try {
     const sentBy = req.user!.id;

@@ -6,6 +6,7 @@ import * as authService from './auth.service.js';
 import { RegisterRequest, AuthResponse } from './auth.types.js';
 import { getPool } from '../../shared/db/db.js';
 import { getPlatformSettings, invalidateUserAuth } from '../../shared/cache/cache.js';
+import { validateLengths } from '../../shared/validation.js';
 
 export const register = async (
   req: Request<{}, {}, RegisterRequest>,
@@ -18,6 +19,13 @@ export const register = async (
       res.status(400).json({ message: 'All fields are required' });
       return;
     }
+
+    const lenErr = validateLengths([
+      ['Full name', fullName, 100],
+      ['Email', email, 255],
+      ['Password', password, 128],
+    ]);
+    if (lenErr) { res.status(400).json({ message: lenErr }); return; }
 
     const result = await authService.registerUser(fullName, email, password, role, inviteToken, req.ip);
     res.status(201).json(result);
@@ -41,6 +49,8 @@ export const register = async (
 export const checkEmail = async (req: Request, res: Response): Promise<void> => {
   const { email } = req.body;
   if (!email) { res.status(400).json({ message: 'Email required' }); return; }
+  const lenErr = validateLengths([['Email', email, 255]]);
+  if (lenErr) { res.status(400).json({ message: lenErr }); return; }
   try {
     const pool = getPool();
     const result = await pool.query(`SELECT id FROM "user" WHERE email = $1`, [email.toLowerCase().trim()]);
@@ -58,6 +68,9 @@ export const login = async (req: Request, res: Response) => {
       res.status(400).json({ message: 'Email and password are required' });
       return;
     }
+
+    const lenErr = validateLengths([['Email', email, 255], ['Password', password, 128]]);
+    if (lenErr) { res.status(400).json({ message: lenErr }); return; }
 
     const result = await authService.loginUser(email, password, inviteToken);
     res.status(200).json(result);
@@ -276,6 +289,8 @@ export const changePassword = async (req: Request, res: Response): Promise<void>
 
   const { currentPassword, newPassword } = req.body;
   if (!currentPassword || !newPassword) { res.status(400).json({ message: 'Both currentPassword and newPassword are required' }); return; }
+  const lenErr = validateLengths([['Current password', currentPassword, 128], ['New password', newPassword, 128]]);
+  if (lenErr) { res.status(400).json({ message: lenErr }); return; }
 
   try {
     await authService.changePasswordService(userId, currentPassword, newPassword);

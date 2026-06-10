@@ -1,5 +1,6 @@
 import { Request, Response } from 'express';
 import * as phoneService from './phone.service.js';
+import { validateLength } from '../../shared/validation.js';
 
 export const sendOtp = async (req: Request, res: Response): Promise<void> => {
   const userId = req.user?.id;
@@ -10,6 +11,8 @@ export const sendOtp = async (req: Request, res: Response): Promise<void> => {
     res.status(400).json({ message: 'Phone number is required.' });
     return;
   }
+  const phoneErr = validateLength('Phone number', phoneNumber, 20);
+  if (phoneErr) { res.status(400).json({ message: phoneErr }); return; }
 
   try {
     await phoneService.sendPhoneOtp(userId, phoneNumber);
@@ -50,6 +53,8 @@ export const verifyOtp = async (req: Request, res: Response): Promise<void> => {
     res.status(400).json({ message: 'Verification code is required.' });
     return;
   }
+  const codeErr = validateLength('Verification code', code, 6);
+  if (codeErr) { res.status(400).json({ message: codeErr }); return; }
 
   try {
     await phoneService.verifyPhoneOtp(userId, code);

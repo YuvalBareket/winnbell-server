@@ -78,8 +78,8 @@ export const verifySession = async (req: Request, res: Response) => {
   try {
     const userId = req.user!.id;
     const { sessionId } = req.body;
-    if (!sessionId) {
-      res.status(400).json({ error: 'sessionId is required' });
+    if (!sessionId || typeof sessionId !== 'string' || sessionId.length > 200) {
+      res.status(400).json({ error: 'Invalid or missing sessionId.' });
       return;
     }
     await verifyAndActivateSession(sessionId, userId);
