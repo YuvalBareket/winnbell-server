@@ -174,7 +174,7 @@ describe('Rapid Submission — rapid_submission flag', () => {
     });
 
     expect(result.flags).toContain('rapid_submission');
-    expect(result.delta).toBeGreaterThanOrEqual(3);
+    expect(result.delta).toBeGreaterThanOrEqual(2);
   });
 
   test('does NOT fire rapid_submission when no ticket within 30 seconds', async () => {
@@ -293,7 +293,7 @@ describe('Trash Picker — velocity + rapid both fire', () => {
 
     expect(result.flags).toContain('high_submission_velocity');
     expect(result.flags).toContain('rapid_submission');
-    expect(result.delta).toBeGreaterThanOrEqual(7);
+    expect(result.delta).toBeGreaterThanOrEqual(6);
   });
 });
 
@@ -306,11 +306,11 @@ import { decayAllUserRiskScores } from '../risk.service';
 
 describe('decayAllUserRiskScores — campaign-close bulk decay', () => {
   test('returns { updated: N } matching the rowCount from the UPDATE', async () => {
-    mockQuery.mockResolvedValueOnce({ rowCount: 42 });
+    mockQuery.mockResolvedValueOnce({ rowCount: 42, rows: [] });
 
     const result = await decayAllUserRiskScores();
 
-    expect(result).toEqual({ updated: 42 });
+    expect(result).toEqual({ updated: 42, unquarantinedUserIds: [] });
     expect(mockQuery).toHaveBeenCalledTimes(1);
     // Verify the UPDATE targets only users with risk_score > 0
     const [sql] = mockQuery.mock.calls[0] as [string];
@@ -318,11 +318,11 @@ describe('decayAllUserRiskScores — campaign-close bulk decay', () => {
   });
 
   test('returns { updated: 0 } when no users have a score above 0', async () => {
-    mockQuery.mockResolvedValueOnce({ rowCount: 0 });
+    mockQuery.mockResolvedValueOnce({ rowCount: 0, rows: [] });
 
     const result = await decayAllUserRiskScores();
 
-    expect(result).toEqual({ updated: 0 });
+    expect(result).toEqual({ updated: 0, unquarantinedUserIds: [] });
   });
 });
 
@@ -378,7 +378,7 @@ describe('Amount outlier flag', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 describe('evaluateUserRisk — no context provided', () => {
   test('returns delta 0 and empty flags when called without a context argument', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [{ risk_score: 3, risk_last_flagged_at: null }] });
+    mockQuery.mockResolvedValueOnce({ rows: [{ risk_score: 3, risk_last_flagged_at: new Date() }] });
     const result = await evaluateUserRisk(8);
     expect(result.delta).toBe(0);
     expect(result.flags).toHaveLength(0);
@@ -726,8 +726,8 @@ describe('Power user — frequent legitimate shopper across many businesses', ()
     expect(result.flags).not.toContain('sustained_weekly_velocity');
   });
 
-  test('4 receipts at 4 distinct businesses today gets the multi-business discount (adjustedCount = 2)', async () => {
-    // 4 businesses → adjustedCount = floor(4/2) = 2 → under the ≥3 threshold → no penalty
+  test('4 receipts at 4 distinct businesses today — no multi-business discount, elevated_submission_velocity fires', async () => {
+    // adjustedCount = recentCount = 3 → elevated_submission_velocity fires (≥3 threshold)
     setupQueries([
       { rows: [{ risk_score: 0, risk_last_flagged_at: null }] },
       {
@@ -753,7 +753,7 @@ describe('Power user — frequent legitimate shopper across many businesses', ()
       isDuplicateCrossUser: false,
     });
 
-    expect(result.flags).not.toContain('elevated_submission_velocity');
+    expect(result.flags).toContain('elevated_submission_velocity');
     expect(result.flags).not.toContain('high_submission_velocity');
     expect(result.level).toBe('low');
   });
@@ -961,7 +961,7 @@ describe('Scammer pattern 2 — repeated identical amounts', () => {
 // Each submission after the first should fire rapid_submission (+3).
 // ─────────────────────────────────────────────────────────────────────────────
 describe('Scammer pattern 3 — rapid-fire submissions in short window', () => {
-  test('rapid submission at same business scores at least +3 delta', async () => {
+  test('rapid submission at same business scores at least +2 delta', async () => {
     setupQueries([
       { rows: [{ risk_score: 0, risk_last_flagged_at: null }] },
       {
@@ -988,11 +988,11 @@ describe('Scammer pattern 3 — rapid-fire submissions in short window', () => {
     });
 
     expect(result.flags).toContain('rapid_submission');
-    expect(result.delta).toBeGreaterThanOrEqual(3);
+    expect(result.delta).toBeGreaterThanOrEqual(2);
   });
 
   test('rapid submission combined with velocity (4 in 24h, 1 business) reaches HIGH risk quickly', async () => {
-    // Starting score: 0. Rapid (+3) + high velocity (+4) = delta 7 → totalScore 7 (still low).
+    // Starting score: 0. Rapid (+2) + high velocity (+4) = delta 6 → totalScore 6 (still low).
     // Demonstrates that a fresh account needs ~two rapid-burst sessions to reach HIGH.
     // This tests the combined path fires both flags.
     setupQueries([
@@ -1004,7 +1004,7 @@ describe('Scammer pattern 3 — rapid-fire submissions in short window', () => {
             v24h_distinct: 1,
             v7d_count: 4,
             v30d_count: 4,
-            rapid_count: 1,  // +3
+            rapid_count: 1,  // +2
             seq_ids: [],
             probe_count: 0,
             avg_amount: 30,
@@ -1022,7 +1022,7 @@ describe('Scammer pattern 3 — rapid-fire submissions in short window', () => {
 
     expect(result.flags).toContain('high_submission_velocity');
     expect(result.flags).toContain('rapid_submission');
-    expect(result.delta).toBe(7); // +4 velocity + +3 rapid
+    expect(result.delta).toBe(6); // +4 velocity + +2 rapid
   });
 
   test('rapid submission at a DIFFERENT business does NOT fire rapid_submission', async () => {
@@ -1160,8 +1160,8 @@ describe('Scammer pattern 4 — all submissions from a single business', () => {
     expect(result.delta).toBeGreaterThanOrEqual(4);
   });
 
-  test('4 submissions at exactly 3 distinct businesses gets the discount (adjustedCount = 2)', async () => {
-    // 4 receipts, 3 businesses → discount → adjustedCount = floor(4/2) = 2 → no velocity flag
+  test('4 submissions at exactly 3 distinct businesses — no multi-business discount, elevated_submission_velocity fires', async () => {
+    // adjustedCount = recentCount = 3 → no discount → elevated_submission_velocity fires (≥3 threshold)
     setupQueries([
       { rows: [{ risk_score: 0, risk_last_flagged_at: null }] },
       {
@@ -1187,8 +1187,8 @@ describe('Scammer pattern 4 — all submissions from a single business', () => {
       isDuplicateCrossUser: false,
     });
 
-    // adjustedCount = floor(3/2) = 1 → no velocity flag
-    expect(result.flags).not.toContain('elevated_submission_velocity');
+    // adjustedCount = 3 → elevated_submission_velocity fires; not enough for high (needs ≥4)
+    expect(result.flags).toContain('elevated_submission_velocity');
     expect(result.flags).not.toContain('high_submission_velocity');
   });
 });

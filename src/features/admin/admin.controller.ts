@@ -16,6 +16,7 @@ import {
   getAllDrawsService,
   getBusinessesWithStats,
   pickDrawWinnerService,
+  confirmWinnerService,
   getAdminOverviewService,
   getAllUsersService,
   updateUserRoleService,
@@ -278,6 +279,21 @@ export const pickWinner = async (req: Request, res: Response) => {
     res.status(200).json(winner);
   } catch (error) {
     res.status(500).json({ message: 'Failed to pick winner' });
+  }
+};
+
+export const confirmWinner = async (req: Request, res: Response): Promise<void> => {
+  const drawId = parseInt(req.params.drawId as string, 10);
+  if (isNaN(drawId)) {
+    res.status(400).json({ message: 'Invalid drawId' });
+    return;
+  }
+  try {
+    const winner = await confirmWinnerService(drawId);
+    res.status(200).json(winner);
+  } catch (error: unknown) {
+    console.error('[admin.confirmWinner]', error);
+    res.status(400).json({ message: error instanceof Error ? error.message : 'Failed to confirm winner' });
   }
 };
 

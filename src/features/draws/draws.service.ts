@@ -37,7 +37,7 @@ export const getDrawHistoryService = async () => {
       bl.name AS winner_location_name,
       COUNT(t.id) AS entry_count
     FROM draw d
-    LEFT JOIN ticket wt ON wt.id = d.winner_ticket_id
+    LEFT JOIN ticket wt ON wt.id = d.winner_ticket_id AND d.winner_confirmed = TRUE
     LEFT JOIN "user" u ON wt.activated_by_user_id = u.id
     LEFT JOIN business b ON wt.business_id = b.id
     LEFT JOIN business_location bl ON wt.location_id = bl.id
@@ -75,7 +75,7 @@ export const getDrawResultService = async (drawId: number) => {
       b.name AS winner_business_name,
       bl.name AS winner_location_name
     FROM draw d
-    LEFT JOIN ticket wt ON wt.id = d.winner_ticket_id
+    LEFT JOIN ticket wt ON wt.id = d.winner_ticket_id AND d.winner_confirmed = TRUE
     LEFT JOIN "user" u ON wt.activated_by_user_id = u.id
     LEFT JOIN business b ON wt.business_id = b.id
     LEFT JOIN business_location bl ON wt.location_id = bl.id

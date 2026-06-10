@@ -231,7 +231,7 @@ export const evaluateUserRisk = async (
 
     // Signal: rapid submission — last ticket < 30 seconds ago at same business
     if (rapidCount >= 1) {
-      delta += 3;
+      delta += 2;
       flags.push('rapid_submission');
     }
 
@@ -436,20 +436,36 @@ export const countsAgainstCap = (riskEvaluation: RiskEvaluation, isDuplicate: bo
 /**
  * Decay all user risk scores at campaign close.
  * Tiered reduction: HIGH (≥20) → −4, MEDIUM (10–19) → −2, LOW (1–9) → −1.
- * Returns the number of users whose score was updated.
+ * Returns the number of users whose score was updated and the IDs of users
+ * who crossed from above the HIGH threshold (>20) to at or below it (<=20)
+ * after decay, so the caller can sync their quarantine state.
  */
-export const decayAllUserRiskScores = async (): Promise<{ updated: number }> => {
+export const decayAllUserRiskScores = async (): Promise<{ updated: number; unquarantinedUserIds: number[] }> => {
   const pool = getPool();
   const result = await pool.query(`
-    UPDATE "user"
-    SET risk_score = GREATEST(0, risk_score -
+    WITH before AS (
+      SELECT id, risk_score AS old_score
+      FROM "user"
+      WHERE risk_score > 0 AND role = 'User'
+    )
+    UPDATE "user" u
+    SET risk_score = GREATEST(0, u.risk_score -
       CASE
-        WHEN risk_score >= 20 THEN 4
-        WHEN risk_score >= 10 THEN 2
+        WHEN u.risk_score >= 20 THEN 4
+        WHEN u.risk_score >= 10 THEN 2
         ELSE 1
       END
     )
-    WHERE risk_score > 0 AND role = 'User'
+    FROM before
+    WHERE u.id = before.id
+    RETURNING u.id,
+              u.risk_score AS new_score,
+              before.old_score
   `);
-  return { updated: result.rowCount ?? 0 };
+  const unquarantinedUserIds: number[] = result.rows
+    .filter((r: { id: number; new_score: number; old_score: number }) =>
+      Number(r.old_score) > RISK_THRESHOLDS.MEDIUM_MAX && Number(r.new_score) <= RISK_THRESHOLDS.MEDIUM_MAX,
+    )
+    .map((r: { id: number }) => r.id);
+  return { updated: result.rowCount ?? 0, unquarantinedUserIds };
 };

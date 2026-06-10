@@ -411,7 +411,6 @@ export const submitReceiptEntryService = async (
   const pool = getPool();
   const client = await pool.connect();
   let drawId: number = 0;
-  let duplicatePenalty = false;
 
   try {
     await client.query('BEGIN');
@@ -542,6 +541,16 @@ export const submitReceiptEntryService = async (
         if (probDrawId) {
           await syncUserQuarantineState(userId, probDrawId);
         }
+      } else {
+        // Base +1 penalty only — sync quarantine if the user's score just crossed into HIGH
+        const updatedScoreRes = await pool.query(
+          `SELECT risk_score FROM "user" WHERE id = $1`,
+          [userId],
+        );
+        const updatedScore: number = Number(updatedScoreRes.rows[0]?.risk_score ?? 0);
+        if (updatedScore > RISK_THRESHOLDS.MEDIUM_MAX) {
+          await syncUserQuarantineState(userId, drawId);
+        }
       }
       throw new Error('Transaction amount is not sufficient to earn an entry.');
     }
@@ -643,17 +652,13 @@ export const submitReceiptEntryService = async (
       throw new Error('This receipt has already been used for an entry.');
     }
 
-    // Block same-user re-submit — penalty for trying.
-    // IMPORTANT: do NOT call updateUserRiskScore/syncUserQuarantineState here via pool while
-    // client holds the user row lock (from the updateUserRiskScore call above using client).
-    // Doing so deadlocks: client waits for pool, pool waits for client's row lock.
-    // Instead, signal the penalty via a variable and apply it in the catch block after ROLLBACK.
+    // Block same-user re-submit — no penalty (honest mistake).
+    // The probe signal in evaluateUserRisk already penalizes same-receipt-different-amount attempts.
     const existingEntry = await client.query(
       `SELECT id FROM ticket WHERE business_id = $1 AND receipt_identifier = $2`,
       [business_id, input.receiptIdentifier],
     );
     if (existingEntry.rows.length > 0) {
-      duplicatePenalty = true;
       throw new Error('This receipt identifier has already been used.');
     }
 
@@ -667,8 +672,8 @@ export const submitReceiptEntryService = async (
     if (entry_cap !== null && countsAgainstCap(riskEval, dupCheck.isDuplicate)) {
       const bizCapCheck = await client.query(
         `SELECT COUNT(*) AS count FROM ticket
-         WHERE business_id = $1 AND draw_id = $2 AND is_quarantined = FALSE`,
-        [business_id, drawId],
+         WHERE location_id = $1 AND draw_id = $2 AND is_quarantined = FALSE`,
+        [input.locationId, drawId],
       );
       const bizCurrentCount = parseInt(bizCapCheck.rows[0].count, 10);
       const remainingBizEntries = entry_cap - bizCurrentCount;
@@ -775,15 +780,6 @@ export const submitReceiptEntryService = async (
     return { tickets: insertedTickets, entryCount: batchSize };
   } catch (err) {
     await client.query('ROLLBACK');
-    // Apply same-user duplicate penalty now that the client lock is released.
-    if (duplicatePenalty) {
-      try {
-        await updateUserRiskScore(userId, 4);
-        await syncUserQuarantineState(userId, drawId);
-      } catch (penaltyErr) {
-        console.error('[submitReceiptEntryService] Failed to apply duplicate penalty:', penaltyErr);
-      }
-    }
     throw err;
   } finally {
     client.release();
@@ -933,8 +929,8 @@ export const generateTicketService = async (user_id: number, location_id: number
     if (entry_cap !== null) {
       const capCheck = await client.query(
         `SELECT COUNT(*) AS count FROM ticket
-         WHERE business_id = $1 AND draw_id = $2 AND is_quarantined = FALSE`,
-        [business_id, drawId],
+         WHERE location_id = $1 AND draw_id = $2 AND is_quarantined = FALSE`,
+        [location_id, drawId],
       );
       if (parseInt(capCheck.rows[0].count) >= entry_cap) {
         throw new Error('We\'re sorry, this location has run out of entries for the current campaign. This is not your fault - try visiting another participating location!');
