@@ -2,6 +2,18 @@ import { getPool } from '../../shared/db/db.js';
 import { getPlatformSettings, invalidatePlatformSettings, invalidatePublicBusinessData } from '../../shared/cache/cache.js';
 import { decayAllUserRiskScores } from '../risk/risk.service.js';
 
+const logDrawAudit = async (
+  client: import('pg').PoolClient,
+  drawId: number,
+  action: string,
+  metadata?: Record<string, unknown>,
+) => {
+  await client.query(
+    `INSERT INTO draw_audit_log (draw_id, action, metadata) VALUES ($1, $2, $3)`,
+    [drawId, action, metadata ? JSON.stringify(metadata) : null],
+  );
+};
+
 export const getBusinessesWithStats = async (params: {
   page: number;
   limit: number;
@@ -306,6 +318,7 @@ export const openDrawService = async (drawId: number): Promise<void> => {
     if (openCheck.rows.length > 0) throw new Error('A draw is already Open. Close it before opening another.');
 
     await client.query(`UPDATE draw SET status = 'Open', opened_at = NOW() WHERE id = $1`, [drawId]);
+    await logDrawAudit(client, drawId, 'opened');
     await client.query('COMMIT');
     invalidatePublicBusinessData();
   } catch (err) {
@@ -328,6 +341,7 @@ export const closeDrawService = async (drawId: number): Promise<void> => {
     if (check.rows[0].status.toUpperCase() !== 'OPEN') throw new Error('Draw is not Open');
 
     await client.query(`UPDATE draw SET status = 'Closed', closed_at = NOW() WHERE id = $1`, [drawId]);
+    await logDrawAudit(client, drawId, 'closed');
 
     // Apply any pending threshold changes that businesses set during the active campaign
     await client.query(`
@@ -376,6 +390,7 @@ export const reopenDrawService = async (drawId: number): Promise<void> => {
        WHERE id = $1`,
       [drawId],
     );
+    await logDrawAudit(client, drawId, 'reopened');
 
     await client.query('COMMIT');
     invalidatePublicBusinessData();
@@ -387,7 +402,7 @@ export const reopenDrawService = async (drawId: number): Promise<void> => {
   }
 };
 
-export const pickDrawWinnerService = async (drawId: number): Promise<{
+export const pickDrawWinnerService = async (drawId: number, applyPenalty = false): Promise<{
   winnerId: number;
   winnerName: string;
   winnerEmail: string;
@@ -395,6 +410,13 @@ export const pickDrawWinnerService = async (drawId: number): Promise<{
   businessName: string | null;
   locationName: string | null;
   prizePool: number;
+  receiptIdentifier: string | null;
+  transactionAmount: number | null;
+  transactionDate: string | null;
+  receiptImageUrl: string | null;
+  entrySource: string | null;
+  imageValidationStatus: string | null;
+  riskScore: number;
 }> => {
   const pool = getPool();
   const client = await pool.connect();
@@ -416,12 +438,30 @@ export const pickDrawWinnerService = async (drawId: number): Promise<{
 
     // If there is an unconfirmed candidate, reject it and clear it before picking again
     const prevTicketId: number | null = check.rows[0].winner_ticket_id;
+    const prevUserId: number | null = check.rows[0].winner_user_id;
     if (prevTicketId !== null) {
       rejectedIds = [...rejectedIds, prevTicketId];
       await client.query(
         `UPDATE draw SET winner_user_id = NULL, winner_ticket_id = NULL, rejected_ticket_ids = $1 WHERE id = $2`,
         [rejectedIds, drawId],
       );
+      if (prevUserId !== null) {
+        const penalty = applyPenalty ? 15 : 0;
+        // Always quarantine the rejected ticket - the entry is invalid regardless of penalty
+        await client.query(
+          `UPDATE ticket SET is_quarantined = TRUE, quarantine_reason = 'admin_rejected_winner', quarantined_at = NOW() WHERE id = $1`,
+          [prevTicketId],
+        );
+        if (applyPenalty) {
+          await client.query(`UPDATE "user" SET risk_score = risk_score + 15 WHERE id = $1`, [prevUserId]);
+        }
+        // Log rejection (always)
+        await client.query(
+          `INSERT INTO draw_rejected_winner (draw_id, ticket_id, user_id, risk_penalty) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
+          [drawId, prevTicketId, prevUserId, penalty],
+        );
+        await logDrawAudit(client, drawId, 'winner_rejected', { ticket_id: prevTicketId, user_id: prevUserId, penalty });
+      }
     }
 
     const ticketResult = await client.query(`
@@ -429,8 +469,15 @@ export const pickDrawWinnerService = async (drawId: number): Promise<{
         t.id AS ticket_id,
         t.code,
         t.activated_by_user_id,
+        t.receipt_identifier,
+        t.transaction_amount,
+        t.transaction_date,
+        t.receipt_image_url,
+        t.entry_source,
+        t.image_validation_status,
         u.full_name,
         u.email,
+        u.risk_score,
         b.name AS business_name,
         bl.name AS location_name
       FROM ticket t
@@ -455,9 +502,20 @@ export const pickDrawWinnerService = async (drawId: number): Promise<{
       `UPDATE draw SET winner_user_id = $1, winner_ticket_id = $2, rejected_ticket_ids = $3 WHERE id = $4`,
       [winnerId, winnerTicketId, rejectedIds, drawId],
     );
+    await logDrawAudit(client, drawId, 'winner_picked', { ticket_id: winnerTicketId, user_id: winnerId });
 
     await client.query('COMMIT');
     invalidatePublicBusinessData();
+
+    // Sync quarantine state for rejected user (outside transaction, only if penalty applied)
+    if (applyPenalty && prevTicketId !== null && prevUserId !== null) {
+      try {
+        const { syncUserQuarantineState } = await import('../risk/risk.service.js');
+        await syncUserQuarantineState(prevUserId, drawId);
+      } catch (err) {
+        console.error('[pickDrawWinnerService] syncUserQuarantineState failed:', err);
+      }
+    }
 
     return {
       winnerId,
@@ -467,6 +525,13 @@ export const pickDrawWinnerService = async (drawId: number): Promise<{
       businessName: winner.business_name,
       locationName: winner.location_name,
       prizePool,
+      receiptIdentifier: winner.receipt_identifier ?? null,
+      transactionAmount: winner.transaction_amount ? parseFloat(winner.transaction_amount) : null,
+      transactionDate: winner.transaction_date ?? null,
+      receiptImageUrl: winner.receipt_image_url ?? null,
+      entrySource: winner.entry_source ?? null,
+      imageValidationStatus: winner.image_validation_status ?? null,
+      riskScore: winner.risk_score ?? 0,
     };
   } catch (err) {
     await client.query('ROLLBACK');
@@ -484,6 +549,13 @@ export const confirmWinnerService = async (drawId: number): Promise<{
   businessName: string | null;
   locationName: string | null;
   prizePool: number;
+  receiptIdentifier: string | null;
+  transactionAmount: number | null;
+  transactionDate: string | null;
+  receiptImageUrl: string | null;
+  entrySource: string | null;
+  imageValidationStatus: string | null;
+  riskScore: number;
 }> => {
   const pool = getPool();
   const client = await pool.connect();
@@ -510,8 +582,15 @@ export const confirmWinnerService = async (drawId: number): Promise<{
     const winnerRes = await client.query(`
       SELECT
         t.code,
+        t.receipt_identifier,
+        t.transaction_amount,
+        t.transaction_date,
+        t.receipt_image_url,
+        t.entry_source,
+        t.image_validation_status,
         u.full_name,
         u.email,
+        u.risk_score,
         b.name AS business_name,
         bl.name AS location_name
       FROM ticket t
@@ -529,6 +608,7 @@ export const confirmWinnerService = async (drawId: number): Promise<{
       `UPDATE draw SET winner_confirmed = TRUE WHERE id = $1`,
       [drawId],
     );
+    await logDrawAudit(client, drawId, 'winner_confirmed', { ticket_id: winnerTicketId, user_id: winnerId });
 
     await client.query('COMMIT');
     invalidatePublicBusinessData();
@@ -552,6 +632,13 @@ export const confirmWinnerService = async (drawId: number): Promise<{
       businessName: winner.business_name,
       locationName: winner.location_name,
       prizePool,
+      receiptIdentifier: winner.receipt_identifier ?? null,
+      transactionAmount: winner.transaction_amount ? parseFloat(winner.transaction_amount) : null,
+      transactionDate: winner.transaction_date ?? null,
+      receiptImageUrl: winner.receipt_image_url ?? null,
+      entrySource: winner.entry_source ?? null,
+      imageValidationStatus: winner.image_validation_status ?? null,
+      riskScore: winner.risk_score ?? 0,
     };
   } catch (err) {
     await client.query('ROLLBACK');
@@ -1331,6 +1418,91 @@ export const adminImageDecisionService = async (
     await updateUserRiskScore(userId, userDelta, undefined, []);
     await syncUserQuarantineState(userId, drawId);
   }
+};
+
+export const getDrawCandidateService = async (drawId: number) => {
+  const pool = getPool();
+  const result = await pool.query(`
+    SELECT
+      d.winner_user_id, d.winner_ticket_id, d.winner_confirmed, d.prize_pool,
+      t.code, t.receipt_identifier, t.transaction_amount, t.transaction_date,
+      t.receipt_image_url, t.entry_source, t.image_validation_status,
+      u.full_name, u.email, u.risk_score,
+      b.name AS business_name, bl.name AS location_name
+    FROM draw d
+    LEFT JOIN ticket t ON t.id = d.winner_ticket_id
+    LEFT JOIN "user" u ON u.id = d.winner_user_id
+    LEFT JOIN business b ON b.id = t.business_id
+    LEFT JOIN business_location bl ON bl.id = t.location_id
+    WHERE d.id = $1
+  `, [drawId]);
+
+  const row = result.rows[0];
+  if (!row || !row.winner_ticket_id || row.winner_confirmed === true) return null;
+
+  return {
+    winnerId: row.winner_user_id,
+    winnerName: row.full_name,
+    winnerEmail: row.email,
+    ticketCode: row.code,
+    businessName: row.business_name ?? null,
+    locationName: row.location_name ?? null,
+    prizePool: parseFloat(row.prize_pool),
+    receiptIdentifier: row.receipt_identifier ?? null,
+    transactionAmount: row.transaction_amount ? parseFloat(row.transaction_amount) : null,
+    transactionDate: row.transaction_date ?? null,
+    receiptImageUrl: row.receipt_image_url ?? null,
+    entrySource: row.entry_source ?? null,
+    imageValidationStatus: row.image_validation_status ?? null,
+    riskScore: row.risk_score ?? 0,
+  };
+};
+
+export const getDrawRejectedWinnersService = async (drawId: number) => {
+  const pool = getPool();
+  const result = await pool.query(`
+    SELECT
+      drw.id, drw.rejected_at, drw.risk_penalty,
+      t.id AS ticket_id, t.code, t.receipt_identifier, t.transaction_amount,
+      t.transaction_date, t.receipt_image_url, t.entry_source,
+      u.id AS user_id, u.full_name, u.email, u.risk_score,
+      b.name AS business_name, bl.name AS location_name
+    FROM draw_rejected_winner drw
+    JOIN ticket t ON t.id = drw.ticket_id
+    JOIN "user" u ON u.id = drw.user_id
+    LEFT JOIN business b ON b.id = t.business_id
+    LEFT JOIN business_location bl ON bl.id = t.location_id
+    WHERE drw.draw_id = $1
+    ORDER BY drw.rejected_at DESC
+  `, [drawId]);
+
+  return result.rows.map(r => ({
+    id: r.id,
+    rejectedAt: r.rejected_at,
+    riskPenalty: r.risk_penalty,
+    ticketId: r.ticket_id,
+    ticketCode: r.code,
+    receiptIdentifier: r.receipt_identifier ?? null,
+    transactionAmount: r.transaction_amount ? parseFloat(r.transaction_amount) : null,
+    transactionDate: r.transaction_date ?? null,
+    receiptImageUrl: r.receipt_image_url ?? null,
+    entrySource: r.entry_source ?? null,
+    userId: r.user_id,
+    userName: r.full_name,
+    userEmail: r.email,
+    userRiskScore: r.risk_score ?? 0,
+    businessName: r.business_name ?? null,
+    locationName: r.location_name ?? null,
+  }));
+};
+
+export const getDrawAuditLogService = async (drawId: number) => {
+  const pool = getPool();
+  const result = await pool.query(
+    `SELECT id, action, metadata, created_at FROM draw_audit_log WHERE draw_id = $1 ORDER BY created_at DESC LIMIT 200`,
+    [drawId],
+  );
+  return result.rows;
 };
 
 export const getUserDetailService = async (userId: number) => {

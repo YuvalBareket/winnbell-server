@@ -37,6 +37,9 @@ import {
   getBusinessDetailService,
   getBusinessEntriesService,
   adminImageDecisionService,
+  getDrawCandidateService,
+  getDrawRejectedWinnersService,
+  getDrawAuditLogService,
 } from './admin.service.js';
 
 export const getDashboardData = async (req: Request, res: Response) => {
@@ -274,8 +277,9 @@ export const pickWinner = async (req: Request, res: Response) => {
     res.status(400).json({ message: 'Invalid drawId' });
     return;
   }
+  const applyPenalty = req.body?.applyPenalty === true;
   try {
-    const winner = await pickDrawWinnerService(drawId);
+    const winner = await pickDrawWinnerService(drawId, applyPenalty);
     res.status(200).json(winner);
   } catch (error) {
     res.status(500).json({ message: 'Failed to pick winner' });
@@ -541,6 +545,39 @@ export const removeBusinessFromDraw = async (req: Request, res: Response): Promi
     res.status(204).send();
   } catch (err: unknown) {
     res.status(400).json({ message: 'Failed to remove business from draw' });
+  }
+};
+
+export const getDrawCandidate = async (req: Request, res: Response) => {
+  const drawId = parseInt(req.params.drawId as string, 10);
+  if (isNaN(drawId)) { res.status(400).json({ message: 'Invalid drawId' }); return; }
+  try {
+    const candidate = await getDrawCandidateService(drawId);
+    res.json(candidate);
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to fetch candidate' });
+  }
+};
+
+export const getDrawRejectedWinners = async (req: Request, res: Response) => {
+  const drawId = parseInt(req.params.drawId as string, 10);
+  if (isNaN(drawId)) { res.status(400).json({ message: 'Invalid drawId' }); return; }
+  try {
+    const rejected = await getDrawRejectedWinnersService(drawId);
+    res.json(rejected);
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to fetch rejected winners' });
+  }
+};
+
+export const getDrawAuditLog = async (req: Request, res: Response) => {
+  const drawId = parseInt(req.params.drawId as string, 10);
+  if (isNaN(drawId)) { res.status(400).json({ message: 'Invalid drawId' }); return; }
+  try {
+    const log = await getDrawAuditLogService(drawId);
+    res.json(log);
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to fetch audit log' });
   }
 };
 

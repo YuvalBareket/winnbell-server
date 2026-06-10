@@ -30,6 +30,9 @@ router.post('/draws/:drawId/reopen', adminController.reopenDraw);
 router.get('/draws/:drawId/businesses', adminController.getDrawBusinesses);
 router.post('/draws/:drawId/businesses/:businessId', adminController.addBusinessToDraw);
 router.delete('/draws/:drawId/businesses/:businessId', adminController.removeBusinessFromDraw);
+router.get('/draws/:drawId/candidate', adminController.getDrawCandidate);
+router.get('/draws/:drawId/rejected-winners', adminController.getDrawRejectedWinners);
+router.get('/draws/:drawId/audit-log', adminController.getDrawAuditLog);
 router.get('/settings', adminController.getPlatformSettings);
 router.patch('/settings', adminController.updatePlatformSettings);
 
