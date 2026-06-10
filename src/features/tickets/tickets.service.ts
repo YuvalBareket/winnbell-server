@@ -49,7 +49,7 @@ export const activateTicket = async (code: string, userId: number) => {
     }
 
     // Advisory lock on (userId, drawId) to prevent concurrent cap bypass
-    await client.query(`SELECT pg_advisory_xact_lock($1, $2)`, [userId, ticket.draw_id]);
+    await client.query(`SELECT pg_advisory_xact_lock(1, hashtext($1::text || '_' || $2::text))`, [userId, ticket.draw_id]);
 
     const drawCapResult = await client.query(
       `SELECT COUNT(*) AS count FROM ticket
@@ -296,7 +296,7 @@ export const activateFreeTicket = async (userId: number, claimIp?: string): Prom
     // Also loads account age and email-verification status in the same round-trip.
     const eligibilityResult = await client.query(`
       SELECT u.activated_at, usr.is_email_verified, usr.is_phone_verified, usr.created_at AS account_created_at
-      FROM (SELECT pg_advisory_xact_lock($1)) AS _lock
+      FROM (SELECT pg_advisory_xact_lock(2, $1)) AS _lock
       CROSS JOIN (SELECT is_email_verified, is_phone_verified, created_at FROM "user" WHERE id = $1) AS usr
       LEFT JOIN LATERAL (
         SELECT activated_at FROM free_ticket_usage WHERE user_id = $1 AND status = 'approved'
@@ -418,7 +418,7 @@ export const submitReceiptEntryService = async (
     // Serialize concurrent receipt submissions from the same user so the
     // daily_count read in the preflight is never stale across parallel requests.
     await client.query(
-      `SELECT pg_advisory_xact_lock(hashtext('usr_receipt_' || $1::text))`,
+      `SELECT pg_advisory_xact_lock(3, hashtext('usr_' || $1::text))`,
       [userId],
     );
 
@@ -578,7 +578,7 @@ export const submitReceiptEntryService = async (
     // two concurrent submissions of the same receipt slipping through the duplicate check
     // simultaneously (TOCTOU race condition). The lock is automatically released at COMMIT/ROLLBACK.
     await client.query(
-      `SELECT pg_advisory_xact_lock(hashtext($1::text || '|' || $2::text))`,
+      `SELECT pg_advisory_xact_lock(4, hashtext($1::text || '|' || $2::text))`,
       [String(business_id), input.receiptIdentifier],
     );
 
@@ -801,7 +801,7 @@ export const activatePromotionalEntry = async (
     // same user (with different codes) both reading count=0 and both succeeding.
     // Acquired before the code-level lock to enforce a consistent lock ordering.
     await client.query(
-      `SELECT pg_advisory_xact_lock(hashtext('usr_promo_' || $1::text))`,
+      `SELECT pg_advisory_xact_lock(3, hashtext('usr_promo_' || $1::text))`,
       [userId],
     );
 
@@ -809,7 +809,7 @@ export const activatePromotionalEntry = async (
     // two concurrent 100th-user requests would otherwise both read use_count=99,
     // both pass the cap check, and both insert.
     await client.query(
-      `SELECT pg_advisory_xact_lock(hashtext($1::text))`,
+      `SELECT pg_advisory_xact_lock(5, hashtext($1::text))`,
       [`promo_code_${normalizedCode}`],
     );
 

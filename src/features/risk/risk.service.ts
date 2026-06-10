@@ -409,7 +409,7 @@ export const syncUserQuarantineState = async (userId: number, drawId: number, cl
        quarantined_at    = CASE WHEN (SELECT is_high FROM r) THEN NOW() ELSE NULL END
      WHERE activated_by_user_id = $1 AND draw_id = $2
        AND (
-         ((SELECT is_high FROM r) IS TRUE  AND is_quarantined = FALSE)
+         ((SELECT is_high FROM r) IS TRUE  AND is_quarantined = FALSE AND (image_validation_status IS NULL OR image_validation_status != 'passed'))
          OR ((SELECT is_high FROM r) IS FALSE AND is_quarantined = TRUE AND quarantine_reason = 'high_risk_user')
        )
        AND id NOT IN (

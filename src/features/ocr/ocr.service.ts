@@ -147,20 +147,24 @@ export const validateReceiptAsync = (
     } catch (err) {
       // Provider error (network, tesseract crash, etc.) — quarantine pending manual review
       console.error(`[OCR] Validation error for ticket ${ticketId}:`, err);
-      // Always record the OCR error on the anchor ticket
-      await pool.query(
-        `UPDATE ticket SET image_validation_status = 'ocr_error' WHERE id = $1`,
-        [ticketId],
-      );
-      await pool.query(
-        `UPDATE ticket
-         SET is_quarantined    = TRUE,
-             quarantine_reason = 'ocr_error_pending_review',
-             quarantined_at    = NOW()
-         WHERE (id = $1 OR anchor_ticket_id = $1)
-           AND quarantine_reason = 'ocr_pending'`,
-        [ticketId],
-      );
+      try {
+        // Always record the OCR error on the anchor ticket
+        await pool.query(
+          `UPDATE ticket SET image_validation_status = 'ocr_error' WHERE id = $1`,
+          [ticketId],
+        );
+        await pool.query(
+          `UPDATE ticket
+           SET is_quarantined    = TRUE,
+               quarantine_reason = 'ocr_error_pending_review',
+               quarantined_at    = NOW()
+           WHERE (id = $1 OR anchor_ticket_id = $1)
+             AND quarantine_reason = 'ocr_pending'`,
+          [ticketId],
+        );
+      } catch (dbErr) {
+        console.error(`[OCR] Failed to record OCR error for ticket ${ticketId}:`, dbErr);
+      }
     }
   });
 };

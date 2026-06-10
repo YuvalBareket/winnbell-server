@@ -64,12 +64,13 @@ const registrationLimiter = rateLimit({
   message: { message: 'Too many registration attempts from this IP. Please try again later.' },
 });
 
-const redeemLimiter = rateLimit({
+const ticketsLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
   max: 30,
   standardHeaders: true,
   legacyHeaders: false,
-  message: { message: 'Too many redemption attempts, please slow down.' },
+  keyGenerator: (req: any) => req.user?.id?.toString(),
+  message: { message: 'Too many requests, please slow down.' },
 });
 
 const publicLimiter = rateLimit({
@@ -128,7 +129,7 @@ app.use('/draws', publicDrawsRouter);
 app.use(authenticateToken);
 
 app.use('/admin', adminRoutes);
-app.use('/tickets', redeemLimiter, ticketsRoutes);
+app.use('/tickets', ticketsLimiter, ticketsRoutes);
 app.use('/draws', drawsRoutes);
 app.use('/business', businessRoutes);
 app.use('/notifications', notificationRoutes);

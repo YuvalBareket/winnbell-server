@@ -1,16 +1,27 @@
 import { Router } from 'express';
+import rateLimit from 'express-rate-limit';
 import * as ticketController from './tickets.controller.js';
 import { requireRole, requirePhoneVerified, requireActive } from '../../shared/middleware/auth.middleware.js';
 
+// 5 entry attempts per minute per user (keyed on JWT user ID, not IP)
+const entryLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 5,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: any) => req.user?.id?.toString(),
+  message: { message: 'Too many attempts, please slow down.' },
+});
+
 const router = Router();
 
-router.post('/redeem', requirePhoneVerified, ticketController.redeemCode);
+router.post('/redeem', requirePhoneVerified, entryLimiter, ticketController.redeemCode);
 router.get('/my-tickets', ticketController.getMyTickets);
 router.get('/free-status', ticketController.getStatus);
-router.post('/activate-free', requirePhoneVerified, ticketController.activate);
-router.post('/generate', requireRole('Business', 'Admin'), requireActive, ticketController.generateTicket);
-router.post('/receipt-entry', requirePhoneVerified, ticketController.submitReceiptEntry);
+router.post('/activate-free', requirePhoneVerified, entryLimiter, ticketController.activate);
+router.post('/generate', requireRole('Business', 'Admin'), requireActive, entryLimiter, ticketController.generateTicket);
+router.post('/receipt-entry', requirePhoneVerified, entryLimiter, ticketController.submitReceiptEntry);
 router.get('/receipt-upload-url', ticketController.getReceiptUploadUrl);
 router.get('/my-risk-level', ticketController.getMyRiskLevel);
-router.post('/activate-promotional', requirePhoneVerified, ticketController.activatePromotional);
+router.post('/activate-promotional', requirePhoneVerified, entryLimiter, ticketController.activatePromotional);
 export default router;

@@ -18,6 +18,8 @@ export const connectDB = async () => {
       idleTimeoutMillis: 10000,
       // If a connection cannot be established within 5s, fail fast rather than hanging.
       connectionTimeoutMillis: 5000,
+      // Kill any query that runs longer than 10s — prevents hung queries from exhausting the pool.
+      statement_timeout: 10000,
     });
 
     // Prevent terminated Neon connections from crashing the process.
