@@ -39,7 +39,7 @@ app.use(
   cors({
     origin: (origin, callback) => {
       if (!origin || allowedOrigins.includes(origin)) return callback(null, true);
-      callback(new Error('Not allowed by CORS'));
+      callback(null, false);
     },
     credentials: true,
   }),
@@ -135,5 +135,11 @@ app.use('/business', businessRoutes);
 app.use('/notifications', notificationRoutes);
 app.use('/phone/send-otp', otpLimiter);
 app.use('/phone', phoneRouter);
+
+// Global error handler — prevents stack traces and file paths from leaking to clients
+app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  console.error(err);
+  res.status(500).json({ message: 'Internal server error' });
+});
 
 export default app;

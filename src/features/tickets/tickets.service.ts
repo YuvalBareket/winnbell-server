@@ -289,15 +289,13 @@ export const activateFreeTicket = async (userId: number, claimIp?: string): Prom
   try {
     await client.query('BEGIN');
 
-    // Advisory lock scoped to this user's free ticket claim — prevents double-claim on empty table.
-    // Lock is acquired atomically within the same query as the eligibility check to avoid an
-    // extra round-trip. LEFT JOIN ensures one row is always returned (activated_at = NULL when
-    // no prior usage exists), which is equivalent to the original behaviour.
-    // Also loads account age and email-verification status in the same round-trip.
+    // Advisory lock scoped to this user's free ticket claim — prevents double-claim race condition.
+    // Must be a standalone query so PostgreSQL serializes concurrent requests before the eligibility check.
+    await client.query('SELECT pg_advisory_xact_lock(2, $1)', [userId]);
+
     const eligibilityResult = await client.query(`
       SELECT u.activated_at, usr.is_email_verified, usr.is_phone_verified, usr.created_at AS account_created_at
-      FROM (SELECT pg_advisory_xact_lock(2, $1)) AS _lock
-      CROSS JOIN (SELECT is_email_verified, is_phone_verified, created_at FROM "user" WHERE id = $1) AS usr
+      FROM (SELECT is_email_verified, is_phone_verified, created_at FROM "user" WHERE id = $1) AS usr
       LEFT JOIN LATERAL (
         SELECT activated_at FROM free_ticket_usage WHERE user_id = $1 AND status = 'approved'
         ORDER BY activated_at DESC LIMIT 1

@@ -32,7 +32,7 @@ export const getDrawHistoryService = async () => {
       d.status,
       d.closed_at,
       wt.code AS winning_ticket_code,
-      u.full_name AS winner_name,
+      CASE WHEN u.full_name IS NOT NULL THEN CONCAT(SPLIT_PART(u.full_name, ' ', 1), ' ', LEFT(SPLIT_PART(u.full_name, ' ', 2), 1), '.') END AS winner_name,
       b.name AS winner_business_name,
       bl.name AS winner_location_name,
       COUNT(t.id) AS entry_count
@@ -71,7 +71,7 @@ export const getDrawResultService = async (drawId: number) => {
       d.status,
       d.closed_at,
       wt.code AS winning_ticket_code,
-      u.full_name AS winner_name,
+      CASE WHEN u.full_name IS NOT NULL THEN CONCAT(SPLIT_PART(u.full_name, ' ', 1), ' ', LEFT(SPLIT_PART(u.full_name, ' ', 2), 1), '.') END AS winner_name,
       b.name AS winner_business_name,
       bl.name AS winner_location_name
     FROM draw d

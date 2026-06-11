@@ -15,13 +15,13 @@ const entryLimiter = rateLimit({
 
 const router = Router();
 
-router.post('/redeem', requirePhoneVerified, entryLimiter, ticketController.redeemCode);
+router.post('/redeem', requireRole('User'), requirePhoneVerified, entryLimiter, ticketController.redeemCode);
 router.get('/my-tickets', ticketController.getMyTickets);
 router.get('/free-status', ticketController.getStatus);
-router.post('/activate-free', requirePhoneVerified, entryLimiter, ticketController.activate);
+router.post('/activate-free', requireRole('User'), requirePhoneVerified, entryLimiter, ticketController.activate);
 router.post('/generate', requireRole('Business', 'Admin'), requireActive, entryLimiter, ticketController.generateTicket);
-router.post('/receipt-entry', requirePhoneVerified, entryLimiter, ticketController.submitReceiptEntry);
-router.get('/receipt-upload-url', ticketController.getReceiptUploadUrl);
+router.post('/receipt-entry', requireRole('User'), requirePhoneVerified, entryLimiter, ticketController.submitReceiptEntry);
+router.get('/receipt-upload-url', requireRole('User'), requirePhoneVerified, entryLimiter, ticketController.getReceiptUploadUrl);
 router.get('/my-risk-level', ticketController.getMyRiskLevel);
-router.post('/activate-promotional', requirePhoneVerified, entryLimiter, ticketController.activatePromotional);
+router.post('/activate-promotional', requireRole('User'), requirePhoneVerified, entryLimiter, ticketController.activatePromotional);
 export default router;
