@@ -876,7 +876,6 @@ export const getAdminAnalyticsService = async (businessId?: number, drawId?: num
 
   const [
     entrySrcRes,
-    promoCountRes,
     amoeRes,
     fraudRes,
     quarantineRes,
@@ -890,11 +889,6 @@ export const getAdminAnalyticsService = async (businessId?: number, drawId?: num
        WHERE ($1::int IS NULL OR business_id = $1)
          AND ($2::int IS NULL OR draw_id = $2)
        GROUP BY entry_source`,
-      [biz, draw],
-    ),
-    // Promo entries have no business_id / draw_id — only include when no filter active
-    pool.query(
-      `SELECT COUNT(*) AS count FROM promotional_entry WHERE ($1::int IS NULL AND $2::int IS NULL)`,
       [biz, draw],
     ),
     // AMOE: filter by draw_id when provided
@@ -983,9 +977,6 @@ export const getAdminAnalyticsService = async (businessId?: number, drawId?: num
   for (const row of entrySrcRes.rows) {
     entrySrcMap[row.entry_source] = parseInt(row.count);
   }
-  const promoCount = parseInt(promoCountRes.rows[0].count) || 0;
-  // promo entries live in promotional_entry, not ticket — add separately
-  entrySrcMap['promo'] = (entrySrcMap['promo'] ?? 0) + promoCount;
   const entryTotal = Object.values(entrySrcMap).reduce((a, b) => a + b, 0);
 
   return {

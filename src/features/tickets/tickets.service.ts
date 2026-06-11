@@ -91,7 +91,7 @@ export const getUserTicketsService = async (userId: number, drawId: number) => {
       t.code,
       t.status,
       t.activated_at,
-      b.name  AS business_name,
+      CASE WHEN t.entry_source = 'promo' THEN 'Promotional Entry' ELSE b.name END AS business_name,
       b.sector AS business_sector,
       b.logo_url,
       bl.name AS location_name,
@@ -102,33 +102,13 @@ export const getUserTicketsService = async (userId: number, drawId: number) => {
     JOIN draw d ON t.draw_id = d.id
     WHERE t.activated_by_user_id = $1
       AND t.draw_id = $2
-
-    UNION ALL
-
-    SELECT
-      pe.id,
-      pe.code,
-      'Activated'           AS status,
-      pe.created_at         AS activated_at,
-      'Promotional Entry'   AS business_name,
-      NULL                  AS business_sector,
-      NULL                  AS logo_url,
-      NULL                  AS location_name,
-      d.name                AS draw_name
-    FROM promotional_entry pe
-    JOIN draw d ON d.id = pe.draw_id
-    WHERE pe.user_id = $1
-      AND pe.draw_id = $2
-
-    ORDER BY activated_at DESC
+    ORDER BY t.activated_at DESC
   `, [userId, drawId]);
 
-  // Effective count: non-quarantined receipt/free/code tickets + all promo entries
+  // Effective count: all the user's tickets in this draw (promo entries are tickets too)
   const countResult = await pool.query(
-    `SELECT (
-       (SELECT COUNT(*)::int FROM ticket WHERE activated_by_user_id = $1 AND draw_id = $2)
-       + (SELECT COUNT(*)::int FROM promotional_entry WHERE user_id = $1 AND draw_id = $2)
-     ) AS effective_count`,
+    `SELECT COUNT(*)::int AS effective_count FROM ticket
+     WHERE activated_by_user_id = $1 AND draw_id = $2`,
     [userId, drawId],
   );
   const totalCount: number = Number(countResult.rows[0]?.effective_count ?? 0);
@@ -356,12 +336,10 @@ export const activateFreeTicket = async (userId: number, claimIp?: string): Prom
       throw new Error('No active campaign found. Please try again later.');
     }
 
-    // Per-draw per-user cap — counts non-quarantined tickets + all promo entries
+    // Per-draw per-user cap — counts non-quarantined tickets (promo entries are tickets too)
     const drawCapResult = await client.query(
-      `SELECT (
-         (SELECT COUNT(*)::int FROM ticket WHERE activated_by_user_id = $1 AND draw_id = $2 AND is_quarantined = FALSE)
-         + (SELECT COUNT(*)::int FROM promotional_entry WHERE user_id = $1 AND draw_id = $2)
-       ) AS total_count`,
+      `SELECT COUNT(*)::int AS total_count FROM ticket
+       WHERE activated_by_user_id = $1 AND draw_id = $2 AND is_quarantined = FALSE`,
       [userId, activeDrawId],
     );
     if (parseInt(drawCapResult.rows[0].total_count, 10) >= 30) {
@@ -466,10 +444,8 @@ export const submitReceiptEntryService = async (
             AND activated_at >= NOW() - INTERVAL '24 hours'
         )                                                                     AS daily_count,
         COALESCE((
-          SELECT (
-            (SELECT COUNT(*)::int FROM ticket WHERE activated_by_user_id = $1 AND draw_id = (SELECT draw_id FROM od) AND is_quarantined = FALSE)
-            + (SELECT COUNT(*)::int FROM promotional_entry WHERE user_id = $1 AND draw_id = (SELECT draw_id FROM od))
-          )
+          SELECT COUNT(*)::int FROM ticket
+          WHERE activated_by_user_id = $1 AND draw_id = (SELECT draw_id FROM od) AND is_quarantined = FALSE
         ), 0)                                                                 AS draw_count`,
       [userId, input.locationId],
     );
@@ -787,7 +763,7 @@ export const submitReceiptEntryService = async (
 export const activatePromotionalEntry = async (
   userId: number,
   code: string,
-): Promise<{ entryId: number; drawName: string }> => {
+): Promise<{ entryId: number; drawName: string; ticketId: number; code: string }> => {
   const pool = getPool();
   const client = await pool.connect();
   const normalizedCode = code.toUpperCase().trim();
@@ -847,19 +823,18 @@ export const activatePromotionalEntry = async (
       throw new Error('You can only use one promotional code per campaign.');
     }
 
-    // Per-draw per-user cap — counts non-quarantined tickets + all promo entries
+    // Per-draw per-user cap — promo tickets live in the ticket table like every other entry
     const capResult = await client.query(
-      `SELECT (
-         (SELECT COUNT(*)::int FROM ticket WHERE activated_by_user_id = $1 AND draw_id = $2 AND is_quarantined = FALSE)
-         + (SELECT COUNT(*)::int FROM promotional_entry WHERE user_id = $1 AND draw_id = $2)
-       ) AS total_count`,
+      `SELECT COUNT(*)::int AS total_count FROM ticket
+       WHERE activated_by_user_id = $1 AND draw_id = $2 AND is_quarantined = FALSE`,
       [userId, draw.id],
     );
     if (parseInt(capResult.rows[0].total_count, 10) >= 30) {
       throw new Error('You have reached the maximum of 30 entries for this campaign.');
     }
 
-    // Insert — the UNIQUE(code, user_id) constraint rejects duplicate use per account
+    // Redemption log — the UNIQUE(code, user_id) constraint rejects duplicate use per account.
+    // The actual draw entry is the ticket row inserted below; this table only tracks code usage.
     let result;
     try {
       result = await client.query(
@@ -875,9 +850,18 @@ export const activatePromotionalEntry = async (
       throw err;
     }
 
+    // The real entry: a ticket row, so the winner picker / caps / analytics all see it
+    const ticketCode = await generateGlobalUniqueCode(client);
+    const ticketResult = await client.query(
+      `INSERT INTO ticket (code, status, entry_source, business_id, activated_by_user_id, draw_id, activated_at)
+       VALUES ($1, 'Activated', 'promo', NULL, $2, $3, NOW())
+       RETURNING id`,
+      [ticketCode, userId, draw.id],
+    );
+
     await client.query('COMMIT');
     invalidatePublicBusinessData();
-    return { entryId: result.rows[0].id, drawName: draw.name };
+    return { entryId: result.rows[0].id, drawName: draw.name, ticketId: ticketResult.rows[0].id, code: ticketCode };
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
