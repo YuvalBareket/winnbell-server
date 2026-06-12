@@ -38,6 +38,7 @@ jest.mock('../../../shared/db/db.js', () => ({
 }));
 
 import { registerUser, loginUser, syncExternalUser } from '../auth.service';
+import { invalidatePlatformSettings } from '../../../shared/cache/cache.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const JWT_SECRET = 'test-secret';
@@ -68,6 +69,9 @@ const setupPoolQueries = (...responses: Array<{ rows: unknown[]; rowCount?: numb
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // platform settings are cached in a real node-cache — flush so each test's
+  // mocked allowed_states actually takes effect
+  invalidatePlatformSettings();
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -139,6 +143,7 @@ describe('syncExternalUser — existing user role is never downgraded', () => {
     // This test verifies the service respects whatever role the DB gives back.
     setupClientQueries(
       { rows: [] }, // BEGIN
+      { rows: [] }, // deletedCheck — not a deleted account
       // Simulates ON CONFLICT DO UPDATE returning the existing DB role (Admin)
       { rows: [{ id: 99, role: 'Admin', fullName: 'Admin User', email: 'admin@prod.com' }] },
       { rows: [] }, // business_location check
@@ -155,6 +160,7 @@ describe('syncExternalUser — existing user role is never downgraded', () => {
   it('should preserve existing Business role even when metadata says User (re-login after setup)', async () => {
     setupClientQueries(
       { rows: [] },
+      { rows: [] }, // deletedCheck
       // ON CONFLICT returns existing Business role from DB
       { rows: [{ id: 50, role: 'Business', fullName: 'Biz User', email: 'biz@prod.com' }] },
       { rows: [] }, // no location
@@ -173,35 +179,81 @@ describe('syncExternalUser — existing user role is never downgraded', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 
 describe('syncExternalUser — region blocking via IP', () => {
-  it('should throw REGION_RESTRICTED when IP resolves to a non-allowed country', async () => {
-    // The service calls getCountryFromIp (which calls ipinfo.io) then getAllowedStates.
-    // We mock fetch to simulate: US returned from ipinfo, only AU in allowed_states.
-    const originalFetch = global.fetch;
-    global.fetch = jest.fn().mockResolvedValue({
+  /** Mock the ipinfo /json response used by getRegionFromIp. */
+  const mockIpinfo = (body: { country?: string; region?: string }) =>
+    jest.fn().mockResolvedValue({
       ok: true,
-      text: () => Promise.resolve('US'),
+      json: () => Promise.resolve(body),
     }) as unknown as typeof fetch;
 
-    // getAllowedStates calls pool.query — mock it to return AU only
-    mockPoolQuery.mockResolvedValue({ rows: [{ allowed_states: ['AU'] }] });
+  it('should throw REGION_RESTRICTED for a non-US country when states are restricted', async () => {
+    const originalFetch = global.fetch;
+    global.fetch = mockIpinfo({ country: 'IL', region: 'Tel Aviv' });
+
+    // getAllowedStates returns FL only
+    mockPoolQuery.mockResolvedValue({ rows: [{ allowed_states: ['FL'] }] });
 
     try {
       await expect(
-        syncExternalUser('ext-us', 'user@us.com', 'US User', { ip: '8.8.8.8' }),
+        syncExternalUser('ext-il', 'user@il.com', 'IL User', { ip: '203.0.113.9' }),
       ).rejects.toThrow('REGION_RESTRICTED');
     } finally {
       global.fetch = originalFetch;
     }
   });
 
-  it('should NOT block when geo detection fails (fail open on network error)', async () => {
-    // If ipinfo.io is unreachable, getCountryFromIp returns null.
-    // The service must NOT block — fail open is the correct behavior.
+  it('should throw REGION_RESTRICTED for a US user in a non-allowed state', async () => {
     const originalFetch = global.fetch;
-    global.fetch = jest.fn().mockRejectedValue(new Error('network error')) as unknown as typeof fetch;
+    global.fetch = mockIpinfo({ country: 'US', region: 'Georgia' });
+
+    mockPoolQuery.mockResolvedValue({ rows: [{ allowed_states: ['FL'] }] });
+
+    try {
+      await expect(
+        syncExternalUser('ext-ga', 'user@ga.com', 'GA User', { ip: '8.8.8.8' }),
+      ).rejects.toThrow('REGION_RESTRICTED');
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('should allow a US user whose state is in allowed_states (stores the state code)', async () => {
+    const originalFetch = global.fetch;
+    global.fetch = mockIpinfo({ country: 'US', region: 'Florida' });
+
+    setupPoolQueries({ rows: [{ allowed_states: ['FL'] }] });
 
     setupClientQueries(
       { rows: [] },
+      { rows: [] }, // deletedCheck
+      { rows: [{ id: 42, role: 'User', fullName: 'FL User', email: 'fl@test.com' }] },
+      { rows: [] },
+      { rows: [] },
+    );
+
+    try {
+      const res = await syncExternalUser('ext-fl', 'fl@test.com', 'FL User', { ip: '203.0.113.1' });
+      expect(res.message).toBe('Sync successful');
+      // declared_state param of the upsert must be the USPS code, not the country
+      const upsertCall = mockClientQuery.mock.calls.find(
+        ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO "user"'),
+      );
+      expect(upsertCall![1][4]).toBe('FL');
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('should NOT block when geo detection fails (fail open on network error)', async () => {
+    const originalFetch = global.fetch;
+    global.fetch = jest.fn().mockRejectedValue(new Error('network error')) as unknown as typeof fetch;
+
+    // allowed_states restricted — but detection failed, so we must fail open
+    setupPoolQueries({ rows: [{ allowed_states: ['FL'] }] });
+
+    setupClientQueries(
+      { rows: [] },
+      { rows: [] }, // deletedCheck
       { rows: [{ id: 40, role: 'User', fullName: 'Roaming User', email: 'roam@test.com' }] },
       { rows: [] }, // no location
       { rows: [] }, // COMMIT
@@ -215,10 +267,81 @@ describe('syncExternalUser — region blocking via IP', () => {
     }
   });
 
-  it('should skip region check entirely when no ip is provided', async () => {
-    // No ip → getCountryFromIp never called → no pool.query for allowed_states
+  it('should NOT block a US user whose state could not be resolved (fail open)', async () => {
+    const originalFetch = global.fetch;
+    global.fetch = mockIpinfo({ country: 'US' }); // no region field
+
+    setupPoolQueries({ rows: [{ allowed_states: ['FL'] }] });
+
     setupClientQueries(
       { rows: [] },
+      { rows: [] }, // deletedCheck
+      { rows: [{ id: 43, role: 'User', fullName: 'Mystery State', email: 'us@test.com' }] },
+      { rows: [] },
+      { rows: [] },
+    );
+
+    try {
+      const res = await syncExternalUser('ext-us2', 'us@test.com', 'Mystery State', { ip: '8.8.4.4' });
+      expect(res.message).toBe('Sync successful');
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('should allow anyone when allowed_states is empty (no restriction configured)', async () => {
+    const originalFetch = global.fetch;
+    global.fetch = mockIpinfo({ country: 'IL', region: 'Tel Aviv' });
+
+    setupPoolQueries({ rows: [{ allowed_states: [] }] });
+
+    setupClientQueries(
+      { rows: [] },
+      { rows: [] }, // deletedCheck
+      { rows: [{ id: 44, role: 'User', fullName: 'IL User', email: 'il@test.com' }] },
+      { rows: [] },
+      { rows: [] },
+    );
+
+    try {
+      const res = await syncExternalUser('ext-il2', 'il@test.com', 'IL User', { ip: '203.0.113.9' });
+      expect(res.message).toBe('Sync successful');
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('should allow an existing Admin to sign in from a blocked region (admin exemption)', async () => {
+    const originalFetch = global.fetch;
+    // Non-US IP + restricted states — would block a normal user
+    global.fetch = mockIpinfo({ country: 'IL', region: 'Tel Aviv' });
+
+    // pool.query #1 = admin role lookup → Admin. (Region queries never fire after that.)
+    setupPoolQueries({ rows: [{ role: 'Admin' }] });
+
+    setupClientQueries(
+      { rows: [] },
+      { rows: [] }, // deletedCheck
+      { rows: [{ id: 90, role: 'Admin', fullName: 'Platform Admin', email: 'admin@winnbell.com' }] },
+      { rows: [] },
+      { rows: [] },
+    );
+
+    try {
+      const res = await syncExternalUser('ext-admin-il', 'admin@winnbell.com', 'Platform Admin', { ip: '82.80.1.1' });
+      expect(res.message).toBe('Sync successful');
+      expect(res.user.role).toBe('Admin');
+      // The ipinfo lookup must not even run for admins
+      expect(global.fetch).not.toHaveBeenCalled();
+    } finally {
+      global.fetch = originalFetch;
+    }
+  });
+
+  it('should skip region check entirely when no ip is provided', async () => {
+    setupClientQueries(
+      { rows: [] },
+      { rows: [] }, // deletedCheck
       { rows: [{ id: 41, role: 'User', fullName: 'No IP', email: 'noip@test.com' }] },
       { rows: [] },
       { rows: [] },
@@ -226,31 +349,6 @@ describe('syncExternalUser — region blocking via IP', () => {
 
     const res = await syncExternalUser('ext-noip', 'noip@test.com', 'No IP', {});
     expect(res.message).toBe('Sync successful');
-  });
-
-  it('should allow access when country is in allowed_states list', async () => {
-    const originalFetch = global.fetch;
-    global.fetch = jest.fn().mockResolvedValue({
-      ok: true,
-      text: () => Promise.resolve('AU'),
-    }) as unknown as typeof fetch;
-
-    // getAllowedStates returns AU (the user's country)
-    setupPoolQueries({ rows: [{ allowed_states: ['AU'] }] });
-
-    setupClientQueries(
-      { rows: [] },
-      { rows: [{ id: 42, role: 'User', fullName: 'AU User', email: 'au@test.com' }] },
-      { rows: [] },
-      { rows: [] },
-    );
-
-    try {
-      const res = await syncExternalUser('ext-au', 'au@test.com', 'AU User', { ip: '203.0.113.1' });
-      expect(res.message).toBe('Sync successful');
-    } finally {
-      global.fetch = originalFetch;
-    }
   });
 });
 
@@ -262,6 +360,7 @@ describe('syncExternalUser — Manager detection via business_location', () => {
   it('should populate location_id when user is assigned as manager of a location', async () => {
     setupClientQueries(
       { rows: [] },
+      { rows: [] }, // deletedCheck
       { rows: [{ id: 60, role: 'Business', fullName: 'Mgr', email: 'mgr@biz.com' }] },
       { rows: [{ id: 7 }] }, // business_location — user is manager
       { rows: [] }, // COMMIT
@@ -280,6 +379,7 @@ describe('syncExternalUser — Manager detection via business_location', () => {
     const inviteToken = makeInviteToken(20);
     setupClientQueries(
       { rows: [] },
+      { rows: [] }, // deletedCheck
       { rows: [{ id: 50, role: 'User', fullName: 'Invited Mgr', email: 'invited@biz.com' }] },
       { rows: [{ id: 20 }], rowCount: 1 }, // UPDATE biz_loc
       { rows: [] }, // UPDATE role
@@ -301,6 +401,7 @@ describe('syncExternalUser — businessIsActive field', () => {
   it('should set businessIsActive true when is_subscribed is true', async () => {
     setupClientQueries(
       { rows: [] },
+      { rows: [] }, // deletedCheck
       { rows: [{ id: 70, role: 'Business', fullName: 'Active Biz', email: 'active@biz.com' }] },
       { rows: [] }, // no location
       { rows: [{ id: 80, is_subscribed: true, logo_url: null }] },
@@ -316,6 +417,7 @@ describe('syncExternalUser — businessIsActive field', () => {
   it('should set businessIsActive false when is_subscribed is false', async () => {
     setupClientQueries(
       { rows: [] },
+      { rows: [] }, // deletedCheck
       { rows: [{ id: 71, role: 'Business', fullName: 'Inactive Biz', email: 'inactive@biz.com' }] },
       { rows: [] },
       { rows: [{ id: 81, is_subscribed: false, logo_url: null }] },
@@ -330,6 +432,7 @@ describe('syncExternalUser — businessIsActive field', () => {
   it('should set businessIsActive false when is_subscribed is null', async () => {
     setupClientQueries(
       { rows: [] },
+      { rows: [] }, // deletedCheck
       { rows: [{ id: 72, role: 'Business', fullName: 'Null Biz', email: 'null@biz.com' }] },
       { rows: [] },
       { rows: [{ id: 82, is_subscribed: null, logo_url: null }] },
@@ -398,6 +501,7 @@ describe('syncExternalUser — Admin role escalation blocked', () => {
     // Any other value (including 'Admin') defaults to 'User'.
     setupClientQueries(
       { rows: [] },
+      { rows: [] }, // deletedCheck
       { rows: [{ id: 99, role: 'User', fullName: 'Hacker', email: 'hacker@test.com' }] },
       { rows: [] }, // no location
       { rows: [] }, // COMMIT

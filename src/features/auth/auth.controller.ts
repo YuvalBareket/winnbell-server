@@ -149,14 +149,10 @@ export const getRegionConfig = async (_req: Request, res: Response): Promise<voi
 
 export const checkRegion = async (req: Request, res: Response): Promise<void> => {
   try {
-    const ip = req.ip || '';
-    const country = await authService.getCountryFromIp(ip);
-    const settings = await getPlatformSettings();
-    const allowedStates: string[] = settings.allowed_states ?? [];
-    const blocked = !!country && allowedStates.length > 0 && !allowedStates.includes(country);
-    res.json({ blocked, country });
+    const result = await authService.evaluateRegionRestriction(req.ip || '');
+    res.json({ blocked: result.blocked, country: result.country, state: result.state });
   } catch {
-    res.json({ blocked: false, country: null });
+    res.json({ blocked: false, country: null, state: null });
   }
 };
 

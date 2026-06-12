@@ -787,7 +787,8 @@ export const getPlatformSettingsService = async (): Promise<{
   const settings = await getPlatformSettings();
   return {
     global_entry_cap: (settings.global_entry_cap as number | undefined) ?? null,
-    allowed_states: settings.allowed_states ?? ['FL'],
+    // Empty array = no region restriction (matches evaluateRegionRestriction semantics)
+    allowed_states: settings.allowed_states ?? [],
     founding_member_cap: settings.founding_member_cap ?? 30,
     founding_phase_active: (settings as any).founding_phase_active ?? true,
   };
@@ -806,18 +807,19 @@ export const updatePlatformSettingsService = async (
   founding_phase_active?: boolean,
 ): Promise<void> => {
   const pool = getPool();
-  // Use COALESCE($3, col) so omitted fields keep their current value.
+  // Use COALESCE($n, col) so omitted fields keep their current value.
+  // allowed_states: undefined = keep current; [] = explicitly clear (no restriction).
   // Note: founding_phase_active=false works correctly because false ?? null = false (not null).
   await pool.query(
     `INSERT INTO platform_settings (id, global_entry_cap, allowed_states, founding_member_cap, founding_phase_active, updated_at)
      VALUES (1, $1, $2, COALESCE($3, 30), COALESCE($4, TRUE), NOW())
      ON CONFLICT (id) DO UPDATE
        SET global_entry_cap      = $1,
-           allowed_states        = $2,
+           allowed_states        = COALESCE($2, platform_settings.allowed_states),
            founding_member_cap   = COALESCE($3, platform_settings.founding_member_cap),
            founding_phase_active = COALESCE($4, platform_settings.founding_phase_active),
            updated_at            = NOW()`,
-    [global_entry_cap, allowed_states ?? ['FL'], founding_member_cap ?? null, founding_phase_active ?? null],
+    [global_entry_cap, allowed_states ?? null, founding_member_cap ?? null, founding_phase_active ?? null],
   );
   invalidatePlatformSettings();
   invalidatePublicBusinessData();

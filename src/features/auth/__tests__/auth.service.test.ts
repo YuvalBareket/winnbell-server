@@ -284,6 +284,7 @@ describe('syncExternalUser', () => {
   test('upserts a new user and returns sync successful with role User', async () => {
     setupClientQueries(
       { rows: [] },  // BEGIN
+      { rows: [] },  // deletedCheck — not a deleted account
       { rows: [{ id: 40, role: 'User', fullName: 'NewUser', email: 'new@test.com' }] }, // upsert
       { rows: [] },  // business_location manager check
       { rows: [] },  // COMMIT
@@ -298,6 +299,7 @@ describe('syncExternalUser', () => {
   test('Admin role in metadata is blocked — defaults to User', async () => {
     setupClientQueries(
       { rows: [] },
+      { rows: [] },  // deletedCheck
       { rows: [{ id: 41, role: 'User', fullName: 'AdminWannabe', email: 'admin@test.com' }] },
       { rows: [] },  // business_location check
       { rows: [] },
@@ -310,6 +312,7 @@ describe('syncExternalUser', () => {
     const token = makeInviteToken(20);
     setupClientQueries(
       { rows: [] },
+      { rows: [] },  // deletedCheck
       { rows: [{ id: 50, role: 'User', fullName: 'Mgr', email: 'mgr@sync.com' }] },
       { rows: [{ id: 20 }], rowCount: 1 }, // UPDATE biz_loc
       { rows: [] },                         // UPDATE role
@@ -325,6 +328,7 @@ describe('syncExternalUser', () => {
     const token = makeInviteToken(20);
     setupClientQueries(
       { rows: [] },
+      { rows: [] },  // deletedCheck
       { rows: [{ id: 51, role: 'User', fullName: 'Dup', email: 'dup@sync.com' }] },
       { rows: [], rowCount: 0 }, // UPDATE biz_loc — already used
     );
@@ -336,6 +340,7 @@ describe('syncExternalUser', () => {
   test('requiresBusinessSetup is true for Business user with no location and no business row', async () => {
     setupClientQueries(
       { rows: [] },
+      { rows: [] },  // deletedCheck
       { rows: [{ id: 60, role: 'Business', fullName: 'Biz', email: 'biz@sync.com' }] },
       { rows: [] }, // business_location — no location
       { rows: [] }, // business lookup — empty
@@ -348,6 +353,7 @@ describe('syncExternalUser', () => {
   test('requiresBusinessSetup is false when Business user already has a business row', async () => {
     setupClientQueries(
       { rows: [] },
+      { rows: [] },  // deletedCheck
       { rows: [{ id: 61, role: 'Business', fullName: 'Biz2', email: 'biz2@sync.com' }] },
       { rows: [] }, // no location
       { rows: [{ id: 77, is_subscribed: true, logo_url: null }] }, // business exists

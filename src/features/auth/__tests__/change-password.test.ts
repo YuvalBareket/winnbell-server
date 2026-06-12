@@ -45,6 +45,7 @@ describe('changePasswordService', () => {
     setupPoolQueries(
       { rows: [{ password_hash: 'oldhash' }] }, // SELECT password_hash
       { rows: [], rowCount: 1 },                 // UPDATE password_hash
+      { rows: [], rowCount: 0 },                 // DELETE refresh_token (session revocation)
     );
     (bcrypt.compare as jest.Mock).mockResolvedValue(true);
 
@@ -52,8 +53,8 @@ describe('changePasswordService', () => {
       changePasswordService(1, 'currentpass', 'newpassword123'),
     ).resolves.toBeUndefined();
 
-    // Both SELECT and UPDATE queries must have fired
-    expect(mockQuery).toHaveBeenCalledTimes(2);
+    // SELECT + UPDATE + refresh-token revocation DELETE must all have fired
+    expect(mockQuery).toHaveBeenCalledTimes(3);
   });
 
   it('should throw USER_NOT_FOUND when the SELECT returns no rows', async () => {

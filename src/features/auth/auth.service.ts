@@ -8,21 +8,73 @@ const getAllowedStates = async (): Promise<string[]> => {
   return settings.allowed_states ?? [];
 };
 
-export const getCountryFromIp = async (ip: string): Promise<string | null> => {
-  if (!ip) return null;
+// US state full name (as returned by ipinfo's `region` field) → USPS 2-letter code.
+// allowed_states in platform_settings stores the 2-letter codes (admin picks from US_STATES).
+const US_STATE_NAME_TO_CODE: Record<string, string> = {
+  'Alabama': 'AL', 'Alaska': 'AK', 'Arizona': 'AZ', 'Arkansas': 'AR', 'California': 'CA',
+  'Colorado': 'CO', 'Connecticut': 'CT', 'Delaware': 'DE', 'Florida': 'FL', 'Georgia': 'GA',
+  'Hawaii': 'HI', 'Idaho': 'ID', 'Illinois': 'IL', 'Indiana': 'IN', 'Iowa': 'IA',
+  'Kansas': 'KS', 'Kentucky': 'KY', 'Louisiana': 'LA', 'Maine': 'ME', 'Maryland': 'MD',
+  'Massachusetts': 'MA', 'Michigan': 'MI', 'Minnesota': 'MN', 'Mississippi': 'MS', 'Missouri': 'MO',
+  'Montana': 'MT', 'Nebraska': 'NE', 'Nevada': 'NV', 'New Hampshire': 'NH', 'New Jersey': 'NJ',
+  'New Mexico': 'NM', 'New York': 'NY', 'North Carolina': 'NC', 'North Dakota': 'ND', 'Ohio': 'OH',
+  'Oklahoma': 'OK', 'Oregon': 'OR', 'Pennsylvania': 'PA', 'Rhode Island': 'RI', 'South Carolina': 'SC',
+  'South Dakota': 'SD', 'Tennessee': 'TN', 'Texas': 'TX', 'Utah': 'UT', 'Vermont': 'VT',
+  'Virginia': 'VA', 'Washington': 'WA', 'West Virginia': 'WV', 'Wisconsin': 'WI', 'Wyoming': 'WY',
+  'District of Columbia': 'DC',
+};
+
+export interface IpRegion {
+  /** ISO 3166-1 alpha-2 country code, e.g. 'US', 'IL'. Null when detection failed. */
+  country: string | null;
+  /** USPS state code, e.g. 'FL'. Only set for US IPs whose region was recognised. */
+  stateCode: string | null;
+}
+
+/**
+ * Resolve country + US state from an IP via ipinfo.io's /json endpoint.
+ * (The old /country endpoint only returned the country, which could never match
+ * the state codes stored in platform_settings.allowed_states.)
+ * Returns nulls on any failure — callers fail open.
+ */
+export const getRegionFromIp = async (ip: string): Promise<IpRegion> => {
+  if (!ip) return { country: null, stateCode: null };
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 2000);
-    const res = await fetch(`https://ipinfo.io/${ip}/country`, { signal: controller.signal });
+    const tokenParam = process.env.IPINFO_TOKEN ? `?token=${process.env.IPINFO_TOKEN}` : '';
+    const res = await fetch(`https://ipinfo.io/${ip}/json${tokenParam}`, { signal: controller.signal });
     clearTimeout(timeout);
-    if (!res.ok) {
-      return null;
-    }
-    const text = (await res.text()).trim();
-    return text.length === 2 ? text : null;
-  } catch (err) {
-    return null;
+    if (!res.ok) return { country: null, stateCode: null };
+    const data = await res.json() as { country?: string; region?: string };
+    const country = typeof data.country === 'string' && data.country.length === 2 ? data.country : null;
+    const stateCode = country === 'US' && data.region ? (US_STATE_NAME_TO_CODE[data.region] ?? null) : null;
+    return { country, stateCode };
+  } catch {
+    return { country: null, stateCode: null };
   }
+};
+
+export interface RegionCheckResult {
+  blocked: boolean;
+  country: string | null;
+  state: string | null;
+}
+
+/**
+ * Shared region-restriction decision used by signup sync and /auth/region-check.
+ * allowed_states empty/null = no restriction. Detection failures fail open so a
+ * geo-API hiccup never locks out legitimate users.
+ */
+export const evaluateRegionRestriction = async (ip: string): Promise<RegionCheckResult> => {
+  const { country, stateCode } = await getRegionFromIp(ip);
+  const allowedStates = await getAllowedStates();
+
+  if (allowedStates.length === 0) return { blocked: false, country, state: stateCode };
+  if (!country) return { blocked: false, country, state: stateCode }; // fail open
+  if (country !== 'US') return { blocked: true, country, state: stateCode };
+  if (!stateCode) return { blocked: false, country, state: stateCode }; // US, state unknown — fail open
+  return { blocked: !allowedStates.includes(stateCode), country, state: stateCode };
 };
 
 // ── Bot / throwaway-email protection ──────────────────────────────────────────
@@ -316,13 +368,21 @@ export const syncExternalUser = async (
   const role = rawRole === 'Business' ? 'Business' : 'User';
   const inviteToken = metadata?.inviteToken;
 
-  const detectedState = metadata?.ip ? await getCountryFromIp(metadata.ip) : null;
-
-  // Region check: only validate when state detection succeeds
-  if (detectedState) {
-    const allowedStates = await getAllowedStates();
-    if (allowedStates.length > 0 && !allowedStates.includes(detectedState)) {
-      throw new Error('REGION_RESTRICTED');
+  // Region check: country must be US and state must be in allowed_states (when configured).
+  // Detection failures fail open inside evaluateRegionRestriction.
+  // Existing Admin accounts are exempt — admins must be able to sign in from anywhere
+  // (e.g. operating the platform from outside the allowed states).
+  let detectedState: string | null = null;
+  if (metadata?.ip) {
+    const adminCheck = await pool.query(
+      `SELECT role FROM "user" WHERE external_auth_id = $1 OR email = $2 LIMIT 1`,
+      [externalId, email],
+    );
+    const isExistingAdmin = adminCheck.rows[0]?.role === 'Admin';
+    if (!isExistingAdmin) {
+      const region = await evaluateRegionRestriction(metadata.ip);
+      if (region.blocked) throw new Error('REGION_RESTRICTED');
+      detectedState = region.state ?? region.country;
     }
   }
 
