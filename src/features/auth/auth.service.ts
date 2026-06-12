@@ -109,6 +109,7 @@ export const registerUser = async (
   inviteToken?: string,
   registrationIp?: string,
 ) => {
+  email = email.toLowerCase().trim(); // schema email is case-sensitive UNIQUE — always store normalized
   if (isDisposableEmail(email)) {
     throw new Error('Registration with disposable email addresses is not allowed.');
   }
@@ -219,6 +220,7 @@ export const loginUser = async (
   inviteToken?: string,
 ) => {
   const pool = getPool();
+  email = email.toLowerCase().trim();
 
   const result = await pool.query(
     `SELECT id, email, password_hash, full_name, role, is_phone_verified FROM "user" WHERE email = $1 AND is_active = true`,
@@ -358,6 +360,7 @@ export const syncExternalUser = async (
   metadata?: { role?: string; inviteToken?: string | null; ip?: string },
 ) => {
   const pool = getPool();
+  email = email.toLowerCase().trim();
   const client = await pool.connect();
   let locationId: number | null = null;
   // Admin role can never be assigned through sync — only via direct DB action.
