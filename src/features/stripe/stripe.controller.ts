@@ -110,6 +110,10 @@ export const cancelSub = async (req: Request, res: Response) => {
     res.json(result);
   } catch (err: unknown) {
     console.error('[stripe.cancelSub]', err);
+    if (err instanceof Error && err.message === 'REFUND_FAILED') {
+      res.status(502).json({ error: 'Your refund could not be processed, so the membership was NOT cancelled. Please try again or contact support.' });
+      return;
+    }
     res.status(400).json({ error: 'Cancellation failed. Please try again.' });
   }
 };

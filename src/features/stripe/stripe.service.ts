@@ -542,17 +542,11 @@ async function cancelFoundingMembership(
   );
   const sub = subResult.rows[0] as { created_at: Date; current_period_end: Date } | undefined;
 
-  // Remove from all upcoming draws
-  const deleteResult = await pool.query(
-    `DELETE FROM draw_entry de
-     USING draw d
-     WHERE de.draw_id = d.id AND de.business_id = $1 AND d.status = 'Upcoming'
-     RETURNING de.draw_id`,
-    [businessId],
-  );
-  const removedFromDraw = deleteResult.rowCount! > 0;
-
-  // 50% refund of remaining time: $1,200 × (days_remaining / total_days) × 0.5
+  // 50% refund of remaining time: $1,200 × (days_remaining / total_days) × 0.5.
+  // The refund is issued BEFORE any destructive change — if Stripe rejects it,
+  // the whole cancellation aborts and the business keeps its membership intact.
+  // (Previously a failed refund was logged "non-fatal" while the membership was
+  // still deleted and the user told a refund was issued.)
   let refundType: CancelRefundType = 'none';
   let refundAmount = 0;
 
@@ -566,16 +560,28 @@ async function cancelFoundingMembership(
     const refundCents = Math.round(120000 * remainingFraction * 0.5);
 
     if (refundCents > 0) {
-      refundAmount = refundCents / 100;
-      refundType = remainingFraction >= 0.99 ? 'full' : 'prorated';
-
       try {
         await stripe.refunds.create({ payment_intent: paymentIntentId, amount: refundCents });
       } catch (err: unknown) {
-        console.error(`[Founding] Stripe refund failed (non-fatal): ${err instanceof Error ? err.message : err}`);
+        console.error(`[Founding] Stripe refund failed — cancellation aborted for business ${businessId}: ${err instanceof Error ? err.message : err}`);
+        throw new Error('REFUND_FAILED');
       }
+      refundAmount = refundCents / 100;
+      // Always 50% of remaining time — never the full payment
+      refundType = 'prorated';
     }
   }
+
+  // Refund succeeded (or none was due) — now apply the destructive changes.
+  // Remove from all upcoming draws
+  const deleteResult = await pool.query(
+    `DELETE FROM draw_entry de
+     USING draw d
+     WHERE de.draw_id = d.id AND de.business_id = $1 AND d.status = 'Upcoming'
+     RETURNING de.draw_id`,
+    [businessId],
+  );
+  const removedFromDraw = deleteResult.rowCount! > 0;
 
   // Remove founding_member record entirely — they had their chance, no longer a founding member
   await pool.query(
