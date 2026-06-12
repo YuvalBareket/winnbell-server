@@ -409,7 +409,8 @@ export const removeManager = async (req: AuthRequest, res: Response): Promise<vo
 export const getUploadUrl = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const contentType = String(req.query.contentType || '').trim();
-    const result = await getPresignedUploadUrl(contentType);
+    const size = Number(req.query.size);
+    const result = await getPresignedUploadUrl(contentType, 'business-logos', size);
     const r2BaseUrl = process.env.R2_PUBLIC_URL;
     const publicUrl = r2BaseUrl ? `${r2BaseUrl}/business-logos/${result.key}` : null;
     res.json({ ...result, publicUrl });
@@ -420,6 +421,10 @@ export const getUploadUrl = async (req: AuthRequest, res: Response): Promise<voi
     }
     if (error instanceof Error && error.message === 'INVALID_CONTENT_TYPE') {
       res.status(400).json({ message: 'Only JPEG, PNG, and WebP images are allowed.' });
+      return;
+    }
+    if (error instanceof Error && error.message === 'INVALID_CONTENT_LENGTH') {
+      res.status(400).json({ message: 'Invalid file size. Images must be under 10 MB.' });
       return;
     }
     res.status(500).json({ message: 'Failed to generate upload URL.' });

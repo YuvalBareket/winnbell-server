@@ -10,11 +10,14 @@ import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 //   R2_PUBLIC_URL          — Public bucket URL (e.g. https://pub-xxx.r2.dev or custom domain)
 
 const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+// Hard server-side cap. Client-side compression produces files well under this.
+export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MB
 let s3Singleton: S3Client | null = null;
 
 export const getPresignedUploadUrl = async (
   contentType: string,
   folder: string = 'business-logos',
+  contentLength?: number,
 ): Promise<{ uploadUrl: string; key: string }> => {
   const { R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ACCOUNT_ID, R2_BUCKET } = process.env;
 
@@ -24,6 +27,17 @@ export const getPresignedUploadUrl = async (
 
   if (!ALLOWED_TYPES.includes(contentType)) {
     throw new Error('INVALID_CONTENT_TYPE');
+  }
+
+  // Size is signed into the URL — a PUT with a different Content-Length fails
+  // the signature at R2, so the cap cannot be bypassed after presigning.
+  if (
+    contentLength === undefined ||
+    !Number.isInteger(contentLength) ||
+    contentLength < 1 ||
+    contentLength > MAX_UPLOAD_BYTES
+  ) {
+    throw new Error('INVALID_CONTENT_LENGTH');
   }
 
   if (!s3Singleton) {
@@ -46,6 +60,7 @@ export const getPresignedUploadUrl = async (
     Bucket: R2_BUCKET,
     Key: key,
     ContentType: contentType,
+    ContentLength: contentLength,
   });
 
   const uploadUrl = await getSignedUrl(client, command, { expiresIn: 300 });

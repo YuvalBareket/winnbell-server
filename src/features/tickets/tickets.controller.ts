@@ -180,11 +180,16 @@ export const generateTicket = async (req: AuthRequest, res: Response) => {
 
 export const getReceiptUploadUrl = async (req: AuthRequest, res: Response) => {
   try {
+    const size = Number(req.query.size);
     const { getPresignedUploadUrl } = await import('../../shared/s3.js');
-    const { uploadUrl, key } = await getPresignedUploadUrl('image/webp', 'receipt-images');
+    const { uploadUrl, key } = await getPresignedUploadUrl('image/webp', 'receipt-images', size);
     const publicUrl = `${process.env.R2_PUBLIC_URL}/receipt-images/${key}`;
     res.json({ uploadUrl, publicUrl });
   } catch (err: unknown) {
+    if (err instanceof Error && err.message === 'INVALID_CONTENT_LENGTH') {
+      res.status(400).json({ message: 'Invalid file size. Images must be under 10 MB.' });
+      return;
+    }
     res.status(500).json({ message: 'Failed to generate upload URL.' });
   }
 };
