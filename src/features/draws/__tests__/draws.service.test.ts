@@ -28,6 +28,7 @@ jest.mock('../../../shared/db/db.js', () => ({
 }));
 
 import { getDrawHistoryService } from '../draws.service';
+import { publicCache } from '../../../shared/cache/cache.js';
 
 // ─────────────────────────────────────────────
 // Helpers
@@ -77,6 +78,9 @@ const UPCOMING_DRAW = {
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // The service caches 'draws:history' in a real node-cache for 300s —
+  // flush so each test's mocked rows actually take effect
+  publicCache.flushAll();
 });
 
 // ─────────────────────────────────────────────

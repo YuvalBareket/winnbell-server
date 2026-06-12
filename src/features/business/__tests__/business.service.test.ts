@@ -2,7 +2,8 @@
  * QA/Security Tests — business.service.ts (PostgreSQL)
  *
  * Covers:
- *   getNearbyBusinessesService — website_url / phone fields returned and present in SQL
+ *   getNearbyBusinessesService — bounding-box query: filters, distance ordering,
+ *                                limit capping, and viewport caching
  *   updateBusinessProfile      — website_url / phone forwarded to UPDATE, null accepted,
  *                                BUSINESS_NOT_FOUND thrown on rowCount 0
  *
@@ -17,6 +18,7 @@ jest.mock('../../../shared/db/db.js', () => ({
 }));
 
 import { getNearbyBusinessesService, updateBusinessProfile } from '../business.service';
+import { publicCache } from '../../../shared/cache/cache.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -32,89 +34,88 @@ const setupPoolQueries = (...responses: Array<{ rows: unknown[]; rowCount?: numb
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // Nearby results are cached in a real node-cache keyed by viewport — flush between tests
+  publicCache.flushAll();
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// getNearbyBusinessesService
+// getNearbyBusinessesService (bounding-box API)
 // ─────────────────────────────────────────────────────────────────────────────
 describe('getNearbyBusinessesService', () => {
-  it('should return website_url and phone from the query result rows', async () => {
-    const fakeRow = {
-      location_id: 1,
-      address: '123 Main St',
-      latitude: 51.5,
-      longitude: -0.12,
-      id: 10,
-      name: 'Test Cafe',
-      sector: 'Food',
-      description: 'A nice cafe',
-      terms_text: 'Terms here',
-      logo_url: null,
-      receipt_example_image_url: null,
-      min_transaction_amount: 5,
-      website_url: 'https://example.com',
-      phone: '555-1234',
-      other_locations: [],
-      distance_km: 0.5,
-    };
+  const NEARBY_ROW = {
+    location_id: 1,
+    address: '123 Main St',
+    latitude: 25.77,
+    longitude: -80.19,
+    id: 10,
+    name: 'Test Cafe',
+    sector: 'Food',
+    logo_url: null,
+  };
 
-    setupPoolQueries({ rows: [fakeRow] });
+  it('returns the location rows from the query result', async () => {
+    setupPoolQueries({ rows: [NEARBY_ROW] });
 
-    const results = await getNearbyBusinessesService(51.5, -0.12, 10);
+    const results = await getNearbyBusinessesService(25.7, 25.8, -80.3, -80.1);
 
     expect(results).toHaveLength(1);
-    expect(results[0]).toHaveProperty('website_url', 'https://example.com');
-    expect(results[0]).toHaveProperty('phone', '555-1234');
+    expect(results[0]).toHaveProperty('location_id', 1);
+    expect(results[0]).toHaveProperty('name', 'Test Cafe');
   });
 
-  it('should return the other_locations array from the query result rows', async () => {
-    const fakeRow = {
-      location_id: 2,
-      address: '789 High St',
-      latitude: 51.6,
-      longitude: -0.13,
-      id: 11,
-      name: 'Test Bakery',
-      sector: 'Food',
-      description: 'A nice bakery',
-      terms_text: null,
-      logo_url: null,
-      receipt_example_image_url: null,
-      min_transaction_amount: null,
-      website_url: null,
-      phone: null,
-      other_locations: [{ id: 2, name: 'Branch 2', address: '456 Oak St' }],
-      distance_km: 1.2,
-    };
-
-    setupPoolQueries({ rows: [fakeRow] });
-
-    const results = await getNearbyBusinessesService(51.6, -0.13, 10);
-
-    expect(results[0]).toHaveProperty('other_locations');
-    expect(results[0].other_locations).toEqual([
-      { id: 2, name: 'Branch 2', address: '456 Oak St' },
-    ]);
-  });
-
-  it('should include b.website_url and b.phone in the SQL query sent to the database', async () => {
+  it('filters to active locations of subscribed businesses in an Open draw, within the bounding box', async () => {
     setupPoolQueries({ rows: [] });
 
-    await getNearbyBusinessesService(51.5, -0.12, 10);
+    await getNearbyBusinessesService(25.7, 25.8, -80.3, -80.1);
 
     expect(mockQuery).toHaveBeenCalledTimes(1);
-    const [sql] = mockQuery.mock.calls[0] as [string, unknown[]];
-    expect(sql).toMatch(/b\.website_url/);
-    expect(sql).toMatch(/b\.phone/);
+    const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]];
+    expect(sql).toMatch(/loc\.is_active = true/);
+    expect(sql).toMatch(/'Active',\s*'Trialing'/);
+    expect(sql).toMatch(/d\.status = 'Open'/);
+    expect(sql).toMatch(/BETWEEN \$1 AND \$2/);
+    expect(sql).toMatch(/BETWEEN \$3 AND \$4/);
+    expect(params.slice(0, 4)).toEqual([25.7, 25.8, -80.3, -80.1]);
   });
 
-  it('should include an other_locations subquery in the SQL', async () => {
+  it('orders by distance from the viewport center', async () => {
     setupPoolQueries({ rows: [] });
 
-    await getNearbyBusinessesService(51.5, -0.12, 10);
+    await getNearbyBusinessesService(25.7, 25.8, -80.3, -80.1);
 
     const [sql] = mockQuery.mock.calls[0] as [string, unknown[]];
-    expect(sql).toMatch(/other_locations/);
+    expect(sql).toMatch(/ORDER BY/);
+    expect(sql).toMatch(/\(\$1 \+ \$2\) \/ 2\.0/); // lat center
+    expect(sql).toMatch(/\(\$3 \+ \$4\) \/ 2\.0/); // lng center
+  });
+
+  it('appends the sector filter as a bound parameter when provided', async () => {
+    setupPoolQueries({ rows: [] });
+
+    await getNearbyBusinessesService(25.7, 25.8, -80.3, -80.1, 'Food');
+
+    const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]];
+    expect(sql).toMatch(/b\.sector = \$5/);
+    expect(params[4]).toBe('Food');
+  });
+
+  it('caps the limit at 100', async () => {
+    setupPoolQueries({ rows: [] });
+
+    await getNearbyBusinessesService(25.7, 25.8, -80.3, -80.1, undefined, 5000);
+
+    const [, params] = mockQuery.mock.calls[0] as [string, unknown[]];
+    expect(params[params.length - 1]).toBe(100);
+  });
+
+  it('serves a repeated identical viewport from cache without hitting the DB again', async () => {
+    setupPoolQueries({ rows: [NEARBY_ROW] });
+
+    const first = await getNearbyBusinessesService(25.7, 25.8, -80.3, -80.1);
+    const second = await getNearbyBusinessesService(25.7, 25.8, -80.3, -80.1);
+
+    expect(first).toEqual(second);
+    expect(mockQuery).toHaveBeenCalledTimes(1);
   });
 });
 

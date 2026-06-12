@@ -239,6 +239,25 @@ export const handleStripeWebhook = async (rawBody: Buffer, signature: string): P
   );
   if (claimed.rowCount === 0) return;
 
+  try {
+    await processStripeEvent(event, pool);
+  } catch (err) {
+    // Release the idempotency claim so Stripe's retry can re-process this event.
+    // Without this, a transient failure would leave the claim row behind and the
+    // retry would be skipped — the event (e.g. a paid checkout) lost forever.
+    try {
+      await pool.query('DELETE FROM stripe_webhook_event WHERE event_id = $1', [event.id]);
+    } catch (releaseErr: unknown) {
+      console.error(
+        `[Stripe] CRITICAL: failed to release webhook claim for ${event.id} (${event.type}) — retries will be skipped, manual replay needed:`,
+        releaseErr instanceof Error ? releaseErr.message : releaseErr,
+      );
+    }
+    throw err;
+  }
+};
+
+async function processStripeEvent(event: Stripe.Event, pool: Pool): Promise<void> {
   switch (event.type) {
 
     case 'checkout.session.completed': {
@@ -396,8 +415,7 @@ export const handleStripeWebhook = async (rawBody: Buffer, signature: string): P
       break;
     }
   }
-
-};
+}
 
 // ─── Founding Member: Activate ────────────────────────────────────────────────
 

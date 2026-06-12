@@ -107,91 +107,71 @@ beforeEach(() => {
 // createCheckoutSession — campaign cutoff tests
 // ─────────────────────────────────────────────
 
-describe('createCheckoutSession — 7-day campaign onboarding cutoff', () => {
-  it('should throw CAMPAIGN_CUTOFF error when only 2 days remain before next month', async () => {
-    // January 29 — 2 days before Feb 1 → within 7-day cutoff
-    mockDateNow(nyDate(2026, 1, 29));
-
-    await expect(
-      createCheckoutSession(42, 'owner@test.com', 250, 'monthly'),
-    ).rejects.toThrow(/CAMPAIGN_CUTOFF:/);
+// The service no longer BLOCKS signups inside the 7-day window — it allows the
+// subscription and returns joinsNextCampaign so the client can tell the business
+// they will join the NEXT campaign instead of the current one.
+describe('createCheckoutSession — 7-day campaign onboarding flag', () => {
+  beforeEach(() => {
+    mockSessionsCreate.mockResolvedValue({ url: 'https://checkout.stripe.com/test' });
   });
 
-  it('should throw CAMPAIGN_CUTOFF error when exactly on the cutoff day (7 days before)', async () => {
+  it('flags joinsNextCampaign when only 2 days remain before next month', async () => {
+    // January 29 — 2 days before Feb 1 → within 7-day window
+    mockDateNow(nyDate(2026, 1, 29));
+
+    const res = await createCheckoutSession(42, 'owner@test.com', 250, 'monthly');
+    expect(res.joinsNextCampaign).toBe(true);
+    expect(res.url).toBe('https://checkout.stripe.com/test');
+  });
+
+  it('flags joinsNextCampaign exactly on the cutoff day (7 days before)', async () => {
     // January 25 — exactly 7 days before Feb 1 (daysUntilNext ≈ 7.0, which is <= 7)
     mockDateNow(nyDate(2026, 1, 25));
 
-    await expect(
-      createCheckoutSession(42, 'owner@test.com', 250, 'monthly'),
-    ).rejects.toThrow(/CAMPAIGN_CUTOFF:/);
+    const res = await createCheckoutSession(42, 'owner@test.com', 250, 'monthly');
+    expect(res.joinsNextCampaign).toBe(true);
   });
 
-  it('should NOT throw CAMPAIGN_CUTOFF error when 10 days remain before next month', async () => {
-    // January 22 — 10 days before Feb 1 → outside 7-day cutoff
+  it('does NOT flag joinsNextCampaign when 10 days remain before next month', async () => {
+    // January 22 — 10 days before Feb 1 → outside 7-day window
     mockDateNow(nyDate(2026, 1, 22));
 
-    // The service proceeds past the date check and will throw for other reasons
-    // (Stripe mock returns undefined url, or other downstream error) — that is acceptable.
-    // The only assertion is that the rejection reason is NOT the campaign cutoff.
-    let caughtError: Error | null = null;
-    try {
-      await createCheckoutSession(42, 'owner@test.com', 250, 'monthly');
-    } catch (err: any) {
-      caughtError = err;
-    }
-    if (caughtError !== null) {
-      expect(caughtError.message).not.toMatch(/^CAMPAIGN_CUTOFF:/);
-    }
+    const res = await createCheckoutSession(42, 'owner@test.com', 250, 'monthly');
+    expect(res.joinsNextCampaign).toBe(false);
+    expect(res.nextCampaignDate).toBeNull();
   });
 
-  it('should include the next month name in the CAMPAIGN_CUTOFF error message', async () => {
-    // January 29 — cutoff window; formatted date should include "February"
+  it('includes the month-after-next in nextCampaignDate when flagged', async () => {
+    // January 29 — flagged; the business joins the campaign starting March 1
     mockDateNow(nyDate(2026, 1, 29));
 
-    let caughtError: Error | null = null;
-    try {
-      await createCheckoutSession(42, 'owner@test.com', 250, 'monthly');
-    } catch (err: any) {
-      caughtError = err;
-    }
-
-    expect(caughtError).not.toBeNull();
-    expect(caughtError!.message).toMatch(/CAMPAIGN_CUTOFF:/);
-    expect(caughtError!.message).toMatch(
-      /January|February|March|April|May|June|July|August|September|October|November|December/,
-    );
+    const res = await createCheckoutSession(42, 'owner@test.com', 250, 'monthly');
+    expect(res.joinsNextCampaign).toBe(true);
+    expect(res.nextCampaignDate).toMatch(/March/);
   });
 
-  it('should throw CAMPAIGN_CUTOFF when 1 day remains (last day of month)', async () => {
+  it('flags joinsNextCampaign when 1 day remains (last day of month)', async () => {
     // January 31 — 1 day before Feb 1
     mockDateNow(nyDate(2026, 1, 31));
 
-    await expect(
-      createCheckoutSession(42, 'owner@test.com', 250, 'monthly'),
-    ).rejects.toThrow(/CAMPAIGN_CUTOFF:/);
+    const res = await createCheckoutSession(42, 'owner@test.com', 250, 'monthly');
+    expect(res.joinsNextCampaign).toBe(true);
   });
 
-  it('should NOT throw CAMPAIGN_CUTOFF at the start of a month (30+ days to go)', async () => {
-    // January 1 — 31 days before Feb 1 → well outside the 7-day cutoff
+  it('does NOT flag at the start of a month (30+ days to go)', async () => {
+    // January 1 — 31 days before Feb 1 → well outside the 7-day window
     mockDateNow(nyDate(2026, 1, 1));
 
-    let caughtError: Error | null = null;
-    try {
-      await createCheckoutSession(42, 'owner@test.com', 250, 'monthly');
-    } catch (err: any) {
-      caughtError = err;
-    }
-    if (caughtError !== null) {
-      expect(caughtError.message).not.toMatch(/^CAMPAIGN_CUTOFF:/);
-    }
+    const res = await createCheckoutSession(42, 'owner@test.com', 250, 'monthly');
+    expect(res.joinsNextCampaign).toBe(false);
   });
 
-  it('should respect the cutoff for shorter months (Feb 22 — 6 days before Mar 1)', async () => {
-    // February 22, 2026 — 6 days before March 1 → within 7-day cutoff
+  it('respects the window for shorter months (Feb 22 — 6 days before Mar 1)', async () => {
+    // February 22, 2026 — 6 days before March 1 → within 7-day window
     mockDateNow(nyDate(2026, 2, 22));
 
-    await expect(
-      createCheckoutSession(42, 'owner@test.com', 250, 'monthly'),
-    ).rejects.toThrow(/CAMPAIGN_CUTOFF:/);
+    const res = await createCheckoutSession(42, 'owner@test.com', 250, 'monthly');
+    expect(res.joinsNextCampaign).toBe(true);
+    expect(res.nextCampaignDate).toMatch(/April/);
   });
 });

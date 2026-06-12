@@ -3,7 +3,7 @@ import { publicCache } from '../../shared/cache/cache.js';
 
 export const getActiveDrawService = async () => {
   const CACHE_KEY = 'draws:active';
-  const cached = publicCache.get(CACHE_KEY);
+  const cached = publicCache.get<Record<string, unknown>[]>(CACHE_KEY);
   if (cached !== undefined) return cached;
 
   const pool = getPool();
@@ -19,7 +19,7 @@ export const getActiveDrawService = async () => {
 
 export const getDrawHistoryService = async () => {
   const CACHE_KEY = 'draws:history';
-  const cached = publicCache.get(CACHE_KEY);
+  const cached = publicCache.get<Record<string, unknown>[]>(CACHE_KEY);
   if (cached !== undefined) return cached;
 
   const pool = getPool();

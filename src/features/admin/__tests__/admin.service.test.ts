@@ -106,18 +106,12 @@ describe('createDrawService', () => {
     expect(result.status).toBe('Upcoming');
   });
 
-  test('enrolls active businesses in draw_entry when subscriptions exist', async () => {
-    const subs = [
-      { business_id: 10, monthly_fee: 500 },
-      { business_id: 11, monthly_fee: 750 },
-    ];
+  test('enrolls active businesses via a single set-based INSERT ... SELECT', async () => {
     setupClientQueries(
-      { rows: [] },          // BEGIN
-      { rows: [DRAW_ROW] },  // INSERT draw
-      { rows: subs },        // SELECT subscriptions
-      { rows: [], rowCount: 1 }, // INSERT draw_entry business 10
-      { rows: [], rowCount: 1 }, // INSERT draw_entry business 11
-      { rows: [] },          // COMMIT
+      { rows: [] },              // BEGIN
+      { rows: [DRAW_ROW] },      // INSERT draw
+      { rows: [], rowCount: 2 }, // set-based INSERT draw_entry (2 subscribed businesses)
+      { rows: [] },              // COMMIT
     );
 
     await createDrawService({ name: 'May 2026 Draw', prize_amount: 1000, draw_date: '2026-05-31' });
@@ -125,7 +119,14 @@ describe('createDrawService', () => {
     const entryInserts = mockClientQuery.mock.calls.filter(
       ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO draw_entry'),
     );
-    expect(entryInserts).toHaveLength(2);
+    // One set-based statement, not one INSERT per business
+    expect(entryInserts).toHaveLength(1);
+    const sql: string = entryInserts[0][0];
+    expect(sql).toMatch(/SELECT/);
+    expect(sql).toMatch(/JOIN subscription/);
+    expect(sql).toMatch(/'Active',\s*'Trialing'/);
+    // The new draw id is bound as the only parameter
+    expect(entryInserts[0][1]).toEqual([1]);
   });
 
   test('sets contribution_amount to 0 for all enrolled businesses', async () => {
@@ -202,20 +203,23 @@ describe('createDrawService', () => {
     expect(mockRelease).toHaveBeenCalledTimes(1);
   });
 
-  test('skips draw_entry inserts when no active subscriptions exist', async () => {
+  test('enrollment is data-driven: the set-based INSERT inserts 0 rows when no active subscriptions exist', async () => {
     setupClientQueries(
-      { rows: [] },
-      { rows: [DRAW_ROW] },
-      { rows: [] },  // no subscriptions
-      { rows: [] },  // COMMIT
+      { rows: [] },              // BEGIN
+      { rows: [DRAW_ROW] },      // INSERT draw
+      { rows: [], rowCount: 0 }, // set-based INSERT draw_entry — no subscribed businesses → 0 rows
+      { rows: [] },              // COMMIT
     );
 
     await createDrawService({ name: 'Empty Draw', prize_amount: 500, draw_date: '2026-08-31' });
 
+    // The statement still executes once (filtering happens in SQL via the
+    // subscription status JOIN), it just affects zero rows.
     const entryInserts = mockClientQuery.mock.calls.filter(
       ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO draw_entry'),
     );
-    expect(entryInserts).toHaveLength(0);
+    expect(entryInserts).toHaveLength(1);
+    expect(entryInserts[0][0]).toMatch(/'Active',\s*'Trialing'/);
   });
 });
 
