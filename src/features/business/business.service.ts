@@ -289,7 +289,16 @@ export const removeLocationManagerService = async (locationId: number, ownerUser
   try {
     await client.query('BEGIN');
     await client.query(`UPDATE business_location SET manager_user_id = NULL WHERE id = $1`, [locationId]);
-    await client.query(`UPDATE "user" SET role = 'User' WHERE id = $1`, [managerId]);
+    // Demote to 'User' only when they have no other Business-role reason to keep it:
+    // not a business owner, and not managing any other location
+    await client.query(
+      `UPDATE "user" SET role = 'User'
+       WHERE id = $1
+         AND role != 'Admin'
+         AND NOT EXISTS (SELECT 1 FROM business WHERE user_id = $1)
+         AND NOT EXISTS (SELECT 1 FROM business_location WHERE manager_user_id = $1)`,
+      [managerId],
+    );
     await client.query('COMMIT');
     invalidatePublicBusinessData();
   } catch (err) {

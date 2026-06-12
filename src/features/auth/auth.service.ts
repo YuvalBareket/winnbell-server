@@ -170,6 +170,11 @@ export const registerUser = async (
           newUser.role = 'Business';
         }
       } catch (err: unknown) {
+        // jwt.verify throws "jwt expired" / "invalid signature" — translate to a
+        // message the user can act on (and that the controller maps to a 400)
+        if (err instanceof Error && (err.name === 'TokenExpiredError' || err.name === 'JsonWebTokenError')) {
+          throw new Error('This invitation link has expired or is invalid. Please ask the business owner to send you a new invitation.');
+        }
         throw new Error(err instanceof Error ? err.message : 'Invalid or expired invitation link');
       }
     }
@@ -266,6 +271,9 @@ export const loginUser = async (
       }
     } catch (err: unknown) {
       try { await client.query('ROLLBACK'); } catch { /* ignore */ }
+      if (err instanceof Error && (err.name === 'TokenExpiredError' || err.name === 'JsonWebTokenError')) {
+        throw new Error('This invitation link has expired or is invalid. Please ask the business owner to send you a new invitation.');
+      }
       if (err instanceof Error) throw err;
     } finally {
       client.release();

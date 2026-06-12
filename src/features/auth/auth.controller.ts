@@ -74,7 +74,13 @@ export const login = async (req: Request, res: Response) => {
 
     const result = await authService.loginUser(email, password, inviteToken);
     res.status(200).json(result);
-  } catch {
+  } catch (error: unknown) {
+    // Invite-link problems are not credential problems — tell the user what
+    // actually went wrong instead of "Invalid email or password"
+    if (error instanceof Error && error.message.includes('invitation')) {
+      res.status(400).json({ message: error.message });
+      return;
+    }
     res.status(401).json({ message: 'Invalid email or password' });
   }
 };
@@ -129,7 +135,7 @@ export const syncUser = async (req: Request, res: Response): Promise<void> => {
       return;
     }
     if (err instanceof Error && (err.message.includes('invitation') || err.name === 'TokenExpiredError' || err.name === 'JsonWebTokenError')) {
-      res.status(400).json({ message: 'Your invitation link has expired or is invalid. Please request a new one.' });
+      res.status(400).json({ message: 'This invitation link has expired or is invalid. Please ask the business owner to send you a new invitation.' });
       return;
     }
     console.error('Sync service error:', err instanceof Error ? err.message : err);

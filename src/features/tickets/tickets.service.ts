@@ -878,10 +878,12 @@ export const generateTicketService = async (user_id: number, location_id: number
     await client.query('BEGIN');
 
     const authInfo = await client.query(`
-      SELECT bl.business_id, bl.id as location_id, s.entries_per_location
+      SELECT bl.business_id, bl.id as location_id,
+             COALESCE(s.entries_per_location, ps.global_entry_cap) AS entries_per_location
       FROM business_location bl
       JOIN business b ON bl.business_id = b.id
       JOIN subscription s ON s.business_id = b.id AND s.status IN ('Active', 'Trialing')
+      LEFT JOIN platform_settings ps ON ps.id = 1
       WHERE bl.id = $1
         AND (b.user_id = $2 OR bl.manager_user_id = $2)
         AND bl.is_active = true
@@ -897,6 +899,7 @@ export const generateTicketService = async (user_id: number, location_id: number
     }
 
     const { business_id, entries_per_location } = authInfo.rows[0];
+    // Falls back to platform global_entry_cap (same as the receipt path); NULL = unlimited
     const entry_cap: number | null = entries_per_location != null ? Number(entries_per_location) : null;
 
     const drawInfo = await client.query(`

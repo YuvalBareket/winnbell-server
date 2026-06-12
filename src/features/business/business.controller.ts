@@ -26,6 +26,17 @@ import { getPool } from '../../shared/db/db.js';
 import { syncSubscriptionQuantity } from '../stripe/stripe.service.js';
 import { validateLengths } from '../../shared/validation.js';
 
+// Returns an error string when lat/lon are not valid coordinates, null when OK
+const validateCoords = (lat: unknown, lon: unknown): string | null => {
+  if (typeof lat !== 'number' || typeof lon !== 'number' || Number.isNaN(lat) || Number.isNaN(lon)) {
+    return 'lat and lon must be numbers.';
+  }
+  if (lat < -90 || lat > 90 || lon < -180 || lon > 180) {
+    return 'lat/lon out of range.';
+  }
+  return null;
+};
+
 export const getEntryMode = async (_req: Request, res: Response) => {
   try {
     const result = await getEntryModeService();
@@ -135,14 +146,16 @@ export const setupBusiness = async (req: AuthRequest, res: Response): Promise<vo
     ]);
     if (lenErr) { res.status(400).json({ message: lenErr }); return; }
 
-    // Validate location names/addresses inside the locations array
-    const locations: Array<{ name?: string; address?: string }> = req.body.locations ?? [];
+    // Validate location names/addresses/coordinates inside the locations array
+    const locations: Array<{ name?: string; address?: string; lat?: unknown; lon?: unknown }> = req.body.locations ?? [];
     for (const loc of locations) {
       const locErr = validateLengths([
         ['Location name', loc.name, 200],
         ['Location address', loc.address, 500],
       ]);
       if (locErr) { res.status(400).json({ message: locErr }); return; }
+      const coordErr = validateCoords(loc.lat, loc.lon);
+      if (coordErr) { res.status(400).json({ message: coordErr }); return; }
     }
 
     const result = await createFullBusinessProfile(userId, req.body);
@@ -211,6 +224,16 @@ export const updateCampaignSettingsController = async (req: AuthRequest, res: Re
       receipt_example_image_url?: string | null;
     };
 
+    if (
+      min_transaction_amount !== null &&
+      min_transaction_amount !== undefined &&
+      (typeof min_transaction_amount !== 'number' || Number.isNaN(min_transaction_amount) ||
+        min_transaction_amount <= 0 || min_transaction_amount > 100000)
+    ) {
+      res.status(400).json({ message: 'Minimum transaction amount must be a positive number up to 100,000.' });
+      return;
+    }
+
     const data: { min_transaction_amount: number | null; receipt_example_image_url?: string | null } = {
       min_transaction_amount,
     };
@@ -248,6 +271,8 @@ export const updateLocation = async (req: AuthRequest, res: Response): Promise<v
 
     const lenErr = validateLengths([['Location name', name, 200], ['Address', address, 500]]);
     if (lenErr) { res.status(400).json({ message: lenErr }); return; }
+    const coordErr = validateCoords(lat, lon);
+    if (coordErr) { res.status(400).json({ message: coordErr }); return; }
 
     await updateBusinessLocation(Number(locationId), req.user!.id, {
       name,
@@ -277,6 +302,8 @@ export const addLocation = async (req: AuthRequest, res: Response): Promise<void
 
   const lenErr = validateLengths([['Location name', name, 200], ['Address', address, 500]]);
   if (lenErr) { res.status(400).json({ message: lenErr }); return; }
+  const coordErr = validateCoords(lat, lon);
+  if (coordErr) { res.status(400).json({ message: coordErr }); return; }
 
   let locationId: number | null = null;
   try {

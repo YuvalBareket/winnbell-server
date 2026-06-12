@@ -42,44 +42,68 @@ interface NotificationPayload {
   url?: string;
 }
 
-export const sendToUser = async (userId: number, payload: NotificationPayload): Promise<void> => {
-  const pool = getPool();
-  const result = await pool.query(
-    `SELECT endpoint, p256dh, auth FROM push_subscription WHERE user_id = $1`,
-    [userId],
-  );
+interface SubRow { endpoint: string; p256dh: string; auth: string }
 
-  await Promise.allSettled(
-    result.rows.map((sub) =>
+// Sends to a batch of subscriptions and prunes endpoints the push service
+// reports as gone (410) or not found (404) — otherwise dead rows accumulate
+// forever and every broadcast wastes time on them.
+const sendBatch = async (rows: SubRow[], payload: NotificationPayload): Promise<void> => {
+  const results = await Promise.allSettled(
+    rows.map((sub) =>
       webpush.sendNotification(
         { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
         JSON.stringify(payload),
       ),
     ),
   );
+
+  const goneEndpoints = rows
+    .filter((_, i) => {
+      const r = results[i];
+      if (r.status !== 'rejected') return false;
+      const status = (r.reason as { statusCode?: number })?.statusCode;
+      return status === 410 || status === 404;
+    })
+    .map((sub) => sub.endpoint);
+
+  if (goneEndpoints.length > 0) {
+    try {
+      await getPool().query(
+        `DELETE FROM push_subscription WHERE endpoint = ANY($1::text[])`,
+        [goneEndpoints],
+      );
+      console.log(`[Push] Pruned ${goneEndpoints.length} dead subscription(s).`);
+    } catch (err) {
+      console.error('[Push] Failed to prune dead subscriptions:', err);
+    }
+  }
+};
+
+export const sendToUser = async (userId: number, payload: NotificationPayload): Promise<void> => {
+  const pool = getPool();
+  const result = await pool.query(
+    `SELECT endpoint, p256dh, auth FROM push_subscription WHERE user_id = $1`,
+    [userId],
+  );
+  await sendBatch(result.rows, payload);
 };
 
 export const sendToAll = async (payload: NotificationPayload): Promise<void> => {
   const pool = getPool();
   const BATCH_SIZE = 500;
-  let offset = 0;
+  // Keyset pagination (id > lastId) — OFFSET would skip rows when sendBatch
+  // prunes dead subscriptions mid-iteration.
+  let lastId = 0;
 
   while (true) {
     const result = await pool.query(
-      `SELECT endpoint, p256dh, auth FROM push_subscription ORDER BY id LIMIT $1 OFFSET $2`,
-      [BATCH_SIZE, offset],
+      `SELECT id, endpoint, p256dh, auth FROM push_subscription WHERE id > $2 ORDER BY id LIMIT $1`,
+      [BATCH_SIZE, lastId],
     );
     if (result.rows.length === 0) break;
 
-    await Promise.allSettled(
-      result.rows.map((sub) =>
-        webpush.sendNotification(
-          { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
-          JSON.stringify(payload),
-        ),
-      ),
-    );
-    offset += result.rows.length;
+    await sendBatch(result.rows, payload);
+    lastId = result.rows[result.rows.length - 1].id;
     if (result.rows.length < BATCH_SIZE) break;
   }
 };
@@ -89,40 +113,32 @@ type Audience = 'all' | 'users' | 'businesses';
 export const sendToAudience = async (audience: Audience, payload: NotificationPayload): Promise<number> => {
   const pool = getPool();
   const BATCH_SIZE = 500;
-  let offset = 0;
+  // Keyset pagination — see sendToAll
+  let lastId = 0;
   let totalSent = 0;
 
   const baseQuery =
     audience === 'all'
-      ? `SELECT ps.endpoint, ps.p256dh, ps.auth FROM push_subscription ps ORDER BY ps.id`
-      : `SELECT ps.endpoint, ps.p256dh, ps.auth
+      ? `SELECT ps.id, ps.endpoint, ps.p256dh, ps.auth FROM push_subscription ps
+         WHERE ps.id > $2 ORDER BY ps.id LIMIT $1`
+      : `SELECT ps.id, ps.endpoint, ps.p256dh, ps.auth
          FROM push_subscription ps
          JOIN "user" u ON u.id = ps.user_id
-         WHERE u.role = $3
-         ORDER BY ps.id`;
+         WHERE u.role = $3 AND ps.id > $2
+         ORDER BY ps.id LIMIT $1`;
 
   while (true) {
     const params: (number | string)[] =
       audience === 'all'
-        ? [BATCH_SIZE, offset]
-        : [BATCH_SIZE, offset, audience === 'users' ? 'User' : 'Business'];
+        ? [BATCH_SIZE, lastId]
+        : [BATCH_SIZE, lastId, audience === 'users' ? 'User' : 'Business'];
 
-    const result = await pool.query(
-      `${baseQuery} LIMIT $1 OFFSET $2`,
-      params,
-    );
+    const result = await pool.query(baseQuery, params);
     if (result.rows.length === 0) break;
 
-    await Promise.allSettled(
-      result.rows.map((sub) =>
-        webpush.sendNotification(
-          { endpoint: sub.endpoint, keys: { p256dh: sub.p256dh, auth: sub.auth } },
-          JSON.stringify(payload),
-        ),
-      ),
-    );
+    await sendBatch(result.rows, payload);
     totalSent += result.rows.length;
-    offset += result.rows.length;
+    lastId = result.rows[result.rows.length - 1].id;
     if (result.rows.length < BATCH_SIZE) break;
   }
 

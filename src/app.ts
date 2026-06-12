@@ -22,7 +22,6 @@ import {
   getAddressCoordsController,
 } from './features/business/business.controller.js';
 import { getFoundingAvailability } from './features/stripe/stripe.controller.js';
-import { testSetup } from './features/auth/test-setup.controller.js';
 
 import { authenticateToken } from './shared/middleware/auth.middleware.js';
 
@@ -97,10 +96,10 @@ app.use('/webhooks/stripe', express.raw({ type: 'application/json' }), stripeWeb
 app.use(express.json());
 
 // ── Public routes (no auth required) ──
-// Dev/test-only: register test-setup before authLimiter so rapid test runs don't hit 429
-if (process.env.NODE_ENV !== 'production') {
-  app.post('/auth/test-setup', testSetup);
-}
+// NOTE: the dev/test-only /auth/test-setup route (test-setup.controller.ts) is
+// intentionally NOT registered — re-add it here (guarded by NODE_ENV) when running
+// e2e tests locally:
+//   if (process.env.NODE_ENV !== 'production') app.post('/auth/test-setup', testSetup);
 // Registration gets its own tighter limiter stacked on top of the general auth limiter
 app.use('/auth/register', registrationLimiter);
 app.use('/auth', authLimiter, authRoutes);
