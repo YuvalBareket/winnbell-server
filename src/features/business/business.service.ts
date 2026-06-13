@@ -1,5 +1,5 @@
 import { getPool } from '../../shared/db/db.js';
-import { statsCache, publicCache, invalidateMyBusiness, invalidatePublicBusinessData, getPlatformSettings } from '../../shared/cache/cache.js';
+import { publicCache, invalidatePublicBusinessData, getPlatformSettings } from '../../shared/cache/cache.js';
 import crypto from 'crypto';
 import {
   AddLocationInput,
@@ -161,18 +161,6 @@ export const createFullBusinessProfile = async (userId: number, data: BusinessSe
 };
 
 export const getMyBusinessData = async (userId: number, managedLocationId?: number | null): Promise<MyBusinessData | undefined> => {
-  const cacheKey = `business:my:${userId}`;
-  const cached = statsCache.get<MyBusinessData>(cacheKey);
-  if (cached) {
-    if (managedLocationId != null && Array.isArray(cached.locations)) {
-      return {
-        ...cached,
-        locations: cached.locations.filter((l: { id: number }) => l.id === managedLocationId),
-      };
-    }
-    return cached;
-  }
-
   const pool = getPool();
 
   const [bizResult, platformSettings] = await Promise.all([
@@ -225,8 +213,6 @@ export const getMyBusinessData = async (userId: number, managedLocationId?: numb
     ...row,
     global_entry_cap: platformSettings.global_entry_cap ?? null,
   };
-
-  statsCache.set(cacheKey, full);
 
   if (managedLocationId != null && Array.isArray(full.locations)) {
     return {
@@ -320,7 +306,6 @@ export const updateBusinessProfile = async (ownerUserId: number, data: UpdateBus
 
   if (result.rowCount === 0) throw new Error('BUSINESS_NOT_FOUND');
 
-  invalidateMyBusiness(ownerUserId);
   invalidatePublicBusinessData();
 };
 
@@ -390,7 +375,6 @@ export const updateBusinessLogo = async (ownerUserId: number, logoUrl: string): 
   );
   if (result.rowCount === 0) throw new Error('BUSINESS_NOT_FOUND');
 
-  invalidateMyBusiness(ownerUserId);
   invalidatePublicBusinessData();
 };
 

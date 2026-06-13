@@ -13,9 +13,6 @@ export const publicCache = new NodeCache({ stdTTL: 30, checkperiod: 60 });
 /** Platform settings (single row, rarely changes). */
 export const platformCache = new NodeCache({ stdTTL: 300, checkperiod: 600 });
 
-/** Business dashboard stats. */
-export const statsCache = new NodeCache({ stdTTL: 120, checkperiod: 240 });
-
 // ── Platform settings helper ─────────────────────────────────────────────────
 // Replaces all direct `SELECT ... FROM platform_settings WHERE id = 1` calls.
 
@@ -58,15 +55,4 @@ export const invalidatePublicBusinessData = (): void => {
 /** Invalidate a specific user's guard cache entry (is_active, is_phone_verified). */
 export const invalidateUserAuth = (userId: number): void => {
   userCache.del(`user:guard:${userId}`);
-};
-
-/** Invalidate business stats for a specific business owner. */
-export const invalidateBusinessStats = (userId: number): void => {
-  const keys = statsCache.keys().filter(k => k.startsWith(`stats:${userId}:`));
-  if (keys.length) statsCache.del(keys);
-};
-
-/** Invalidate my-business cache for a user. */
-export const invalidateMyBusiness = (userId: number): void => {
-  statsCache.del(`business:my:${userId}`);
 };

@@ -1,5 +1,4 @@
 import { getPool } from '../../shared/db/db.js';
-import { statsCache } from '../../shared/cache/cache.js';
 
 export interface DrawBreakdown {
   draw_id: number;
@@ -40,10 +39,6 @@ export const getBusinessStats = async (
   filterLocationId?: number,
   filterDrawId?: number,
 ): Promise<StatsResult> => {
-  const cacheKey = `stats:${userId}:${filterLocationId ?? jwtLocationId ?? 'all'}:${filterDrawId ?? 'all'}`;
-  const cached = statsCache.get<StatsResult>(cacheKey);
-  if (cached) return cached;
-
   const pool = getPool();
 
   let businessId: number;
@@ -229,6 +224,5 @@ export const getBusinessStats = async (
     })),
   };
 
-  statsCache.set(cacheKey, result);
   return result;
 };
