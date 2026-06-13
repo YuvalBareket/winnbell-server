@@ -85,6 +85,52 @@ export const login = async (req: Request, res: Response) => {
   }
 };
 
+// Called by the reset-password flow after a successful password change to log the
+// user out of every other existing session. Authenticated by the user's Supabase
+// access token (same verification as syncUser). Deleting all internal refresh tokens
+// stops any stale session from renewing; the short-lived (1h) access tokens then
+// expire on their own. The client also revokes other Supabase sessions separately.
+export const revokeAllSessions = async (req: Request, res: Response): Promise<void> => {
+  const token = req.headers.authorization?.replace('Bearer ', '');
+  if (!token) {
+    res.status(401).json({ message: 'No token provided' });
+    return;
+  }
+
+  let email = '';
+  try {
+    const JWKS = createRemoteJWKSet(
+      new URL(`${process.env.SUPABASE_URL}/auth/v1/.well-known/jwks.json`),
+    );
+    const { payload } = await jwtVerify(token, JWKS);
+    email = (((payload as Record<string, unknown>)['email'] as string) ?? '').toLowerCase().trim();
+  } catch (err: unknown) {
+    console.error('Revoke sessions: token verify failed:', err instanceof Error ? err.message : err);
+    res.status(401).json({ message: 'Invalid or expired token' });
+    return;
+  }
+
+  if (!email) {
+    res.status(400).json({ message: 'Token missing email' });
+    return;
+  }
+
+  try {
+    const pool = getPool();
+    const userRes = await pool.query(`SELECT id FROM "user" WHERE email = $1`, [email]);
+    const userId = userRes.rows[0]?.id as number | undefined;
+    if (userId) {
+      await pool.query(`DELETE FROM refresh_token WHERE user_id = $1`, [userId]);
+      invalidateUserAuth(userId);
+    }
+    // Always 200 - never reveal whether the email maps to an account.
+    res.json({ success: true });
+  } catch (err: unknown) {
+    console.error('Revoke sessions failed:', err instanceof Error ? err.message : err);
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
 // Called by the frontend after any Supabase sign-in to get an internal JWT
 export const syncUser = async (req: Request, res: Response): Promise<void> => {
   const token = req.headers.authorization?.replace('Bearer ', '');
