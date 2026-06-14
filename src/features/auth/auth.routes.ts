@@ -13,7 +13,6 @@ router.post('/login', authController.login);
 router.post('/sync', authController.syncUser);
 router.post('/refresh', authController.refreshTokenController);
 router.post('/revoke-sessions', authController.revokeAllSessions);
-router.post('/change-password', authenticateToken, authController.changePassword);
 router.delete('/account', authenticateToken, authController.deleteAccount);
 // Dev/test only — registered in app.ts with NODE_ENV guard
 

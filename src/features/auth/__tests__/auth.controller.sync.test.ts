@@ -51,7 +51,6 @@ jest.mock('../auth.service.js', () => ({
   loginUser: jest.fn(),
   getRegionFromIp: jest.fn().mockResolvedValue({ country: null, stateCode: null }),
   evaluateRegionRestriction: jest.fn().mockResolvedValue({ blocked: false, country: null, state: null }),
-  changePasswordService: jest.fn(),
 }));
 
 import { syncUser } from '../auth.controller';
