@@ -97,19 +97,29 @@ export const validateReceiptAsync = (
       const provider = getProvider();
       const result = await provider.validate(imageUrl, expected);
 
-      // businessNameFound === false means the check ran and failed (null = not checked = pass-through)
-      const passed =
-        result.identifierFound &&
-        result.amountMatches &&
-        result.isReceipt &&
-        result.dateMatches !== false &&
-        result.businessNameFound !== false;
+      // Hard requirements — instant fail if either is missing
+      const hardFail = !result.isReceipt || !result.identifierFound;
+
+      // Soft checks — three states:
+      //   true  = found on receipt and matches user's claim ✓
+      //   false = found on receipt but doesn't match → fraud signal → fail
+      //   null  = not visible in image → can't verify → let it slide
+      const softChecks = [result.amountMatches, result.dateMatches, result.businessNameFound];
+      const anyWrong   = softChecks.some(v => v === false);
+      const anyMissing = softChecks.some(v => v === null);
+
+      // If any check found a value but it contradicts the user's claim → fail
+      // If all found checks match, but some couldn't be verified → partial pass (-1)
+      // If everything verified and matches → full pass (-3)
+      const fullPass    = !hardFail && !anyWrong && !anyMissing;
+      const partialPass = !hardFail && !anyWrong && anyMissing;
+      const passed      = fullPass || partialPass;
+      const riskDelta   = fullPass ? -3 : partialPass ? -1 : 2;
 
       if (passed) {
-        // Always record the OCR result on the anchor ticket
         await pool.query(
-          `UPDATE ticket SET image_validation_status = 'passed', risk_score_delta = risk_score_delta - 3 WHERE id = $1`,
-          [ticketId],
+          `UPDATE ticket SET image_validation_status = 'passed', risk_score_delta = risk_score_delta + $2 WHERE id = $1`,
+          [ticketId, riskDelta],
         );
         // Unquarantine anchor + siblings only if they were pending OCR review
         await pool.query(
@@ -121,16 +131,13 @@ export const validateReceiptAsync = (
              AND quarantine_reason = 'ocr_pending'`,
           [ticketId],
         );
-        // Reward the user for a verified image — reduce risk score toward safety
-        await updateUserRiskScore(userId, -3);
+        await updateUserRiskScore(userId, riskDelta);
         await syncUserQuarantineState(userId, drawId);
       } else {
-        // Always record the OCR failure on the anchor ticket and add the risk delta
         await pool.query(
           `UPDATE ticket SET image_validation_status = 'failed', risk_score_delta = risk_score_delta + 2 WHERE id = $1`,
           [ticketId],
         );
-        // Update quarantine reason for tickets that were pending OCR (not already quarantined for another reason)
         await pool.query(
           `UPDATE ticket
            SET is_quarantined    = TRUE,
@@ -140,7 +147,6 @@ export const validateReceiptAsync = (
              AND quarantine_reason = 'ocr_pending'`,
           [ticketId],
         );
-        // Penalty for submitting an image that doesn't match
         await updateUserRiskScore(userId, 2);
         await syncUserQuarantineState(userId, drawId);
       }

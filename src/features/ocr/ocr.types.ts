@@ -11,9 +11,9 @@ export interface OcrExpected {
 export interface OcrValidationResult {
   isReceipt: boolean;               // did the image look like a receipt at all? (requires ≥2 keywords)
   identifierFound: boolean;         // was the submitted identifier found in the image?
-  amountMatches: boolean;           // was the submitted amount found in the image?
-  dateMatches: boolean | null;      // null if no date was expected
-  businessNameFound: boolean | null; // null if no business name provided or name too short to check
+  amountMatches: boolean | null;    // null = total not visible; false = visible but wrong → fail
+  dateMatches: boolean | null;      // null = date not visible; false = visible but wrong → fail
+  businessNameFound: true | null;    // true = confirmed; null = unverifiable (logo-only, etc.) → never fails
   confidence: 'high' | 'medium' | 'low';
   rawText?: string;                 // extracted text, for debugging/logging
 }

@@ -2,7 +2,10 @@
 // Both TesseractProvider and GoogleVisionProvider import from here so
 // validation logic stays consistent regardless of which provider extracted the text.
 
-export function matchAmount(text: string, amount: number): boolean {
+// Returns true  → amount found and matches user's claim
+// Returns false → a total amount is visible but doesn't match (user lied) → fail
+// Returns null  → no total visible in the image, can't verify → let it slide
+export function matchAmount(text: string, amount: number): boolean | null {
   const variants = new Set<string>();
   variants.add(amount.toFixed(2));
   variants.add(amount.toFixed(0));
@@ -15,8 +18,6 @@ export function matchAmount(text: string, amount: number): boolean {
   variants.add(`₪${amount.toFixed(0)}`);
   variants.add(`${amount.toFixed(2)}₪`);
   variants.add(`${amount.toFixed(0)}₪`);
-  // Israeli locale uses comma as decimal separator
-  variants.add(amount.toFixed(2).replace('.', ','));
   variants.add(`${amount.toFixed(2).replace('.', ',')}₪`);
   variants.add(`₪${amount.toFixed(2).replace('.', ',')}`);
   if (amount >= 1000) {
@@ -24,43 +25,63 @@ export function matchAmount(text: string, amount: number): boolean {
     variants.add(formatted);
     variants.add(`$${formatted}`);
     variants.add(`₪${formatted}`);
-    // Israeli thousands with period separator: 1.619,40
     const ilFormatted = amount.toLocaleString('he-IL', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
     variants.add(ilFormatted);
   }
   for (const v of variants) {
     if (text.includes(v.toUpperCase()) || text.includes(v)) return true;
   }
-  return false;
+
+  // User's amount not found — check if a total line is actually visible.
+  // TOTAL/AMOUNT followed by a number means the receipt shows a total but it doesn't match.
+  // If no total line is visible at all, we can't verify → null (slide).
+  const totalVisible = /\bTOTAL\b[\s:]*[$₪]?\s*[\d,]+[.,]\d{2}/.test(text)
+    || /\bAMOUNT\b[\s:A-Z]*[$₪]?\s*[\d,]+[.,]\d{2}/.test(text);
+  return totalVisible ? false : null;
 }
 
-export function matchDate(text: string, date: string): boolean {
+// Returns true  → date found and matches user's claim
+// Returns false → a date is visible but doesn't match (user lied) → fail
+// Returns null  → no date visible in the image, can't verify → let it slide
+export function matchDate(text: string, date: string): boolean | null {
   const [year, month, day] = date.split('-');
+  const yy = year.slice(2); // 2-digit year (e.g. "26")
+  const m  = String(parseInt(month));
+  const d  = String(parseInt(day));
   const variants = [
-    `${month}/${day}/${year}`,
-    `${day}/${month}/${year}`,
-    `${year}-${month}-${day}`,
-    `${month}-${day}-${year}`,
-    `${parseInt(month)}/${parseInt(day)}/${year}`,
+    `${month}/${day}/${year}`,   // 04/18/2026
+    `${day}/${month}/${year}`,   // 18/04/2026
+    `${year}-${month}-${day}`,   // 2026-04-18
+    `${month}-${day}-${year}`,   // 04-18-2026
+    `${m}/${d}/${year}`,         // 4/18/2026
+    `${month}/${day}/${yy}`,     // 04/18/26
+    `${day}/${month}/${yy}`,     // 18/04/26
+    `${m}/${d}/${yy}`,           // 4/18/26  ← most US retail receipts
   ];
-  return variants.some(v => text.includes(v));
+  if (variants.some(v => text.includes(v))) return true;
+
+  // Date not found — check if any date pattern is visible at all.
+  // If a date is readable but didn't match any variant, the user entered the wrong date.
+  const anyDateVisible = /\b\d{1,2}\/\d{1,2}\/\d{2,4}\b/.test(text)
+    || /\b\d{4}-\d{2}-\d{2}\b/.test(text);
+  return anyDateVisible ? false : null;
 }
 
-export function matchBusinessName(text: string, businessName: string): boolean | null {
-  // Latin name matching (strip non-latin, uppercase)
-  const latinName = businessName.toUpperCase().replace(/[^A-Z0-9\s]/g, '');
+// Returns true  \u2192 business name confirmed in the receipt text
+// Returns null  \u2192 cannot confirm (logo-only, abbreviated, not printed) \u2192 let it slide
+// Never returns false \u2014 not finding the name doesn't mean it's the wrong business
+export function matchBusinessName(text: string, businessName: string): true | null {
+  const latinName  = businessName.toUpperCase().replace(/[^A-Z0-9\s]/g, '');
   const latinWords = latinName.split(/\s+/).filter(w => w.length >= 4);
-
-  // Hebrew name matching (preserve Hebrew characters)
-  const hebrewName = businessName.replace(/[^\u05D0-\u05EA\s]/g, '');
+  const hebrewName  = businessName.replace(/[^\u05D0-\u05EA\s]/g, '');
   const hebrewWords = hebrewName.split(/\s+/).filter(w => w.length >= 2);
 
   const significantWords = latinWords.length > 0 ? latinWords : hebrewWords;
   if (significantWords.length === 0) return null;
 
   const required = Math.min(2, significantWords.length);
-  const matched = significantWords.filter(word => text.includes(word)).length;
-  return matched >= required;
+  const matched  = significantWords.filter(word => text.includes(word)).length;
+  return matched >= required ? true : null;
 }
 
 export const RECEIPT_KEYWORDS = [
@@ -86,10 +107,10 @@ export function isReceiptText(text: string): boolean {
 
 export function scoreConfidence(
   identifierFound: boolean,
-  amountMatches: boolean,
+  amountMatches: boolean | null,
   dateMatches: boolean | null,
 ): 'high' | 'medium' | 'low' {
-  const matchCount = [identifierFound, amountMatches, dateMatches === true].filter(Boolean).length;
+  const matchCount = [identifierFound, amountMatches === true, dateMatches === true].filter(Boolean).length;
   if (matchCount >= 2) return 'high';
   if (matchCount === 1) return 'medium';
   return 'low';
