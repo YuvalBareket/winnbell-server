@@ -93,6 +93,8 @@ services:
         sync: false
       - key: PHONE_VERIFY_ENABLED
         sync: false
+      - key: IPINFO_TOKEN
+        sync: false
       - key: SMTP_HOST
         sync: false
       - key: SMTP_PORT

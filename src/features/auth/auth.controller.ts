@@ -202,7 +202,17 @@ export const getRegionConfig = async (_req: Request, res: Response): Promise<voi
 export const checkRegion = async (req: Request, res: Response): Promise<void> => {
   try {
     const result = await authService.evaluateRegionRestriction(req.ip || '');
-    res.json({ blocked: result.blocked, country: result.country, state: result.state });
+    res.json({
+      blocked: result.blocked,
+      country: result.country,
+      state: result.state,
+      // TEMP DEBUG — remove after diagnosing region detection.
+      _debug: {
+        reqIp: req.ip ?? null,
+        xForwardedFor: req.headers['x-forwarded-for'] ?? null,
+        ipinfoToken: !!process.env.IPINFO_TOKEN,
+      },
+    });
   } catch {
     res.json({ blocked: false, country: null, state: null });
   }
