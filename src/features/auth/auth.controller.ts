@@ -7,6 +7,7 @@ import { RegisterRequest, AuthResponse } from './auth.types.js';
 import { getPool } from '../../shared/db/db.js';
 import { getPlatformSettings, invalidateUserAuth } from '../../shared/cache/cache.js';
 import { validateLengths } from '../../shared/validation.js';
+import { getClientIp } from '../../shared/clientIp.js';
 
 export const register = async (
   req: Request<{}, {}, RegisterRequest>,
@@ -27,7 +28,7 @@ export const register = async (
     ]);
     if (lenErr) { res.status(400).json({ message: lenErr }); return; }
 
-    const result = await authService.registerUser(fullName, email, password, role, inviteToken, req.ip);
+    const result = await authService.registerUser(fullName, email, password, role, inviteToken, getClientIp(req));
     res.status(201).json(result);
   } catch (error: unknown) {
     if (error instanceof Error && error.message === 'User already exists') {
@@ -162,7 +163,7 @@ export const syncUser = async (req: Request, res: Response): Promise<void> => {
     // For OAuth sign-ins user_metadata.role is absent; fall back to req.body.role (set
     // from pendingRole localStorage by useSupabaseSync before calling syncUser).
     const roleFromToken = (meta['role'] as string | undefined) ?? (bodyRole as string | undefined);
-    const ip = req.ip || '';
+    const ip = getClientIp(req);
 
     const result = await authService.syncExternalUser(payload['sub'] as string, email, fullName, {
       role: roleFromToken,
@@ -201,14 +202,17 @@ export const getRegionConfig = async (_req: Request, res: Response): Promise<voi
 
 export const checkRegion = async (req: Request, res: Response): Promise<void> => {
   try {
-    const result = await authService.evaluateRegionRestriction(req.ip || '');
+    const clientIp = getClientIp(req);
+    const result = await authService.evaluateRegionRestriction(clientIp);
     res.json({
       blocked: result.blocked,
       country: result.country,
       state: result.state,
       // TEMP DEBUG — remove after diagnosing region detection.
       _debug: {
+        resolvedIp: clientIp,
         reqIp: req.ip ?? null,
+        cfConnectingIp: req.headers['cf-connecting-ip'] ?? null,
         xForwardedFor: req.headers['x-forwarded-for'] ?? null,
         ipinfoToken: !!process.env.IPINFO_TOKEN,
       },

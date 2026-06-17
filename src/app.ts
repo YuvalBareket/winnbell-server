@@ -24,6 +24,7 @@ import {
 import { getFoundingAvailability } from './features/stripe/stripe.controller.js';
 
 import { authenticateToken } from './shared/middleware/auth.middleware.js';
+import { getClientIp } from './shared/clientIp.js';
 
 const app = express();
 
@@ -50,6 +51,7 @@ const authLimiter = rateLimit({
   max: 30,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: getClientIp,
   message: { message: 'Too many requests, please try again later.' },
 });
 
@@ -60,6 +62,7 @@ const registrationLimiter = rateLimit({
   max: 5,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: getClientIp,
   message: { message: 'Too many registration attempts from this IP. Please try again later.' },
 });
 
@@ -77,6 +80,7 @@ const publicLimiter = rateLimit({
   max: 20,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: getClientIp,
   message: { message: 'Too many requests, please slow down.' },
 });
 
@@ -87,6 +91,7 @@ const otpLimiter = rateLimit({
   max: 50,
   standardHeaders: true,
   legacyHeaders: false,
+  keyGenerator: getClientIp,
   message: { message: 'Too many verification requests from this device. Please try again later.' },
 });
 

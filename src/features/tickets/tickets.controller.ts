@@ -4,6 +4,7 @@ import { getBusinessLocationsByUserId } from '../business/business.service.js';
 import { getPool } from '../../shared/db/db.js';
 import { AuthRequest } from '../../shared/middleware/auth.middleware.js';
 import { validateLength } from '../../shared/validation.js';
+import { getClientIp } from '../../shared/clientIp.js';
 
 export const redeemCode = async (req: AuthRequest, res: Response) => {
   try {
@@ -67,7 +68,7 @@ export const getStatus = async (req: AuthRequest, res: Response) => {
 export const activate = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
-    const result = await ticketService.activateFreeTicket(userId, req.ip);
+    const result = await ticketService.activateFreeTicket(userId, getClientIp(req));
     res.status(201).json(result);
   } catch (error: unknown) {
     res.status(400).json({ message: 'Activation failed' });
@@ -121,7 +122,7 @@ export const submitReceiptEntry = async (req: AuthRequest, res: Response) => {
       receiptImageUrl: receiptImageUrl ?? undefined,
       typingDurationMs: typingDurationMs !== undefined ? Number(typingDurationMs) : undefined,
       receiptInputMethod: receiptInputMethod === 'pasted' ? 'pasted' : receiptInputMethod === 'typed' ? 'typed' : undefined,
-      submitterIp: req.ip,
+      submitterIp: getClientIp(req),
     });
 
     const firstTicket = result.tickets[0];
