@@ -27,7 +27,7 @@ jest.mock('../../tickets/tickets.service.js', () => ({
   generateGlobalUniqueCode: jest.fn().mockResolvedValue('TESTCODE'),
 }));
 
-import { createDrawService } from '../admin.service';
+import { createDrawService, openDrawService, closeDrawService } from '../admin.service';
 
 // ─────────────────────────────────────────────
 // Helpers
@@ -106,11 +106,10 @@ describe('createDrawService', () => {
     expect(result.status).toBe('Upcoming');
   });
 
-  test('enrolls active businesses via a single set-based INSERT ... SELECT', async () => {
+  test('does NOT enroll businesses at create (enrollment moved to open)', async () => {
     setupClientQueries(
       { rows: [] },              // BEGIN
       { rows: [DRAW_ROW] },      // INSERT draw
-      { rows: [], rowCount: 2 }, // set-based INSERT draw_entry (2 subscribed businesses)
       { rows: [] },              // COMMIT
     );
 
@@ -119,14 +118,8 @@ describe('createDrawService', () => {
     const entryInserts = mockClientQuery.mock.calls.filter(
       ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO draw_entry'),
     );
-    // One set-based statement, not one INSERT per business
-    expect(entryInserts).toHaveLength(1);
-    const sql: string = entryInserts[0][0];
-    expect(sql).toMatch(/SELECT/);
-    expect(sql).toMatch(/JOIN subscription/);
-    expect(sql).toMatch(/'Active',\s*'Trialing'/);
-    // The new draw id is bound as the only parameter
-    expect(entryInserts[0][1]).toEqual([1]);
+    // Enrollment now happens in openDrawService — create must never touch draw_entry.
+    expect(entryInserts).toHaveLength(0);
   });
 
   test('sets contribution_amount to 0 for all enrolled businesses', async () => {
@@ -203,23 +196,20 @@ describe('createDrawService', () => {
     expect(mockRelease).toHaveBeenCalledTimes(1);
   });
 
-  test('enrollment is data-driven: the set-based INSERT inserts 0 rows when no active subscriptions exist', async () => {
+  test('create builds the draw row but performs no enrollment', async () => {
     setupClientQueries(
       { rows: [] },              // BEGIN
       { rows: [DRAW_ROW] },      // INSERT draw
-      { rows: [], rowCount: 0 }, // set-based INSERT draw_entry — no subscribed businesses → 0 rows
       { rows: [] },              // COMMIT
     );
 
-    await createDrawService({ name: 'Empty Draw', prize_amount: 500, draw_date: '2026-08-31' });
+    const result = await createDrawService({ name: 'Empty Draw', prize_amount: 500, draw_date: '2026-08-31' });
 
-    // The statement still executes once (filtering happens in SQL via the
-    // subscription status JOIN), it just affects zero rows.
+    expect(result.status).toBe('Upcoming');
     const entryInserts = mockClientQuery.mock.calls.filter(
       ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO draw_entry'),
     );
-    expect(entryInserts).toHaveLength(1);
-    expect(entryInserts[0][0]).toMatch(/'Active',\s*'Trialing'/);
+    expect(entryInserts).toHaveLength(0);
   });
 });
 
@@ -360,5 +350,86 @@ describe('createDraw controller — prize_amount validation', () => {
 
   test('accepts prize_amount of 1 (minimum positive)', () => {
     expect(validate(1)).toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────
+// openDrawService — enrollment is the single point businesses join a draw
+// ─────────────────────────────────────────────
+describe('openDrawService — enrollment', () => {
+  test('enrolls paid businesses at open, including Past_Due (grace), and gates founders by their prepaid year', async () => {
+    setupClientQueries(
+      { rows: [] },                               // BEGIN
+      { rows: [{ id: 5, status: 'Upcoming' }] },  // SELECT draw FOR UPDATE
+      { rows: [] },                               // SELECT open draw (none open)
+      { rows: [] },                               // UPDATE draw -> Open
+      { rows: [], rowCount: 3 },                  // INSERT INTO draw_entry (enroll)
+      { rows: [] },                               // logDrawAudit
+      { rows: [] },                               // COMMIT
+    );
+
+    await openDrawService(5);
+
+    const enroll = mockClientQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO draw_entry'),
+    );
+    expect(enroll).toBeDefined();
+    const sql: string = enroll![0];
+    expect(sql).toMatch(/JOIN subscription/);
+    // Paid businesses + Past_Due during the retry grace window
+    expect(sql).toMatch(/'Active',\s*'Trialing',\s*'Past_Due'/);
+    // Founding members (no stripe sub) only while their prepaid year covers the draw
+    expect(sql).toMatch(/stripe_subscription_id IS NOT NULL/);
+    expect(sql).toMatch(/current_period_end >= d\.draw_date/);
+    expect(enroll![1]).toEqual([5]);
+  });
+
+  test('refuses to open a second draw while one is already Open', async () => {
+    setupClientQueries(
+      { rows: [] },                               // BEGIN
+      { rows: [{ id: 5, status: 'Upcoming' }] },  // SELECT draw FOR UPDATE
+      { rows: [{ id: 9 }] },                      // an Open draw already exists
+    );
+
+    await expect(openDrawService(5)).rejects.toThrow(/already Open/);
+
+    const enroll = mockClientQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO draw_entry'),
+    );
+    expect(enroll).toBeUndefined(); // never enrolled — it threw first
+  });
+
+  test('only Upcoming draws can be opened', async () => {
+    setupClientQueries(
+      { rows: [] },
+      { rows: [{ id: 5, status: 'Open' }] },      // already Open
+    );
+    await expect(openDrawService(5)).rejects.toThrow(/Only Upcoming/);
+  });
+});
+
+// ─────────────────────────────────────────────
+// closeDrawService — draw-time paid-only safety net
+// ─────────────────────────────────────────────
+describe('closeDrawService — draw-time paid check', () => {
+  test('drops businesses whose payment never cleared (Past_Due/Incomplete) when the draw closes', async () => {
+    setupClientQueries(
+      { rows: [] },                            // BEGIN
+      { rows: [{ id: 5, status: 'Open' }] },   // SELECT draw FOR UPDATE
+      { rows: [] },                            // UPDATE -> Closed
+      { rows: [] },                            // logDrawAudit
+      { rows: [], rowCount: 1 },               // DELETE draw_entry (unpaid)
+      { rows: [] },                            // UPDATE business pending thresholds
+      { rows: [] },                            // COMMIT
+    );
+
+    await closeDrawService(5);
+
+    const del = mockClientQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('DELETE FROM draw_entry'),
+    );
+    expect(del).toBeDefined();
+    expect(del![0]).toMatch(/'Past_Due',\s*'Incomplete'/);
+    expect(del![1]).toEqual([5]);
   });
 });

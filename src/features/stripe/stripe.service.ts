@@ -6,13 +6,6 @@ import { getPlatformSettings, publicCache, invalidatePublicBusinessData } from '
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string);
 
-function addMonths(date: Date, months: number): Date {
-  const d = new Date(date);
-  d.setDate(1);
-  d.setMonth(d.getMonth() + months);
-  return d;
-}
-
 // ─── Get Business For Checkout ────────────────────────────────────────────────
 
 export const getBusinessForCheckout = async (userId: number): Promise<{ id: number; email: string } | null> => {
@@ -154,13 +147,25 @@ export const createCheckoutSession = async (
 
   const baseUrl = process.env.FRONTEND_URL || 'http://localhost:8081';
 
+  // Setup mode: collect + save a card without charging now. The subscription
+  // itself is created server-side (createSubscriptionForSetupSession) so we can
+  // anchor billing to the last day of the month (day_of_month: 31) and make the
+  // first partial month free — neither of which Checkout's subscription mode allows.
+  const planMetadata = {
+    business_id: String(businessId),
+    entries_per_location: String(entriesPerLocation),
+    billing_interval: billingInterval,
+    price_id: priceId,
+    quantity: String(locationCount),
+  };
+
   const session = await stripe.checkout.sessions.create({
-    mode: 'subscription',
+    mode: 'setup',
     payment_method_types: ['card'],
     customer_email: userEmail,
-    line_items: [{ price: priceId, quantity: locationCount }],
-    metadata: { business_id: String(businessId), entries_per_location: String(entriesPerLocation), billing_interval: billingInterval },
-    subscription_data: { metadata: { business_id: String(businessId), entries_per_location: String(entriesPerLocation), billing_interval: billingInterval } },
+    customer_creation: 'always',
+    setup_intent_data: { metadata: planMetadata },
+    metadata: planMetadata,
     success_url: `${baseUrl}/subscription/success?session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${baseUrl}/subscribe`,
   });
@@ -177,45 +182,86 @@ export const verifyAndActivateSession = async (sessionId: string, userId: number
   const businessId = bizResult.rows[0]?.id;
   if (!businessId) throw new Error('Business not found');
 
-  const session = await stripe.checkout.sessions.retrieve(sessionId, {
-    expand: ['subscription', 'subscription.items'],
-  });
-
-  if (session.payment_status !== 'paid') throw new Error('Payment not completed');
+  const session = await stripe.checkout.sessions.retrieve(sessionId);
   if (session.metadata?.business_id !== String(businessId)) throw new Error('Session does not belong to this business');
 
   // ── Founding member one-time payment branch ────────────────────────────────
   if (session.mode === 'payment' && session.metadata?.founding === 'true') {
+    if (session.payment_status !== 'paid') throw new Error('Payment not completed');
     const paymentIntentId = session.payment_intent as string;
     await activateFoundingMember(pool, businessId, paymentIntentId, sessionId);
     invalidatePublicBusinessData();
     return;
   }
 
-  // ── Recurring subscription branch ─────────────────────────────────────────
-  const subscription = session.subscription as Stripe.Subscription;
+  // ── Recurring subscription branch (setup mode → server-created sub) ─────────
+  if (session.mode === 'setup') {
+    if (session.status !== 'complete') throw new Error('Setup not completed');
+    await createSubscriptionForSetupSession(pool, session);
+    return;
+  }
 
-  // Idempotency guard: if this Stripe subscription is already activated, skip re-processing
-  const existingCheck = await pool.query(
-    `SELECT id FROM subscription WHERE stripe_subscription_id = $1`,
-    [subscription.id],
+  throw new Error('Unrecognized checkout session');
+};
+
+// ─── Create Subscription From a Completed Setup Session ───────────────────────
+// After a setup-mode Checkout completes (card saved, no charge), create the
+// recurring subscription billed on the LAST DAY of each month. Called by BOTH
+// the webhook and the success-page verify; idempotent so it can never create two.
+async function createSubscriptionForSetupSession(pool: Pool, session: Stripe.Checkout.Session): Promise<void> {
+  const businessId = Number(session.metadata?.business_id);
+  if (!businessId) throw new Error('Setup session missing business_id');
+
+  // DB-level idempotency: a live subscription already exists for this business.
+  const existing = await pool.query(
+    `SELECT id FROM subscription WHERE business_id = $1 AND status != 'Cancelled'`,
+    [businessId],
   );
-  if (existingCheck.rows.length > 0) return; // Already activated — safe to return success
+  if (existing.rows.length > 0) return;
 
   const customerId = session.customer as string;
-  const priceItem = subscription.items.data[0];
-  const priceId = priceItem?.price.id ?? '';
-  const quantity = priceItem?.quantity ?? 1;
-  const billingInterval: 'monthly' | 'yearly' =
-    priceItem?.price?.recurring?.interval === 'year' ? 'yearly' : 'monthly';
-  const rawFee = Math.round((priceItem?.price.unit_amount ?? 0) * quantity) / 100;
+  const priceId = session.metadata?.price_id ?? '';
+  const quantity = Math.max(1, Number(session.metadata?.quantity ?? 1));
+  const entriesPerLocation = Number(session.metadata?.entries_per_location ?? 0);
+  const billingInterval: 'monthly' | 'yearly' = session.metadata?.billing_interval === 'yearly' ? 'yearly' : 'monthly';
+  if (!customerId || !priceId) throw new Error('Setup session missing customer or price');
+
+  // Payment method saved by the SetupIntent → make it the customer default.
+  const setupIntent = await stripe.setupIntents.retrieve(session.setup_intent as string);
+  const paymentMethodId = (setupIntent.payment_method as string | null) ?? null;
+  if (paymentMethodId) {
+    await stripe.customers.update(customerId, {
+      invoice_settings: { default_payment_method: paymentMethodId },
+    });
+  }
+
+  // day_of_month:31 → bills the last day of every month (Stripe clamps short
+  // months). proration_behavior 'none' → no charge for the partial signup month;
+  // first charge lands on the next month-end and pays for next month's draw.
+  const subscription = await stripe.subscriptions.create(
+    {
+      customer: customerId,
+      items: [{ price: priceId, quantity }],
+      default_payment_method: paymentMethodId ?? undefined,
+      billing_cycle_anchor_config: { day_of_month: 31 },
+      proration_behavior: 'none',
+      metadata: {
+        business_id: String(businessId),
+        entries_per_location: String(entriesPerLocation),
+        billing_interval: billingInterval,
+      },
+    },
+    { idempotencyKey: `winnbell_sub_${session.id}` },
+  );
+
+  const item = subscription.items.data[0];
+  const rawFee = Math.round((item?.price.unit_amount ?? 0) * (item?.quantity ?? 1)) / 100;
   const monthlyEquivalentFee = billingInterval === 'yearly' ? rawFee / 12 : rawFee;
   const currentPeriodEnd = extractPeriodEnd(subscription);
-  const entriesPerLocation = Number(session.metadata?.entries_per_location ?? 0);
 
   await activateBusinessSubscription(pool, businessId, subscription.id, customerId, priceId, currentPeriodEnd, monthlyEquivalentFee, entriesPerLocation, billingInterval);
   invalidatePublicBusinessData();
-};
+}
 
 // ─── Handle Webhook ───────────────────────────────────────────────────────────
 
@@ -275,25 +321,11 @@ async function processStripeEvent(event: Stripe.Event, pool: Pool): Promise<void
           break;
         }
 
-        // ── Recurring subscription ───────────────────────────────────────────
-        const subscriptionId = session.subscription as string;
-        if (!subscriptionId) { console.error('[Stripe] checkout.session.completed: no subscription', session.id); break; }
-
-        const subscription = await stripe.subscriptions.retrieve(subscriptionId, { expand: ['items'] });
-        const customerId = session.customer as string;
-        const priceItem = subscription.items.data[0];
-        const priceId = priceItem?.price.id ?? '';
-        const quantity = priceItem?.quantity ?? 1;
-        const billingInterval: 'monthly' | 'yearly' =
-          (session.metadata?.billing_interval === 'yearly') ? 'yearly' : 'monthly';
-        const rawFee = Math.round((priceItem?.price.unit_amount ?? 0) * quantity) / 100;
-        const monthlyEquivalentFee = billingInterval === 'yearly' ? rawFee / 12 : rawFee;
-        const currentPeriodEnd = extractPeriodEnd(subscription);
-        const entriesPerLocation = Number(session.metadata?.entries_per_location ?? 0);
-
-        await activateBusinessSubscription(pool, businessId, subscriptionId, customerId, priceId, currentPeriodEnd, monthlyEquivalentFee, entriesPerLocation, billingInterval);
-        invalidatePublicBusinessData();
-        console.log(`[Stripe] Webhook activated business ${businessId}`);
+        // ── Recurring subscription (created from the setup-mode session) ──────
+        if (session.mode === 'setup') {
+          await createSubscriptionForSetupSession(pool, session);
+          console.log(`[Stripe] Webhook created subscription for business ${businessId}`);
+        }
       } catch (err: unknown) {
         console.error('[Stripe] ERROR in checkout.session.completed:', err instanceof Error ? err.message : err);
         throw err;
@@ -310,8 +342,6 @@ async function processStripeEvent(event: Stripe.Event, pool: Pool): Promise<void
         const status = mapStripeStatus(subscription.status);
         const currentPeriodEnd = extractPeriodEnd(subscription);
         const cancelAtPeriodEnd = subscription.cancel_at_period_end;
-        const isActive = status === 'Active' || status === 'Trialing';
-        const previousStatus = (event.data as any).previous_attributes?.status;
 
         await pool.query(`
           UPDATE subscription
@@ -319,19 +349,8 @@ async function processStripeEvent(event: Stripe.Event, pool: Pool): Promise<void
           WHERE business_id = $4
         `, [status, currentPeriodEnd, cancelAtPeriodEnd, businessId]);
 
-
-        if (isActive && previousStatus && previousStatus !== 'active') {
-          const priceItem = subscription.items.data[0];
-          const quantity = priceItem?.quantity ?? 1;
-          const billingInterval: 'monthly' | 'yearly' = priceItem?.price?.recurring?.interval === 'year' ? 'yearly' : 'monthly';
-          const rawFee = Math.round((priceItem?.price.unit_amount ?? 0) * quantity) / 100;
-          const monthlyEquivalentFee = billingInterval === 'yearly' ? rawFee / 12 : rawFee;
-          if (billingInterval === 'yearly') {
-            await handleYearlyDrawParticipation(pool, businessId, monthlyEquivalentFee);
-          } else {
-            await handleDrawParticipation(pool, businessId, monthlyEquivalentFee);
-          }
-        }
+        // No draw enrollment here. Enrollment happens only when a campaign is
+        // opened; this handler just keeps our subscription row in sync with Stripe.
         invalidatePublicBusinessData();
       } catch (err: unknown) {
         console.error('[Stripe] ERROR in customer.subscription.updated:', err instanceof Error ? err.message : err);
@@ -350,12 +369,9 @@ async function processStripeEvent(event: Stripe.Event, pool: Pool): Promise<void
           `UPDATE subscription SET status = 'Cancelled', updated_at = NOW() WHERE business_id = $1`,
           [businessId],
         );
-        await pool.query(
-          `DELETE FROM draw_entry de
-           USING draw d
-           WHERE de.draw_id = d.id AND de.business_id = $1 AND d.status = 'Upcoming'`,
-          [businessId],
-        );
+        // No draw removal: with open-time enrollment a business is only ever in the
+        // Open draw it already paid for (it keeps it), and won't be enrolled in the
+        // next campaign because it's Cancelled by the time that opens.
         invalidatePublicBusinessData();
         console.log(`[Stripe] Business ${businessId} deactivated`);
       } catch (err: unknown) {
@@ -365,42 +381,10 @@ async function processStripeEvent(event: Stripe.Event, pool: Pool): Promise<void
       break;
     }
 
-    case 'invoice.payment_succeeded': {
-      try {
-        const invoice = event.data.object as Stripe.Invoice;
-        const subscriptionId = (invoice as any).subscription as string | null;
-        if (!subscriptionId) break;
-
-        const billingReason = (invoice as any).billing_reason as string | null;
-        if (billingReason !== 'subscription_cycle') break;
-
-        const subscription = await stripe.subscriptions.retrieve(subscriptionId, { expand: ['items'] });
-        const businessId = Number(subscription.metadata?.business_id);
-        if (!businessId) break;
-
-        const priceItem = subscription.items.data[0];
-        const quantity = priceItem?.quantity ?? 1;
-        const billingInterval: 'monthly' | 'yearly' = priceItem?.price?.recurring?.interval === 'year' ? 'yearly' : 'monthly';
-        const rawFee = Math.round((priceItem?.price.unit_amount ?? 0) * quantity) / 100;
-        const monthlyEquivalentFee = billingInterval === 'yearly' ? rawFee / 12 : rawFee;
-
-        if (billingInterval === 'yearly') {
-          await handleYearlyDrawParticipation(pool, businessId, monthlyEquivalentFee);
-        } else {
-          await handleDrawParticipation(pool, businessId, monthlyEquivalentFee);
-        }
-        console.log(`[Stripe] Renewal draw participation updated for business ${businessId}`);
-      } catch (err: unknown) {
-        console.error('[Stripe] ERROR in invoice.payment_succeeded:', err instanceof Error ? err.message : err);
-        throw err;
-      }
-      break;
-    }
-
     case 'invoice.payment_failed': {
       try {
         const invoice = event.data.object as Stripe.Invoice;
-        const subscriptionId = (invoice as any).subscription as string | null;
+        const subscriptionId = getInvoiceSubscriptionId(invoice);
         if (!subscriptionId) break;
 
         await pool.query(
@@ -500,14 +484,8 @@ async function activateFoundingMember(
     client.release();
   }
 
-  // Enroll in next upcoming draw (same as regular subscriber).
-  // Future draws created by admin will auto-enroll all active subscribers including this one.
-  try {
-    const monthlyEquivalent = Math.round(120000 / 12) / 100;
-    await handleDrawParticipation(pool, businessId, monthlyEquivalent);
-  } catch (err: unknown) {
-    console.error(`[Founding] Draw enrollment failed for business ${businessId} (non-fatal):`, err instanceof Error ? err.message : err);
-  }
+  // Enrollment happens when the admin opens the next campaign — founding members
+  // are Active and within their prepaid year, so they get enrolled like anyone else.
 
   // Confirmation email — non-fatal
   try {
@@ -649,16 +627,8 @@ async function activateBusinessSubscription(
     client.release();
   }
 
-  // Draw participation runs outside the transaction — it's non-fatal and has its own transaction.
-  try {
-    if (billingInterval === 'yearly') {
-      await handleYearlyDrawParticipation(pool, businessId, monthlyEquivalentFee);
-    } else {
-      await handleDrawParticipation(pool, businessId, monthlyEquivalentFee);
-    }
-  } catch (err: unknown) {
-    console.error(`[Stripe] Draw participation failed for business ${businessId} (non-fatal):`, err instanceof Error ? err.message : err);
-  }
+  // No draw enrollment here. A new subscriber joins the next campaign when the
+  // admin opens it — open is the single enrollment point.
 
   // Send confirmation email — non-fatal
   try {
@@ -685,118 +655,12 @@ async function activateBusinessSubscription(
   }
 }
 
-// ─── Draw Participation ───────────────────────────────────────────────────────
-
-async function handleDrawParticipation(
-  pool: Pool,
-  businessId: number,
-  monthlyFee: number,
-  targetDate?: Date,
-  skipEnrollOthers = false,
-): Promise<void> {
-  // Default to next month. Normalise to 1st of month to avoid day-of-month overflow.
-  const target = targetDate ?? addMonths(new Date(), 1);
-  const targetMonth = target.getMonth() + 1; // 1-based
-  const targetYear  = target.getFullYear();
-
-  const client = await pool.connect();
-  await client.query('BEGIN');
-
-  try {
-    // For monthly signups (no specific targetDate), join the next upcoming draw regardless of month.
-    // For yearly pre-enrollment (specific targetDate), match the exact month so each future month
-    // gets its own draw row.
-    const drawResult = targetDate
-      ? await client.query(`
-          SELECT id FROM draw
-          WHERE EXTRACT(MONTH FROM draw_date) = $1
-            AND EXTRACT(YEAR FROM draw_date)  = $2
-            AND status = 'Upcoming'
-          LIMIT 1
-        `, [targetMonth, targetYear])
-      : await client.query(`
-          SELECT id FROM draw
-          WHERE status = 'Upcoming'
-          ORDER BY draw_date ASC
-          LIMIT 1
-        `);
-
-    const existingDraw = drawResult.rows[0] as { id: number } | undefined;
-
-    if (existingDraw) {
-      const insertResult = await client.query(`
-        INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, contribution_amount)
-        SELECT $1, $2, $3, 0
-        WHERE NOT EXISTS (
-          SELECT 1 FROM draw_entry WHERE draw_id = $1 AND business_id = $2
-        )
-      `, [existingDraw.id, businessId, monthlyFee]);
-
-      if (insertResult.rowCount === 0) {
-        console.log(`[Draw] Business ${businessId} already in draw ${existingDraw.id} — skipped`);
-        await client.query('COMMIT');
-        return;
-      }
-
-      console.log(`[Draw] Business ${businessId} entered draw ${existingDraw.id} (${targetYear}-${targetMonth}) — fee $${monthlyFee}`);
-    } else {
-      // Use MAKE_DATE with explicit year/month to avoid JS timezone-to-UTC conversion
-      // shifting the date to the previous month on servers behind UTC.
-      const newDrawResult = await client.query(`
-        INSERT INTO draw (name, prize_pool, draw_date, status)
-        VALUES (
-          TRIM(TO_CHAR(MAKE_DATE($1, $2, 1), 'Month')) || ' ' || $1::text || ' Monthly Draw',
-          0,
-          (MAKE_DATE($1, $2, 1) + INTERVAL '1 month' - INTERVAL '1 day')::date,
-          'Upcoming'
-        )
-        RETURNING id
-      `, [targetYear, targetMonth]);
-
-      const newDraw = newDrawResult.rows[0] as { id: number };
-
-      await client.query(
-        `INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, contribution_amount) VALUES ($1, $2, $3, 0)`,
-        [newDraw.id, businessId, monthlyFee],
-      );
-
-      // Only catch up other businesses when creating the immediate next-month draw.
-      // For future months (yearly pre-enrollment) each business will enroll via their own renewal.
-      if (!skipEnrollOthers) {
-        await client.query(`
-          INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, contribution_amount)
-          SELECT $1, b.id, COALESCE(s.fee_at_entry, 0), 0
-          FROM business b
-          JOIN subscription s ON s.business_id = b.id
-          WHERE s.status IN ('Active', 'Trialing') AND b.id != $2
-          ON CONFLICT (draw_id, business_id) DO NOTHING
-        `, [newDraw.id, businessId]);
-      }
-
-      console.log(`[Draw] Created new draw ${newDraw.id} for ${targetYear}-${targetMonth} with ${skipEnrollOthers ? 1 : 'all'} businesses — prize pool set by admin`);
-    }
-
-    await client.query('COMMIT');
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
-  }
-}
-
-async function handleYearlyDrawParticipation(pool: Pool, businessId: number, monthlyEquivalent: number): Promise<void> {
-  for (let offset = 1; offset <= 12; offset++) {
-    const target = addMonths(new Date(), offset);
-    try {
-      // Only enroll other businesses for the next-month draw (offset === 1).
-      // Future months will be populated naturally as each business renews.
-      await handleDrawParticipation(pool, businessId, monthlyEquivalent, target, offset > 1);
-    } catch (err: unknown) {
-      console.error(`[Draw] Yearly enrollment failed for business ${businessId} at month offset +${offset}:`, err instanceof Error ? err.message : err);
-    }
-  }
-}
+// ─── Draw enrollment ──────────────────────────────────────────────────────────
+// Enrollment lives solely in openDrawService (when the admin opens a campaign).
+// The old handleDrawParticipation / handleYearlyDrawParticipation — which
+// pre-created draws and enrolled on signup/renew — were removed: they conflicted
+// with the admin-opens-one-campaign-per-month model and could enroll businesses
+// in draws they hadn't paid for.
 
 // ─── Sync Subscription Quantity ───────────────────────────────────────────────
 // Called after adding/removing a location to keep Stripe quantity in sync.
@@ -1060,7 +924,11 @@ export const getSubscriptionDetails = async (userId: number) => {
         FROM draw_entry de3
         JOIN draw d3 ON d3.id = de3.draw_id
         WHERE de3.business_id = b.id AND d3.status = 'Upcoming'
-      ) AS founding_draws_remaining
+      ) AS founding_draws_remaining,
+      nd.id         AS next_campaign_id,
+      nd.name       AS next_campaign_name,
+      nd.draw_date  AS next_campaign_date,
+      nd.prize_pool AS next_campaign_prize
     FROM business b
     JOIN subscription s ON s.business_id = b.id
     LEFT JOIN founding_member fm ON fm.business_id = b.id
@@ -1075,6 +943,16 @@ export const getSubscriptionDetails = async (userId: number) => {
         d2.draw_date ASC
       LIMIT 1
     ) d ON true
+    LEFT JOIN LATERAL (
+      -- The next campaign this business will be enrolled into when the admin opens
+      -- it. Enrollment happens at open, so there is no draw_entry yet; this shows
+      -- the soonest Upcoming campaign the business will join.
+      SELECT d4.id, d4.name, d4.draw_date, d4.prize_pool
+      FROM draw d4
+      WHERE d4.status = 'Upcoming'
+      ORDER BY d4.draw_date ASC
+      LIMIT 1
+    ) nd ON true
     WHERE b.user_id = $1
        OR b.id IN (SELECT business_id FROM business_location WHERE manager_user_id = $1)
   `, [userId]);
@@ -1114,23 +992,8 @@ export const resumeSubscription = async (userId: number): Promise<void> => {
     [sub.id],
   );
 
-  const stripeSubscription = await stripe.subscriptions.retrieve(sub.stripe_subscription_id, { expand: ['items'] });
-  const billingInterval: 'monthly' | 'yearly' =
-    stripeSubscription.items.data[0]?.price?.recurring?.interval === 'year' ? 'yearly' : 'monthly';
-  const resumeItem = stripeSubscription.items.data[0];
-  const rawFee = Math.round((resumeItem?.price.unit_amount ?? 0) * (resumeItem?.quantity ?? 1)) / 100;
-  const monthlyEquivalentFee = billingInterval === 'yearly' ? rawFee / 12 : rawFee;
-
-  try {
-    if (billingInterval === 'yearly') {
-      await handleYearlyDrawParticipation(pool, sub.business_id, monthlyEquivalentFee);
-    } else {
-      await handleDrawParticipation(pool, sub.business_id, monthlyEquivalentFee);
-    }
-  } catch (err: unknown) {
-    console.error(`[Stripe] Draw re-participation failed for business ${sub.business_id} (non-fatal):`, err instanceof Error ? err.message : err);
-  }
-
+  // No draw re-participation needed: the business is Active again, so the next
+  // campaign that opens enrolls it like any other paid subscriber.
   invalidatePublicBusinessData();
 };
 
@@ -1174,29 +1037,39 @@ export const cancelSubscription = async (userId: number): Promise<CancelResult> 
   const sub = subResult.rows[0];
   if (!sub) throw new Error('No active subscription found');
 
-  // Set cancel at period end on Stripe — business keeps access until period ends
+  // Set cancel at period end on Stripe — the business keeps access AND its current
+  // paid draw until the period ends. We never remove from a draw on cancel; a
+  // Cancelled business simply isn't enrolled when the next campaign opens.
   await stripe.subscriptions.update(sub.stripe_subscription_id, { cancel_at_period_end: true });
   await pool.query(
     `UPDATE subscription SET cancel_at_period_end = true, updated_at = NOW() WHERE id = $1`,
     [sub.id],
   );
 
-  // Remove from next upcoming draw — no refund
-  const deleteResult = await pool.query(
-    `DELETE FROM draw_entry de
-     USING draw d
-     WHERE de.draw_id = d.id AND de.business_id = $1 AND d.status = 'Upcoming'
-     RETURNING de.draw_id`,
-    [sub.business_id],
-  );
-  const removedFromDraw = deleteResult.rowCount! > 0;
-
   invalidatePublicBusinessData();
-  console.log(`[Cancel] Business ${sub.business_id} set to cancel at period end. Removed from ${deleteResult.rowCount} upcoming draw(s). No refund issued.`);
-  return { removedFromDraw, refundType: 'none', refundAmount: 0 };
+  console.log(`[Cancel] Business ${sub.business_id} set to cancel at period end. No draw change, no refund.`);
+  return { removedFromDraw: false, refundType: 'none', refundAmount: 0 };
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/**
+ * Read the subscription id off an invoice across Stripe API versions.
+ * Pre-2025 ("acacia" and earlier) exposed `invoice.subscription`; the 2025
+ * "Basil" API moved it to `invoice.parent.subscription_details.subscription`.
+ * Reading both keeps renewal + payment-failure handling working regardless of
+ * the account's API version.
+ */
+function getInvoiceSubscriptionId(invoice: Stripe.Invoice): string | null {
+  const inv = invoice as any;
+  const direct = inv.subscription;
+  if (typeof direct === 'string') return direct;
+  if (direct && typeof direct.id === 'string') return direct.id;
+  const nested = inv.parent?.subscription_details?.subscription;
+  if (typeof nested === 'string') return nested;
+  if (nested && typeof nested.id === 'string') return nested.id;
+  return null;
+}
 
 function extractPeriodEnd(subscription: Stripe.Subscription): Date {
   const raw =

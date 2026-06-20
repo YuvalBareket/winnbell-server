@@ -240,15 +240,10 @@ export const createDrawService = async (data: {
 
     const draw = drawResult.rows[0];
 
-    // Auto-enroll all currently subscribed businesses into this draw
-    await client.query(`
-      INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, contribution_amount)
-      SELECT $1, b.id, COALESCE(s.fee_at_entry, 0), 0
-      FROM business b
-      JOIN subscription s ON s.business_id = b.id
-      WHERE s.status IN ('Active', 'Trialing')
-      ON CONFLICT (draw_id, business_id) DO NOTHING
-    `, [draw.id]);
+    // NOTE: businesses are NOT enrolled at create. Enrollment happens at OPEN
+    // (openDrawService), which is the single point a business joins a draw and
+    // runs after the month-end charges, so only paid businesses get in. Creating
+    // a campaign early or creating several has no effect on who participates.
 
     await client.query('COMMIT');
     invalidatePublicBusinessData();
@@ -318,6 +313,26 @@ export const openDrawService = async (drawId: number): Promise<void> => {
     if (openCheck.rows.length > 0) throw new Error('A draw is already Open. Close it before opening another.');
 
     await client.query(`UPDATE draw SET status = 'Open', opened_at = NOW() WHERE id = $1`, [drawId]);
+
+    // Enrollment happens HERE — the single point a business joins a draw. Open
+    // runs from the 1st (after month-end charges), so only paid businesses get in:
+    //  - regular subs (stripe_subscription_id NOT NULL): Active/Trialing, plus
+    //    Past_Due during Stripe's retry grace (the draw-time check at close removes
+    //    any still-unpaid).
+    //  - founding members (no stripe sub): only while their prepaid year still
+    //    covers this draw's date (current_period_end >= draw_date) — expires them
+    //    automatically after 12 months.
+    await client.query(`
+      INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, contribution_amount)
+      SELECT d.id, b.id, COALESCE(s.fee_at_entry, 0), 0
+      FROM draw d
+      JOIN subscription s ON s.status IN ('Active', 'Trialing', 'Past_Due')
+      JOIN business b ON b.id = s.business_id
+      WHERE d.id = $1
+        AND (s.stripe_subscription_id IS NOT NULL OR s.current_period_end >= d.draw_date)
+      ON CONFLICT (draw_id, business_id) DO NOTHING
+    `, [drawId]);
+
     await logDrawAudit(client, drawId, 'opened');
     await client.query('COMMIT');
     invalidatePublicBusinessData();
@@ -342,6 +357,17 @@ export const closeDrawService = async (drawId: number): Promise<void> => {
 
     await client.query(`UPDATE draw SET status = 'Closed', closed_at = NOW() WHERE id = $1`, [drawId]);
     await logDrawAudit(client, drawId, 'closed');
+
+    // Draw-time safety net: drop any business whose payment never cleared
+    // (Past_Due/Incomplete left over from the open-time grace window) so an
+    // unpaid business can never be in the final draw. Active businesses — and
+    // those who cancelled mid-month but were paid when the draw opened — stay.
+    await client.query(`
+      DELETE FROM draw_entry de
+      USING subscription s
+      WHERE de.draw_id = $1 AND s.business_id = de.business_id
+        AND s.status IN ('Past_Due', 'Incomplete')
+    `, [drawId]);
 
     // Apply any pending threshold changes that businesses set during the active campaign
     await client.query(`

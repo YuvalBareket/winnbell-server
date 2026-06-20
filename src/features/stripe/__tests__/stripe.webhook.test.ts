@@ -118,3 +118,32 @@ describe('handleStripeWebhook — idempotency claim lifecycle', () => {
     expect(mockQuery).not.toHaveBeenCalled();
   });
 });
+
+// ─────────────────────────────────────────────
+// customer.subscription.deleted — Cancelled, but never removes from a draw
+// ─────────────────────────────────────────────
+describe('handleStripeWebhook — customer.subscription.deleted', () => {
+  it('marks the subscription Cancelled and never deletes a draw_entry', async () => {
+    mockConstructEvent.mockReturnValue({
+      id: 'evt_del',
+      type: 'customer.subscription.deleted',
+      data: { object: { metadata: { business_id: '42' } } },
+    });
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ event_id: 'evt_del' }], rowCount: 1 }) // claim
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 });                       // UPDATE -> Cancelled
+
+    await handleStripeWebhook(Buffer.from('{}'), 'sig');
+
+    const cancelled = mockQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes("status = 'Cancelled'"),
+    );
+    expect(cancelled).toBeDefined();
+
+    // The business keeps the paid draw it's in — the deleted event must not delete entries.
+    const deletedDraw = mockQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('DELETE FROM draw_entry'),
+    );
+    expect(deletedDraw).toBeUndefined();
+  });
+});
