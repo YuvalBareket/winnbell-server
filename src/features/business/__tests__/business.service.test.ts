@@ -117,6 +117,20 @@ describe('getNearbyBusinessesService', () => {
     expect(first).toEqual(second);
     expect(mockQuery).toHaveBeenCalledTimes(1);
   });
+
+  it('caches nearby tiles with a 2-minute TTL (longer than the 30s default)', async () => {
+    setupPoolQueries({ rows: [NEARBY_ROW] });
+
+    await getNearbyBusinessesService(25.7, 25.8, -80.3, -80.1);
+
+    const key = 'business:nearby:2570:2580:-8030:-8010:all:';
+    const expiresAt = publicCache.getTtl(key); // epoch ms of expiry
+    expect(expiresAt).toBeGreaterThan(0);
+    const secondsLeft = ((expiresAt as number) - Date.now()) / 1000;
+    // Should be ~120s, well above the 30s default the shared cache uses.
+    expect(secondsLeft).toBeGreaterThan(60);
+    expect(secondsLeft).toBeLessThanOrEqual(120);
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -67,7 +67,10 @@ export const getNearbyBusinessesService = async (
   `;
 
   const result = await pool.query(query, params);
-  publicCache.set(CACHE_KEY, result.rows);
+  // 2-minute TTL: map data only changes when a draw opens/closes or a business
+  // subscribes, none of which need second-level freshness. Draw open/close also
+  // explicitly invalidates these keys, so the TTL is just a backstop for the rest.
+  publicCache.set(CACHE_KEY, result.rows, 120);
   return result.rows;
 };
 
