@@ -17,23 +17,26 @@ export const getBusinessForCheckout = async (userId: number): Promise<{ id: numb
   return result.rows[0] ?? null;
 };
 
-// ─── Tier Price Map ────────────────────────────────────────────────────────────
-// Each tier has its own Stripe price ID (set in .env) and a fixed price per location/month.
-// Quantity sent to Stripe = number of locations (not cap units) — making pricing non-linear.
-export const TIER_PRICE_MAP: Record<number, {
-  monthly: { envKey: string; pricePerLocation: number };
-  yearly:  { envKey: string; pricePerLocation: number };
-}> = {
-  250:  { monthly: { envKey: 'STRIPE_PRICE_ID_250',         pricePerLocation: 250   }, yearly: { envKey: 'STRIPE_PRICE_ID_250_YEARLY',  pricePerLocation: 3000  } },
-  500:  { monthly: { envKey: 'STRIPE_PRICE_ID_500',         pricePerLocation: 490   }, yearly: { envKey: 'STRIPE_PRICE_ID_500_YEARLY',  pricePerLocation: 5880  } },
-  750:  { monthly: { envKey: 'STRIPE_PRICE_ID_750',         pricePerLocation: 720   }, yearly: { envKey: 'STRIPE_PRICE_ID_750_YEARLY',  pricePerLocation: 8640  } },
-  1000: { monthly: { envKey: 'STRIPE_PRICE_ID_1000',        pricePerLocation: 940   }, yearly: { envKey: 'STRIPE_PRICE_ID_1000_YEARLY', pricePerLocation: 11280 } },
-  1250: { monthly: { envKey: 'STRIPE_PRICE_ID_1250',        pricePerLocation: 1150  }, yearly: { envKey: 'STRIPE_PRICE_ID_1250_YEARLY', pricePerLocation: 13800 } },
-  1500: { monthly: { envKey: 'STRIPE_PRICE_ID_1500',        pricePerLocation: 1350  }, yearly: { envKey: 'STRIPE_PRICE_ID_1500_YEARLY', pricePerLocation: 16200 } },
-  1750: { monthly: { envKey: 'STRIPE_PRICE_ID_1750',        pricePerLocation: 1540  }, yearly: { envKey: 'STRIPE_PRICE_ID_1750_YEARLY', pricePerLocation: 18480 } },
-  2000: { monthly: { envKey: 'STRIPE_PRICE_ID_2000',        pricePerLocation: 1720  }, yearly: { envKey: 'STRIPE_PRICE_ID_2000_YEARLY', pricePerLocation: 20640 } },
-  2250: { monthly: { envKey: 'STRIPE_PRICE_ID_2250',        pricePerLocation: 1890  }, yearly: { envKey: 'STRIPE_PRICE_ID_2250_YEARLY', pricePerLocation: 22680 } },
-  2500: { monthly: { envKey: 'STRIPE_PRICE_ID_2500',        pricePerLocation: 2000  }, yearly: { envKey: 'STRIPE_PRICE_ID_2500_YEARLY', pricePerLocation: 24000 } },
+// ─── Tier Price Map (SINGLE SOURCE OF TRUTH for tier prices) ──────────────────
+// One place for both the Stripe price id (envKey) AND the dollar amount per
+// location per month. Regular subscriptions are monthly only (there is no yearly
+// recurring checkout). IMPORTANT: each `price` MUST match its Stripe price object
+// (Stripe is what actually charges the card). When a price changes, update the
+// Stripe price object AND this map together — this is the only place the app
+// stores prices, so the change propagates to fees and the client display.
+export const TIER_PRICE_MAP: Record<number, { envKey: string; price: number }> = {
+  250:  { envKey: 'STRIPE_PRICE_ID_250',  price: 250  },
+  500:  { envKey: 'STRIPE_PRICE_ID_500',  price: 490  },
+  750:  { envKey: 'STRIPE_PRICE_ID_750',  price: 730  },
+  1000: { envKey: 'STRIPE_PRICE_ID_1000', price: 920  },
+  1250: { envKey: 'STRIPE_PRICE_ID_1250', price: 1140 },
+  1500: { envKey: 'STRIPE_PRICE_ID_1500', price: 1360 },
+  1750: { envKey: 'STRIPE_PRICE_ID_1750', price: 1500 },
+  2000: { envKey: 'STRIPE_PRICE_ID_2000', price: 1710 },
+  2250: { envKey: 'STRIPE_PRICE_ID_2250', price: 1910 },
+  2500: { envKey: 'STRIPE_PRICE_ID_2500', price: 2050 },
+  2750: { envKey: 'STRIPE_PRICE_ID_2750', price: 2250 },
+  3000: { envKey: 'STRIPE_PRICE_ID_3000', price: 2460 },
 };
 
 // ─── Founding Member: Checkout Session ────────────────────────────────────────
@@ -64,6 +67,7 @@ export const createFoundingMemberCheckoutSession = async (
     mode: 'payment',
     payment_method_types: ['card'],
     customer_email: userEmail,
+    customer_creation: 'always',
     line_items: [{
       quantity: 1,
       price_data: {
@@ -76,6 +80,9 @@ export const createFoundingMemberCheckoutSession = async (
       },
     }],
     metadata: { business_id: String(businessId), founding: 'true' },
+    // Stamp the PaymentIntent too so the one-time charge is findable in the Stripe
+    // dashboard by business_id (Checkout metadata does not propagate to the PI).
+    payment_intent_data: { metadata: { business_id: String(businessId), founding: 'true' } },
     success_url: `${baseUrl}/subscription/success?session_id={CHECKOUT_SESSION_ID}`,
     cancel_url: `${baseUrl}/subscribe`,
   });
@@ -100,7 +107,7 @@ export const getFoundingMemberCount = async (): Promise<{
   const taken = countResult.rows[0]?.taken ?? 0;
   const cap = settings.founding_member_cap ?? 30;
   const active = (settings as any).founding_phase_active ?? true;
-  const value = { taken, remaining: Math.max(0, cap - taken), cap, price: 1000, active };
+  const value = { taken, remaining: Math.max(0, cap - taken), cap, price: 1200, active };
   publicCache.set(CACHE_KEY, value, 60);
   return value;
 };
@@ -111,14 +118,12 @@ export const createCheckoutSession = async (
   businessId: number,
   userEmail: string,
   entriesPerLocation: number,
-  billingInterval: 'monthly' | 'yearly' = 'monthly',
 ): Promise<{ url: string; joinsNextCampaign: boolean; nextCampaignDate: string | null }> => {
   const tier = TIER_PRICE_MAP[entriesPerLocation];
   if (!tier) throw new Error('Invalid entries_per_location value');
 
-  const tierConfig = tier[billingInterval];
-  const priceId = process.env[tierConfig.envKey];
-  if (!priceId) throw new Error(`${tierConfig.envKey} is not configured`);
+  const priceId = process.env[tier.envKey];
+  if (!priceId) throw new Error(`${tier.envKey} is not configured`);
 
   const pool = getPool();
   const existing = await pool.query(
@@ -154,7 +159,7 @@ export const createCheckoutSession = async (
   const planMetadata = {
     business_id: String(businessId),
     entries_per_location: String(entriesPerLocation),
-    billing_interval: billingInterval,
+    billing_interval: 'monthly',
     price_id: priceId,
     quantity: String(locationCount),
   };
@@ -189,7 +194,8 @@ export const verifyAndActivateSession = async (sessionId: string, userId: number
   if (session.mode === 'payment' && session.metadata?.founding === 'true') {
     if (session.payment_status !== 'paid') throw new Error('Payment not completed');
     const paymentIntentId = session.payment_intent as string;
-    await activateFoundingMember(pool, businessId, paymentIntentId, sessionId);
+    const customerId = (session.customer as string | null) ?? null;
+    await activateFoundingMember(pool, businessId, paymentIntentId, sessionId, customerId);
     invalidatePublicBusinessData();
     return;
   }
@@ -223,7 +229,6 @@ async function createSubscriptionForSetupSession(pool: Pool, session: Stripe.Che
   const priceId = session.metadata?.price_id ?? '';
   const quantity = Math.max(1, Number(session.metadata?.quantity ?? 1));
   const entriesPerLocation = Number(session.metadata?.entries_per_location ?? 0);
-  const billingInterval: 'monthly' | 'yearly' = session.metadata?.billing_interval === 'yearly' ? 'yearly' : 'monthly';
   if (!customerId || !priceId) throw new Error('Setup session missing customer or price');
 
   // Payment method saved by the SetupIntent → make it the customer default.
@@ -248,18 +253,17 @@ async function createSubscriptionForSetupSession(pool: Pool, session: Stripe.Che
       metadata: {
         business_id: String(businessId),
         entries_per_location: String(entriesPerLocation),
-        billing_interval: billingInterval,
+        billing_interval: 'monthly',
       },
     },
     { idempotencyKey: `winnbell_sub_${session.id}` },
   );
 
   const item = subscription.items.data[0];
-  const rawFee = Math.round((item?.price.unit_amount ?? 0) * (item?.quantity ?? 1)) / 100;
-  const monthlyEquivalentFee = billingInterval === 'yearly' ? rawFee / 12 : rawFee;
+  const monthlyFee = Math.round((item?.price.unit_amount ?? 0) * (item?.quantity ?? 1)) / 100;
   const currentPeriodEnd = extractPeriodEnd(subscription);
 
-  await activateBusinessSubscription(pool, businessId, subscription.id, customerId, priceId, currentPeriodEnd, monthlyEquivalentFee, entriesPerLocation, billingInterval);
+  await activateBusinessSubscription(pool, businessId, subscription.id, customerId, priceId, currentPeriodEnd, monthlyFee, entriesPerLocation);
   invalidatePublicBusinessData();
 }
 
@@ -315,7 +319,8 @@ async function processStripeEvent(event: Stripe.Event, pool: Pool): Promise<void
         // ── Founding member one-time payment ────────────────────────────────
         if (session.mode === 'payment' && session.metadata?.founding === 'true') {
           const paymentIntentId = session.payment_intent as string;
-          await activateFoundingMember(pool, businessId, paymentIntentId, session.id);
+          const customerId = (session.customer as string | null) ?? null;
+          await activateFoundingMember(pool, businessId, paymentIntentId, session.id, customerId);
           invalidatePublicBusinessData();
           console.log(`[Stripe] Webhook activated founding member for business ${businessId}`);
           break;
@@ -408,6 +413,7 @@ async function activateFoundingMember(
   businessId: number,
   paymentIntentId: string,
   checkoutSessionId: string,
+  customerId: string | null = null,
 ): Promise<void> {
   // Idempotency guard
   const existing = await pool.query(
@@ -433,8 +439,8 @@ async function activateFoundingMember(
         ORDER BY s ASC
         LIMIT 1
       )
-      INSERT INTO founding_member (business_id, seat_number, stripe_payment_intent_id, stripe_checkout_session_id)
-      SELECT $1, seat_number, $2, $3
+      INSERT INTO founding_member (business_id, seat_number, stripe_payment_intent_id, stripe_checkout_session_id, amount_paid)
+      SELECT $1, seat_number, $2, $3, 1200.00
       FROM available_seat
       RETURNING seat_number
     `, [businessId, paymentIntentId, checkoutSessionId]);
@@ -456,15 +462,16 @@ async function activateFoundingMember(
     // One-time payment: no stripe_subscription_id; period ends in 1 year; top entry tier
     const periodEnd = new Date();
     periodEnd.setFullYear(periodEnd.getFullYear() + 1);
-    const monthlyEquivalent = Math.round(120000 / 12) / 100; // $83.33
+    const monthlyEquivalent = Math.round(120000 / 12) / 100; // $100.00 ($1,200 / 12)
 
     await client.query(`
       INSERT INTO subscription
         (business_id, stripe_customer_id, stripe_subscription_id, stripe_price_id,
          status, current_period_end, cancel_at_period_end, fee_at_entry, entries_per_location, billing_interval)
-      VALUES ($1, NULL, NULL, NULL, 'Active', $2, false, $3, 2500, 'yearly')
+      VALUES ($1, $4, NULL, NULL, 'Active', $2, false, $3, 1000, 'yearly')
       ON CONFLICT (business_id) DO UPDATE
         SET status               = 'Active',
+            stripe_customer_id   = COALESCE(EXCLUDED.stripe_customer_id, subscription.stripe_customer_id),
             stripe_subscription_id = NULL,
             current_period_end   = EXCLUDED.current_period_end,
             cancel_at_period_end = false,
@@ -472,8 +479,16 @@ async function activateFoundingMember(
             entries_per_location = 1000,
             billing_interval     = 'yearly',
             updated_at           = NOW()
-    `, [businessId, periodEnd, monthlyEquivalent]);
+    `, [businessId, periodEnd, monthlyEquivalent, customerId]);
 
+    // Append to the durable payment ledger. Unlike founding_member (one row per
+    // business, deleted on cancel), this is append-only so the plan page can show
+    // full history across cancel→repurchase cycles. ON CONFLICT keeps it idempotent.
+    await client.query(`
+      INSERT INTO founding_payment (business_id, stripe_payment_intent_id, stripe_checkout_session_id, amount)
+      VALUES ($1, $2, $3, 1200.00)
+      ON CONFLICT (stripe_payment_intent_id) DO NOTHING
+    `, [businessId, paymentIntentId, checkoutSessionId]);
 
     await client.query('COMMIT');
     console.log(`[Founding] subscription row upserted for business ${businessId} (seat #${seatNumber})`);
@@ -547,6 +562,13 @@ async function cancelFoundingMembership(
       refundAmount = refundCents / 100;
       // Always 50% of remaining time — never the full payment
       refundType = 'prorated';
+
+      // Record the refund on the ledger so the plan page shows net/refund state
+      // from the DB alone (no live Stripe call needed on every history load).
+      await pool.query(
+        `UPDATE founding_payment SET refunded_amount = refunded_amount + $1 WHERE stripe_payment_intent_id = $2`,
+        [refundAmount, paymentIntentId],
+      );
     }
   }
 
@@ -588,9 +610,8 @@ async function activateBusinessSubscription(
   customerId: string,
   priceId: string,
   currentPeriodEnd: Date,
-  monthlyEquivalentFee: number,
+  monthlyFee: number,
   entriesPerLocation: number,
-  billingInterval: 'monthly' | 'yearly' = 'monthly',
 ): Promise<void> {
   console.log(`[Stripe] Activating business ${businessId} — entries/location: ${entriesPerLocation}...`);
 
@@ -616,7 +637,7 @@ async function activateBusinessSubscription(
             entries_per_location   = EXCLUDED.entries_per_location,
             billing_interval       = EXCLUDED.billing_interval,
             updated_at             = NOW()
-    `, [businessId, customerId, subscriptionId, priceId, currentPeriodEnd, monthlyEquivalentFee, entriesPerLocation || null, billingInterval]);
+    `, [businessId, customerId, subscriptionId, priceId, currentPeriodEnd, monthlyFee, entriesPerLocation || null, 'monthly']);
 
     await client.query('COMMIT');
     console.log(`[Stripe] subscription row upserted for business ${businessId}`);
@@ -672,7 +693,6 @@ export const syncSubscriptionQuantity = async (userId: number, newLocationCount:
     SELECT
       s.stripe_subscription_id,
       s.stripe_customer_id,
-      s.billing_interval,
       s.entries_per_location,
       b.id AS business_id
     FROM business b
@@ -684,24 +704,20 @@ export const syncSubscriptionQuantity = async (userId: number, newLocationCount:
   if (!sub) return; // no subscription yet — nothing to sync
   if (!sub.stripe_subscription_id) return; // founding member, no Stripe sub — skip
 
-  const interval = sub.billing_interval as 'monthly' | 'yearly';
   const tierConfig = TIER_PRICE_MAP[sub.entries_per_location as number];
   if (!tierConfig) throw new Error('Unknown tier');
 
-  const envKey = tierConfig[interval].envKey;
-  const priceId = process.env[envKey];
-  if (!priceId) throw new Error(`Stripe price ID not configured for tier ${sub.entries_per_location} (${interval})`);
+  const priceId = process.env[tierConfig.envKey];
+  if (!priceId) throw new Error(`Stripe price ID not configured for tier ${sub.entries_per_location}`);
 
   const quantity = Math.max(1, newLocationCount);
-  const newFeePerLocation = tierConfig[interval].pricePerLocation;
-  // fee_at_entry always stores the monthly equivalent total (same convention as checkout)
-  const newTotalFee = interval === 'yearly'
-    ? (newFeePerLocation / 12) * quantity
-    : newFeePerLocation * quantity;
 
   const stripeSub = await stripe.subscriptions.retrieve(sub.stripe_subscription_id, { expand: ['items'] });
   const item = stripeSub.items.data[0];
   if (!item) throw new Error('Stripe subscription item not found');
+
+  // Price comes from the single TIER_PRICE_MAP constant (kept aligned to Stripe).
+  const newTotalFee = tierConfig.price * quantity;
 
   const changeLabel = reason === 'location_added'
     ? `You added a location. Your plan now covers ${quantity} location${quantity !== 1 ? 's' : ''}.`
@@ -762,7 +778,6 @@ export const updateSubscriptionPlan = async (userId: number, newEntriesPerLocati
     SELECT
       s.stripe_subscription_id,
       s.stripe_customer_id,
-      s.billing_interval,
       s.entries_per_location AS current_entries_per_location,
       s.status,
       b.id AS business_id,
@@ -778,17 +793,13 @@ export const updateSubscriptionPlan = async (userId: number, newEntriesPerLocati
   if (!sub.stripe_subscription_id) throw new Error('No Stripe subscription on record');
   if (sub.current_entries_per_location === newEntriesPerLocation) throw new Error('Already on this tier');
 
-  const interval = sub.billing_interval as 'monthly' | 'yearly';
-  const envKey = tierConfig[interval].envKey;
-  const priceId = process.env[envKey];
-  if (!priceId) throw new Error(`Stripe price ID not configured for tier ${newEntriesPerLocation} (${interval})`);
+  const priceId = process.env[tierConfig.envKey];
+  if (!priceId) throw new Error(`Stripe price ID not configured for tier ${newEntriesPerLocation}`);
 
   const locationCount = Math.max(1, Number(sub.location_count));
-  const newFeePerLocation = tierConfig[interval].pricePerLocation;
-  // fee_at_entry always stores the monthly equivalent total (same convention as checkout)
-  const newTotalFee = interval === 'yearly'
-    ? (newFeePerLocation / 12) * locationCount
-    : newFeePerLocation * locationCount;
+
+  // Price comes from the single TIER_PRICE_MAP constant (kept aligned to Stripe).
+  const newTotalFee = tierConfig.price * locationCount;
 
   // Fetch current Stripe subscription to get the item
   const stripeSub = await stripe.subscriptions.retrieve(sub.stripe_subscription_id, { expand: ['items'] });
@@ -833,12 +844,13 @@ export const updateSubscriptionPlan = async (userId: number, newEntriesPerLocati
     throw invoiceErr;
   }
 
-  // Step 3 — only update DB after Stripe confirms everything succeeded
+  // Step 3 — only update DB after Stripe confirms everything succeeded.
+  // stripe_price_id is updated too so the DB never drifts from the live Stripe price.
   await pool.query(
     `UPDATE subscription
-     SET entries_per_location = $1, fee_at_entry = $2, updated_at = NOW()
-     WHERE business_id = $3`,
-    [newEntriesPerLocation, newTotalFee, sub.business_id],
+     SET entries_per_location = $1, fee_at_entry = $2, stripe_price_id = $3, updated_at = NOW()
+     WHERE business_id = $4`,
+    [newEntriesPerLocation, newTotalFee, priceId, sub.business_id],
   );
 };
 
@@ -862,17 +874,65 @@ export interface SubscriptionInvoice {
   description: InvoiceLineItem[];
   invoice_pdf: string | null;
   hosted_invoice_url: string | null;
+  // 'founding' = one-time annual founding payment (render line text verbatim, not a
+  // per-location monthly breakdown). Absent for recurring subscription invoices.
+  kind?: 'founding';
 }
 
 export const getSubscriptionInvoices = async (userId: number): Promise<SubscriptionInvoice[]> => {
   const pool = getPool();
 
+  // Single round-trip: pull the customer id plus any founding payments at once.
+  // The founding ledger is append-only and records refunds when issued, so the
+  // history read is pure DB — no per-load Stripe call.
   const result = await pool.query(
-    `SELECT s.stripe_customer_id FROM subscription s JOIN business b ON b.id = s.business_id WHERE b.user_id = $1`,
+    `SELECT s.stripe_customer_id,
+            fp.stripe_payment_intent_id, fp.amount, fp.refunded_amount, fp.created_at
+     FROM subscription s
+     JOIN business b ON b.id = s.business_id
+     LEFT JOIN founding_payment fp ON fp.business_id = b.id
+     WHERE b.user_id = $1
+     ORDER BY fp.created_at DESC`,
     [userId],
   );
 
   const stripeCustomerId: string | null = result.rows[0]?.stripe_customer_id ?? null;
+
+  // Founding members pay once via PaymentIntent — Stripe never creates invoices for
+  // one-time payments, and founding_member is wiped on cancel. The founding_payment
+  // ledger is the source of truth for history.
+  const foundingRows = result.rows.filter(r => r.stripe_payment_intent_id);
+  if (foundingRows.length > 0) {
+    return foundingRows.map((row): SubscriptionInvoice => {
+        const grossDollars = Number(row.amount);
+        const refundedDollars = Number(row.refunded_amount);
+        const netPaidDollars = Math.max(0, grossDollars - refundedDollars);
+        const createdTs = Math.floor(new Date(row.created_at).getTime() / 1000);
+
+        const isFullRefund = refundedDollars > 0 && netPaidDollars === 0;
+        const isPartialRefund = refundedDollars > 0 && netPaidDollars > 0;
+        const status = isFullRefund ? 'void' : 'paid';
+        const lineDesc = isFullRefund
+          ? 'Founding Partner - Winnbell (refunded)'
+          : isPartialRefund
+            ? `Founding Partner - Winnbell (partial refund -$${refundedDollars.toFixed(2)})`
+            : 'Founding Partner - Winnbell';
+
+        return {
+          id: row.stripe_payment_intent_id,
+          date: createdTs,
+          amount_paid: netPaidDollars,
+          amount_due: grossDollars,
+          status,
+          invoice_description: null,
+          description: [{ description: lineDesc, quantity: 1, amount: grossDollars, period_start: undefined, period_end: undefined }],
+          invoice_pdf: null,
+          hosted_invoice_url: null,
+          kind: 'founding',
+        };
+      });
+  }
+
   if (!stripeCustomerId) return [];
 
   const invoiceList = await stripe.invoices.list({

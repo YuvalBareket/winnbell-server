@@ -130,7 +130,7 @@ describe('createCheckoutSession — 7-day campaign onboarding flag', () => {
     // January 29 — 2 days before Feb 1 → within 7-day window
     mockDateNow(nyDate(2026, 1, 29));
 
-    const res = await createCheckoutSession(42, 'owner@test.com', 250, 'monthly');
+    const res = await createCheckoutSession(42, 'owner@test.com', 250);
     expect(res.joinsNextCampaign).toBe(true);
     expect(res.url).toBe('https://checkout.stripe.com/test');
   });
@@ -139,7 +139,7 @@ describe('createCheckoutSession — 7-day campaign onboarding flag', () => {
     // January 25 — exactly 7 days before Feb 1 (daysUntilNext ≈ 7.0, which is <= 7)
     mockDateNow(nyDate(2026, 1, 25));
 
-    const res = await createCheckoutSession(42, 'owner@test.com', 250, 'monthly');
+    const res = await createCheckoutSession(42, 'owner@test.com', 250);
     expect(res.joinsNextCampaign).toBe(true);
   });
 
@@ -147,7 +147,7 @@ describe('createCheckoutSession — 7-day campaign onboarding flag', () => {
     // January 22 — 10 days before Feb 1 → outside 7-day window
     mockDateNow(nyDate(2026, 1, 22));
 
-    const res = await createCheckoutSession(42, 'owner@test.com', 250, 'monthly');
+    const res = await createCheckoutSession(42, 'owner@test.com', 250);
     expect(res.joinsNextCampaign).toBe(false);
     expect(res.nextCampaignDate).toBeNull();
   });
@@ -156,7 +156,7 @@ describe('createCheckoutSession — 7-day campaign onboarding flag', () => {
     // January 29 — flagged; the business joins the campaign starting March 1
     mockDateNow(nyDate(2026, 1, 29));
 
-    const res = await createCheckoutSession(42, 'owner@test.com', 250, 'monthly');
+    const res = await createCheckoutSession(42, 'owner@test.com', 250);
     expect(res.joinsNextCampaign).toBe(true);
     expect(res.nextCampaignDate).toMatch(/March/);
   });
@@ -165,7 +165,7 @@ describe('createCheckoutSession — 7-day campaign onboarding flag', () => {
     // January 31 — 1 day before Feb 1
     mockDateNow(nyDate(2026, 1, 31));
 
-    const res = await createCheckoutSession(42, 'owner@test.com', 250, 'monthly');
+    const res = await createCheckoutSession(42, 'owner@test.com', 250);
     expect(res.joinsNextCampaign).toBe(true);
   });
 
@@ -173,7 +173,7 @@ describe('createCheckoutSession — 7-day campaign onboarding flag', () => {
     // January 1 — 31 days before Feb 1 → well outside the 7-day window
     mockDateNow(nyDate(2026, 1, 1));
 
-    const res = await createCheckoutSession(42, 'owner@test.com', 250, 'monthly');
+    const res = await createCheckoutSession(42, 'owner@test.com', 250);
     expect(res.joinsNextCampaign).toBe(false);
   });
 
@@ -181,7 +181,7 @@ describe('createCheckoutSession — 7-day campaign onboarding flag', () => {
     // February 22, 2026 — 6 days before March 1 → within 7-day window
     mockDateNow(nyDate(2026, 2, 22));
 
-    const res = await createCheckoutSession(42, 'owner@test.com', 250, 'monthly');
+    const res = await createCheckoutSession(42, 'owner@test.com', 250);
     expect(res.joinsNextCampaign).toBe(true);
     expect(res.nextCampaignDate).toMatch(/April/);
   });
