@@ -75,13 +75,9 @@ export const login = async (req: Request, res: Response) => {
 
     const result = await authService.loginUser(email, password, inviteToken);
     res.status(200).json(result);
-  } catch (error: unknown) {
-    // Invite-link problems are not credential problems — tell the user what
-    // actually went wrong instead of "Invalid email or password"
-    if (error instanceof Error && error.message.includes('invitation')) {
-      res.status(400).json({ message: error.message });
-      return;
-    }
+  } catch {
+    // loginUser tolerates invite-token problems internally (it never throws them),
+    // so any error here is a genuine credential failure.
     res.status(401).json({ message: 'Invalid email or password' });
   }
 };
@@ -181,10 +177,8 @@ export const syncUser = async (req: Request, res: Response): Promise<void> => {
       res.status(403).json({ message: 'ACCOUNT_DELETED' });
       return;
     }
-    if (err instanceof Error && (err.message.includes('invitation') || err.name === 'TokenExpiredError' || err.name === 'JsonWebTokenError')) {
-      res.status(400).json({ message: 'This invitation link has expired or is invalid. Please ask the business owner to send you a new invitation.' });
-      return;
-    }
+    // syncExternalUser tolerates invite-token problems internally (it never
+    // re-throws them), so there is no invite-error branch to map here.
     console.error('Sync service error:', err instanceof Error ? err.message : err);
     res.status(500).json({ message: 'Server error' });
   }

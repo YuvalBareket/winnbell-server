@@ -1,5 +1,6 @@
 import { getPool } from '../../shared/db/db.js';
-import { publicCache, invalidatePublicBusinessData, getPlatformSettings } from '../../shared/cache/cache.js';
+import { publicCache, invalidatePublicBusinessData, getPlatformSettings, invalidateUserAuth } from '../../shared/cache/cache.js';
+import type { PoolClient } from 'pg';
 import crypto from 'crypto';
 import {
   AddLocationInput,
@@ -259,6 +260,24 @@ export const createManagerInviteLink = async (locationId: number, ownerUserId: n
   return `${baseUrl}/register/Location?token=${token}`;
 };
 
+// Demote a detached manager to a regular 'User' (unless they own a business or
+// still manage another location) and revoke all their sessions, so they are
+// thrown out and re-sync from the DB as a regular user on next sign-in. Assumes
+// the manager has already been detached from the relevant location in this tx.
+async function demoteFormerManager(client: PoolClient, managerId: number): Promise<void> {
+  await client.query(
+    `UPDATE "user" SET role = 'User'
+     WHERE id = $1
+       AND role != 'Admin'
+       AND NOT EXISTS (SELECT 1 FROM business WHERE user_id = $1)
+       AND NOT EXISTS (SELECT 1 FROM business_location WHERE manager_user_id = $1 AND is_active = TRUE)`,
+    [managerId],
+  );
+  // Revoke every refresh token so they cannot keep refreshing into a manager
+  // session; their next sign-in re-syncs their (now demoted) role from the DB.
+  await client.query(`DELETE FROM refresh_token WHERE user_id = $1`, [managerId]);
+}
+
 export const removeLocationManagerService = async (locationId: number, ownerUserId: number): Promise<void> => {
   const pool = getPool();
 
@@ -278,18 +297,10 @@ export const removeLocationManagerService = async (locationId: number, ownerUser
   try {
     await client.query('BEGIN');
     await client.query(`UPDATE business_location SET manager_user_id = NULL WHERE id = $1`, [locationId]);
-    // Demote to 'User' only when they have no other Business-role reason to keep it:
-    // not a business owner, and not managing any other location
-    await client.query(
-      `UPDATE "user" SET role = 'User'
-       WHERE id = $1
-         AND role != 'Admin'
-         AND NOT EXISTS (SELECT 1 FROM business WHERE user_id = $1)
-         AND NOT EXISTS (SELECT 1 FROM business_location WHERE manager_user_id = $1)`,
-      [managerId],
-    );
+    await demoteFormerManager(client, managerId);
     await client.query('COMMIT');
     invalidatePublicBusinessData();
+    invalidateUserAuth(managerId);
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
@@ -364,10 +375,25 @@ export const deleteBusinessLocation = async (locationId: number, ownerUserId: nu
 
   if (ownerCheck.rows.length === 0) throw new Error('UNAUTHORIZED_OR_INVALID_LOCATION');
 
-  await pool.query(`UPDATE business_location SET is_active = false WHERE id = $1`, [locationId]);
+  const managerId: number | null = ownerCheck.rows[0].manager_user_id ?? null;
 
-  invalidatePublicBusinessData();
-  publicCache.del('business:location:' + locationId);
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // Soft-delete the location and detach its manager so the demotion check below
+    // does not still see this location as one they manage.
+    await client.query(`UPDATE business_location SET is_active = false, manager_user_id = NULL WHERE id = $1`, [locationId]);
+    if (managerId) await demoteFormerManager(client, managerId);
+    await client.query('COMMIT');
+    invalidatePublicBusinessData();
+    publicCache.del('business:location:' + locationId);
+    if (managerId) invalidateUserAuth(managerId);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
 };
 
 export const updateBusinessLogo = async (ownerUserId: number, logoUrl: string): Promise<void> => {

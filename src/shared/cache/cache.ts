@@ -52,7 +52,10 @@ export const invalidatePublicBusinessData = (): void => {
   if (keys.length) publicCache.del(keys);
 };
 
-/** Invalidate a specific user's guard cache entry (is_active, is_phone_verified). */
+/** Invalidate a user's cached auth state (is_active/is_phone_verified guard AND
+ *  the role/manager-status used to detect stale elevated sessions). Called on
+ *  role changes (manager removal), password reset, deletion, etc. */
 export const invalidateUserAuth = (userId: number): void => {
   userCache.del(`user:guard:${userId}`);
+  userCache.del(`user:role:${userId}`);
 };

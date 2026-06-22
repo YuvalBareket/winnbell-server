@@ -86,6 +86,33 @@ async function getGuardData(userId: number, res: Response): Promise<GuardData | 
   }
 }
 
+// Cached current role + whether the user still actively manages a location.
+// Used to detect stale elevated sessions (e.g. a manager removed from a location
+// whose 1h JWT still claims Business + location_id).
+type RoleState = { role: string; hasActiveManagedLocation: boolean };
+
+async function getRoleState(userId: number): Promise<RoleState | null> {
+  const cacheKey = `user:role:${userId}`;
+  const cached = userCache.get<RoleState>(cacheKey);
+  if (cached) return cached;
+
+  try {
+    const pool = getPool();
+    const result = await pool.query(
+      `SELECT u.role,
+              EXISTS (SELECT 1 FROM business_location WHERE manager_user_id = $1 AND is_active = TRUE) AS has_loc
+       FROM "user" u WHERE u.id = $1`,
+      [userId],
+    );
+    if (result.rows.length === 0) return null;
+    const state: RoleState = { role: result.rows[0].role, hasActiveManagedLocation: result.rows[0].has_loc === true };
+    userCache.set(cacheKey, state);
+    return state;
+  } catch {
+    return null; // fail open on transient DB errors; mutation guards still apply
+  }
+}
+
 export const requireRole = (...roles: string[]) =>
   (req: AuthRequest, res: Response, next: NextFunction): void => {
     if (!req.user || !roles.includes(req.user.role)) {
@@ -114,6 +141,25 @@ export const authenticateToken = async (
     const jwtSecret = process.env.JWT_SECRET;
     if (!jwtSecret) throw new Error('JWT_SECRET is not configured');
     const decoded = jwt.verify(token, jwtSecret) as UserPayload;
+
+    // Detect stale elevated sessions. Only business/manager tokens pay the (cached)
+    // DB lookup; regular-user tokens pass straight through. If the token claims a
+    // privileged role or a managed location that the DB no longer backs (e.g. the
+    // manager was removed), reject so the client refreshes -> refresh token was
+    // revoked -> hard logout and re-login as a regular user.
+    if (decoded.role !== 'Admin' && (decoded.role === 'Business' || decoded.location_id != null)) {
+      const fresh = await getRoleState(decoded.id);
+      if (fresh) {
+        const roleMatches = fresh.role === decoded.role;
+        const locationStillValid = decoded.location_id == null || fresh.hasActiveManagedLocation;
+        if (!roleMatches || !locationStillValid) {
+          console.info(`[auth] stale elevated session rejected: userId=${decoded.id} tokenRole=${decoded.role} dbRole=${fresh.role} tokenLoc=${decoded.location_id ?? 'none'} hasLoc=${fresh.hasActiveManagedLocation}`);
+          res.status(401).json({ message: 'Session no longer valid. Please sign in again.' });
+          return;
+        }
+      }
+    }
+
     req.user = decoded;
     next();
   } catch (error) {

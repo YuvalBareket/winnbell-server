@@ -155,7 +155,7 @@ export const registerUser = async (
           const locResult = await client.query(
             `UPDATE business_location
              SET manager_user_id = $1, invite_used_at = NOW(), invite_token_hash = NULL
-             WHERE id = $2 AND invite_token_hash = $3 AND invite_used_at IS NULL
+             WHERE id = $2 AND invite_token_hash = $3 AND invite_used_at IS NULL AND is_active = TRUE
              RETURNING id`,
             [newUser.id, locationId, tokenHash],
           );
@@ -238,9 +238,11 @@ export const loginUser = async (
   if (!isMatch) throw new Error('Invalid credentials');
 
   let locationId: number | null = null;
+  let inviteApplied = false;
 
   if (inviteToken) {
     const client = await pool.connect();
+    let transactionStarted = false;
     try {
       const decoded = jwt.verify(
         inviteToken,
@@ -248,39 +250,46 @@ export const loginUser = async (
       ) as ManagerInvitePayload;
       if (decoded.type === 'MANAGER_INVITE' && decoded.locationId) {
         await client.query('BEGIN');
+        transactionStarted = true;
 
-        // Single-use enforcement
+        // Single-use enforcement (and the location must still be active)
         const tokenHash = crypto.createHash('sha256').update(inviteToken).digest('hex');
         const updateResult = await client.query(
           `UPDATE business_location
            SET manager_user_id = $1, invite_used_at = NOW(), invite_token_hash = NULL
-           WHERE id = $2 AND invite_token_hash = $3 AND invite_used_at IS NULL
+           WHERE id = $2 AND invite_token_hash = $3 AND invite_used_at IS NULL AND is_active = TRUE
            RETURNING id`,
           [user.id, decoded.locationId, tokenHash],
         );
-        if (updateResult.rowCount === 0) throw new Error('Invalid or already-used invitation link');
-
-        await client.query(
-          `UPDATE "user" SET role = 'Business' WHERE id = $1`,
-          [user.id],
-        );
-        await client.query('COMMIT');
-        invalidateUserAuth(user.id);
-        user.role = 'Business';
-        locationId = decoded.locationId;
+        if (updateResult.rowCount && updateResult.rowCount > 0) {
+          await client.query(
+            `UPDATE "user" SET role = 'Business' WHERE id = $1`,
+            [user.id],
+          );
+          await client.query('COMMIT');
+          invalidateUserAuth(user.id);
+          user.role = 'Business';
+          locationId = decoded.locationId;
+          inviteApplied = true;
+        } else {
+          await client.query('ROLLBACK');
+        }
       }
     } catch (err: unknown) {
-      try { await client.query('ROLLBACK'); } catch { /* ignore */ }
-      if (err instanceof Error && (err.name === 'TokenExpiredError' || err.name === 'JsonWebTokenError')) {
-        throw new Error('This invitation link has expired or is invalid. Please ask the business owner to send you a new invitation.');
+      if (transactionStarted) {
+        try { await client.query('ROLLBACK'); } catch { /* ignore */ }
       }
-      if (err instanceof Error) throw err;
+      // A stale/used/expired invite token must not block sign-in; ignore it and
+      // log the user in with their current role (mirrors syncExternalUser).
+      console.error('Invite token ignored during login:', err instanceof Error ? err.message : err);
     } finally {
       client.release();
     }
-  } else {
+  }
+
+  if (!inviteApplied) {
     const locResult = await pool.query(
-      `SELECT id FROM business_location WHERE manager_user_id = $1`,
+      `SELECT id FROM business_location WHERE manager_user_id = $1 AND is_active = TRUE`,
       [user.id],
     );
     if (locResult.rows.length > 0) {
@@ -404,6 +413,7 @@ export const syncExternalUser = async (
     );
     const dbUser = upsertResult.rows[0];
 
+    let inviteApplied = false;
     if (inviteToken) {
       try {
         const decoded = jwt.verify(
@@ -412,32 +422,38 @@ export const syncExternalUser = async (
         ) as ManagerInvitePayload;
 
         if (decoded.type === 'MANAGER_INVITE' && decoded.locationId) {
-          locationId = decoded.locationId;
-
-          // Single-use enforcement
+          // Single-use enforcement (and the location must still be active)
           const tokenHash = crypto.createHash('sha256').update(inviteToken).digest('hex');
           const updateResult = await client.query(
             `UPDATE business_location
              SET manager_user_id = $1, invite_used_at = NOW(), invite_token_hash = NULL
-             WHERE id = $2 AND invite_token_hash = $3 AND invite_used_at IS NULL
+             WHERE id = $2 AND invite_token_hash = $3 AND invite_used_at IS NULL AND is_active = TRUE
              RETURNING id`,
-            [dbUser.id, locationId, tokenHash],
+            [dbUser.id, decoded.locationId, tokenHash],
           );
-          if (updateResult.rowCount === 0) throw new Error('Invalid or already-used invitation link');
-
-          await client.query(
-            `UPDATE "user" SET role = 'Business' WHERE id = $1`,
-            [dbUser.id],
-          );
-          dbUser.role = 'Business';
+          if (updateResult.rowCount && updateResult.rowCount > 0) {
+            locationId = decoded.locationId;
+            await client.query(
+              `UPDATE "user" SET role = 'Business' WHERE id = $1`,
+              [dbUser.id],
+            );
+            dbUser.role = 'Business';
+            inviteApplied = true;
+          }
         }
       } catch (tokenErr: unknown) {
-        console.error('Invite token processing failed during sync:', tokenErr instanceof Error ? tokenErr.message : tokenErr);
-        throw tokenErr; // propagate so the caller gets a 4xx instead of silently succeeding
+        // A stale/used/expired invite token must NOT block sign-in. A former
+        // manager (or anyone with a leftover token) just logs in with their
+        // current role; we ignore the bad invite instead of throwing.
+        console.error('Invite token ignored during sync:', tokenErr instanceof Error ? tokenErr.message : tokenErr);
       }
-    } else {
+    }
+
+    if (!inviteApplied) {
+      // Resolve the user's location only from a location they still actively
+      // manage, so a removed/soft-deleted location never grants manager access.
       const locResult = await client.query(
-        `SELECT id FROM business_location WHERE manager_user_id = $1`,
+        `SELECT id FROM business_location WHERE manager_user_id = $1 AND is_active = TRUE`,
         [dbUser.id],
       );
       if (locResult.rows.length > 0) {

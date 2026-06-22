@@ -261,19 +261,22 @@ describe('loginUser', () => {
     expect(res.user.location_id).toBe(12);
   });
 
-  test('throws "Invalid or already-used invitation link" when invite already used during login', async () => {
+  test('ignores an already-used invite token during login and signs in with current role', async () => {
     const hash = makePasswordHash('pass');
     const token = makeInviteToken(12);
     setupPoolQueries(
-      { rows: [{ id: 31, email: 'mgr2@test.com', password_hash: hash, full_name: 'Mgr2', role: 'User' }] },
+      { rows: [{ id: 31, email: 'mgr2@test.com', password_hash: hash, full_name: 'Mgr2', role: 'User' }] }, // user SELECT
+      { rows: [] }, // location lookup — no active managed location
+      { rows: [] }, // INSERT refresh_token
     );
     setupClientQueries(
       { rows: [] },                         // BEGIN
-      { rows: [], rowCount: 0 },            // UPDATE biz_loc — already used → rowCount 0
+      { rows: [], rowCount: 0 },            // UPDATE biz_loc — already used → rowCount 0 (invite ignored)
+      { rows: [] },                         // ROLLBACK
     );
-    await expect(loginUser('mgr2@test.com', 'pass', token)).rejects.toThrow(
-      'Invalid or already-used invitation link',
-    );
+    const res = await loginUser('mgr2@test.com', 'pass', token);
+    expect(res.user.role).toBe('User');
+    expect(res.user.location_id).toBeNull();
   });
 });
 
@@ -324,17 +327,20 @@ describe('syncExternalUser', () => {
     expect(res.user.location_id).toBe(20);
   });
 
-  test('throws "Invalid or already-used invitation link" when invite already consumed', async () => {
+  test('ignores an already-used invite token and signs in with the existing role', async () => {
     const token = makeInviteToken(20);
     setupClientQueries(
-      { rows: [] },
-      { rows: [] },  // deletedCheck
-      { rows: [{ id: 51, role: 'User', fullName: 'Dup', email: 'dup@sync.com' }] },
-      { rows: [], rowCount: 0 }, // UPDATE biz_loc — already used
+      { rows: [] },                                                                  // BEGIN
+      { rows: [] },                                                                  // deletedCheck
+      { rows: [{ id: 51, role: 'User', fullName: 'Dup', email: 'dup@sync.com' }] },  // upsert
+      { rows: [], rowCount: 0 },                                                     // UPDATE biz_loc — already used (invite ignored)
+      { rows: [] },                                                                  // SELECT active managed location — none
+      { rows: [] },                                                                  // INSERT refresh_token
+      { rows: [] },                                                                  // COMMIT
     );
-    await expect(
-      syncExternalUser('ext_004', 'dup@sync.com', 'Dup', { inviteToken: token }),
-    ).rejects.toThrow('Invalid or already-used invitation link');
+    const res = await syncExternalUser('ext_004', 'dup@sync.com', 'Dup', { inviteToken: token });
+    expect(res.user.role).toBe('User');
+    expect(res.user.location_id).toBeNull();
   });
 
   test('requiresBusinessSetup is true for Business user with no location and no business row', async () => {
