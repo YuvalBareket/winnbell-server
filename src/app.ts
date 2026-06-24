@@ -25,6 +25,8 @@ import { getFoundingAvailability } from './features/stripe/stripe.controller.js'
 
 import { authenticateToken } from './shared/middleware/auth.middleware.js';
 import { getClientIp } from './shared/clientIp.js';
+import { makeRateLimitStore } from './shared/rateLimitStore.js';
+import { captureError } from './shared/monitoring.js';
 
 const app = express();
 
@@ -52,6 +54,7 @@ const authLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: getClientIp,
+  store: makeRateLimitStore('auth'),
   message: { message: 'Too many requests, please try again later.' },
 });
 
@@ -63,6 +66,7 @@ const registrationLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: getClientIp,
+  store: makeRateLimitStore('registration'),
   message: { message: 'Too many registration attempts from this IP. Please try again later.' },
 });
 
@@ -72,6 +76,7 @@ const ticketsLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req: any) => req.user?.id?.toString(),
+  store: makeRateLimitStore('tickets'),
   message: { message: 'Too many requests, please slow down.' },
 });
 
@@ -81,6 +86,7 @@ const publicLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: getClientIp,
+  store: makeRateLimitStore('public'),
   message: { message: 'Too many requests, please slow down.' },
 });
 
@@ -92,6 +98,7 @@ const otpLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: getClientIp,
+  store: makeRateLimitStore('otp'),
   message: { message: 'Too many verification requests from this device. Please try again later.' },
 });
 
@@ -141,8 +148,10 @@ app.use('/phone/send-otp', otpLimiter);
 app.use('/phone', phoneRouter);
 
 // Global error handler — prevents stack traces and file paths from leaking to clients
-app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
   console.error(err);
+  // Report to Sentry with request context (no-op unless SENTRY_DSN is set)
+  captureError(err, { method: req.method, url: req.originalUrl, userId: (req as any).user?.id });
   res.status(500).json({ message: 'Internal server error' });
 });
 

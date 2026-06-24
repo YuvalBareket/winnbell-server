@@ -3,6 +3,7 @@ import { connectDB } from './shared/db/db.js';
 import app from './app.js';
 import { recoverStaleOcrJobs } from './features/ocr/ocr.service.js';
 import { cleanupExpiredRefreshTokens } from './features/auth/auth.service.js';
+import { initMonitoring } from './shared/monitoring.js';
 
 const PORT = process.env.PORT || 3000;
 
@@ -17,6 +18,9 @@ for (const key of REQUIRED_ENV) {
 
 const startServer = async () => {
   try {
+    // Error monitoring first, so any startup failure is captured (no-op without SENTRY_DSN)
+    initMonitoring();
+
     // 2. Connect to Database
     await connectDB();
 
