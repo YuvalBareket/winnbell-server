@@ -96,6 +96,8 @@ export interface ParticipatingLocation {
   website_url: string | null;
   other_locations: Array<{ id: number; name: string; address: string }>;
   cap_reached?: boolean;
+  draw_prize_amount?: number | null;
+  draw_date?: string | null;
 }
 
 export type AddressSuggestion = {

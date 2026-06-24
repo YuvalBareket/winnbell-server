@@ -506,7 +506,7 @@ export const getParticipatingLocationByIdService = async (locationId: number): P
   const pool = getPool();
   const result = await pool.query(
     `WITH open_draw AS (
-      SELECT id FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1
+      SELECT id, prize_pool, draw_date FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1
     )
     SELECT
       bl.id AS location_id,
@@ -536,7 +536,9 @@ export const getParticipatingLocationByIdService = async (locationId: number): P
           AND t.location_id = bl.id
           AND t.draw_id = (SELECT id FROM open_draw)
           AND t.is_quarantined = FALSE
-      ) >= COALESCE(s.entries_per_location, (SELECT global_entry_cap FROM platform_settings WHERE id = 1)) AS cap_reached
+      ) >= COALESCE(s.entries_per_location, (SELECT global_entry_cap FROM platform_settings WHERE id = 1)) AS cap_reached,
+      (SELECT prize_pool FROM open_draw) AS draw_prize_amount,
+      (SELECT draw_date FROM open_draw) AS draw_date
     FROM business_location bl
     JOIN business b ON bl.business_id = b.id
     JOIN subscription s ON s.business_id = b.id AND s.status IN ('Active', 'Trialing')
