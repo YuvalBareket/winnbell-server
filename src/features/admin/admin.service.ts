@@ -49,17 +49,13 @@ export const getBusinessesWithStats = async (params: {
         s.current_period_end,
         s.fee_at_entry,
         COALESCE(loc.location_count, 0) AS location_count,
-        COALESCE(t.total_activated, 0) AS total_activated
+        (SELECT COUNT(*)::int FROM ticket WHERE business_id = b.id AND status = 'Activated') AS total_activated
       FROM business b
       LEFT JOIN "user" u ON b.user_id = u.id
       LEFT JOIN subscription s ON s.business_id = b.id
       LEFT JOIN (
         SELECT business_id, COUNT(*) AS location_count FROM business_location GROUP BY business_id
       ) loc ON loc.business_id = b.id
-      LEFT JOIN (
-        SELECT business_id, SUM(CASE WHEN UPPER(status::text) = 'ACTIVATED' THEN 1 ELSE 0 END) AS total_activated
-        FROM ticket GROUP BY business_id
-      ) t ON t.business_id = b.id
       ${where}
       ORDER BY b.name ASC
       LIMIT $${idx} OFFSET $${idx + 1}
@@ -136,14 +132,8 @@ export const getAllDrawsService = async () => {
       d.winner_ticket_id,
       d.winner_confirmed,
       array_length(d.rejected_ticket_ids, 1) AS rejected_count,
-      COALESCE(t.entry_count, 0) AS entry_count
+      (SELECT COUNT(*)::int FROM ticket WHERE draw_id = d.id AND status = 'Activated') AS entry_count
     FROM draw d
-    LEFT JOIN (
-      SELECT draw_id, COUNT(*) AS entry_count
-      FROM ticket
-      WHERE UPPER(status::text) = 'ACTIVATED'
-      GROUP BY draw_id
-    ) t ON t.draw_id = d.id
     ORDER BY d.draw_date DESC
   `);
   return result.rows;
@@ -692,9 +682,9 @@ export const getAdminOverviewService = async () => {
   const [usersRes, bizRes, subRes, drawRes, ticketRes, flaggedRes] = await Promise.all([
     pool.query(`SELECT COUNT(*) AS total_users, SUM(CASE WHEN role='Business' THEN 1 ELSE 0 END) AS business_users, SUM(CASE WHEN role='User' THEN 1 ELSE 0 END) AS regular_users FROM "user" WHERE role != 'Admin'`),
     pool.query(`SELECT COUNT(DISTINCT b.id) AS total, COUNT(DISTINCT s.business_id) AS active FROM business b LEFT JOIN subscription s ON s.business_id = b.id AND s.status IN ('Active', 'Trialing')`),
-    pool.query(`SELECT COUNT(*) AS active_subs, COALESCE(SUM(fee_at_entry), 0) AS total_fees FROM subscription WHERE UPPER(status::text) = 'ACTIVE'`),
-    pool.query(`SELECT id, name, prize_pool, draw_date FROM draw WHERE UPPER(status::text)='OPEN' ORDER BY draw_date ASC LIMIT 1`),
-    pool.query(`SELECT COUNT(*) AS total_tickets, SUM(CASE WHEN UPPER(status::text)='ACTIVATED' THEN 1 ELSE 0 END) AS activated FROM ticket WHERE draw_id=(SELECT id FROM draw WHERE UPPER(status::text)='OPEN' ORDER BY draw_date ASC LIMIT 1)`),
+    pool.query(`SELECT COUNT(*) AS active_subs, COALESCE(SUM(fee_at_entry), 0) AS total_fees FROM subscription WHERE status = 'Active'`),
+    pool.query(`SELECT id, name, prize_pool, draw_date FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1`),
+    pool.query(`SELECT COUNT(*) AS total_tickets, SUM(CASE WHEN status = 'Activated' THEN 1 ELSE 0 END) AS activated FROM ticket WHERE draw_id=(SELECT id FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1)`),
     pool.query(`SELECT COUNT(*) AS flagged_users FROM "user" WHERE risk_score >= 20 AND role != 'Admin'`),
   ]);
 
@@ -752,7 +742,7 @@ export const getAllUsersService = async (params: {
           u.risk_score, u.risk_last_flagged_at,
           b.id AS business_id, b.name AS business_name, (s2.status IN ('Active', 'Trialing')) AS business_active,
           (SELECT COUNT(*) FROM ticket t WHERE t.activated_by_user_id = u.id AND t.status = 'Activated'
-           AND t.draw_id = (SELECT id FROM draw WHERE UPPER(status::text)='OPEN' ORDER BY draw_date ASC LIMIT 1)
+           AND t.draw_id = (SELECT id FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1)
           ) AS entry_count,
           (SELECT MAX(t2.activated_at) FROM ticket t2 WHERE t2.activated_by_user_id = u.id) AS last_active_at
        FROM "user" u
@@ -1071,7 +1061,7 @@ export const getEntryVolumeService = async (drawId?: number, businessId?: number
        DATE_TRUNC('day', activated_at)::date AS date,
        COUNT(*) AS count
      FROM ticket
-     WHERE UPPER(status::text) = 'ACTIVATED'
+     WHERE status = 'Activated'
        AND activated_at IS NOT NULL
        AND ($1::int IS NULL OR draw_id = $1)
        AND ($2::int IS NULL OR business_id = $2)
@@ -1094,16 +1084,10 @@ export const getCampaignComparisonService = async () => {
       d.status,
       d.prize_pool AS prize_amount,
       d.draw_date,
-      COALESCE(t.total_entries, 0) AS total_entries,
-      COALESCE(t.quarantined, 0) AS quarantined,
+      (SELECT COUNT(*)::int FROM ticket WHERE draw_id = d.id AND status = 'Activated') AS total_entries,
+      (SELECT COUNT(*)::int FROM ticket WHERE draw_id = d.id AND is_quarantined = TRUE) AS quarantined,
       COALESCE(de.business_count, 0) AS business_count
     FROM draw d
-    LEFT JOIN (
-      SELECT draw_id,
-        COUNT(*) FILTER (WHERE UPPER(status::text) = 'ACTIVATED') AS total_entries,
-        COUNT(*) FILTER (WHERE is_quarantined = TRUE) AS quarantined
-      FROM ticket GROUP BY draw_id
-    ) t ON t.draw_id = d.id
     LEFT JOIN (
       SELECT draw_id, COUNT(*) AS business_count FROM draw_entry GROUP BY draw_id
     ) de ON de.draw_id = d.id
