@@ -299,33 +299,21 @@ export const activateFreeTicket = async (userId: number, claimIp?: string): Prom
 
     const lastUsage = eligibilityResult.rows[0];
 
+    // Rejected attempts are NOT recorded — the user just gets the error and can retry once
+    // the reason is resolved. Only an approved claim is stored (one row per user, below).
+
     // Guard 1: email must be verified (blocks throwaway email accounts)
     if (lastUsage && !lastUsage.is_email_verified) {
-      await client.query(
-        `INSERT INTO free_ticket_usage (user_id, status, rejection_reason, entries_created) VALUES ($1, 'rejected', 'email_not_verified', 0)`,
-        [userId]
-      );
-      await client.query('COMMIT');
       throw new Error('Please verify your email address before claiming a free entry.');
     }
 
     // Guard 1b: phone must be verified (ties free entry to a real person)
     if (lastUsage && !lastUsage.is_phone_verified && process.env.PHONE_VERIFY_ENABLED === 'true') {
-      await client.query(
-        `INSERT INTO free_ticket_usage (user_id, status, rejection_reason, entries_created) VALUES ($1, 'rejected', 'phone_not_verified', 0)`,
-        [userId]
-      );
-      await client.query('COMMIT');
       throw new Error('PHONE_NOT_VERIFIED');
     }
 
     // Guard 2: weekly usage check (1 free entry per user per week, ET week boundary computed above)
     if (lastUsage?.used_this_week) {
-      await client.query(
-        `INSERT INTO free_ticket_usage (user_id, status, rejection_reason, entries_created) VALUES ($1, 'rejected', 'weekly_limit_reached', 0)`,
-        [userId]
-      );
-      await client.query('COMMIT');
       throw new Error('Weekly limit reached. Please wait until your next available date.');
     }
 
@@ -336,11 +324,6 @@ export const activateFreeTicket = async (userId: number, claimIp?: string): Prom
 
     const activeDrawId = drawResult.rows[0]?.id;
     if (!activeDrawId) {
-      await client.query(
-        `INSERT INTO free_ticket_usage (user_id, status, rejection_reason, entries_created) VALUES ($1, 'rejected', 'campaign_ended', 0)`,
-        [userId]
-      );
-      await client.query('COMMIT');
       throw new Error('No active campaign found. Please try again later.');
     }
 
@@ -351,16 +334,22 @@ export const activateFreeTicket = async (userId: number, claimIp?: string): Prom
       [userId, activeDrawId],
     );
     if (parseInt(drawCapResult.rows[0].total_count, 10) >= 30) {
-      await client.query(
-        `INSERT INTO free_ticket_usage (user_id, draw_id, status, rejection_reason, entries_created) VALUES ($1, $2, 'rejected', 'draw_cap_reached', 0)`,
-        [userId, activeDrawId],
-      );
-      await client.query('COMMIT');
       throw new Error('You have reached the maximum of 30 entries for this draw.');
     }
 
+    // One row per user: insert on first-ever claim, otherwise update the approved date.
+    // The weekly check only needs the latest approved timestamp, so this single row is
+    // all that matters — and the table stays bounded to one row per user forever.
     await client.query(
-      `INSERT INTO free_ticket_usage (user_id, draw_id, claim_ip, status, entries_created) VALUES ($1, $2, $3, 'approved', 1)`,
+      `INSERT INTO free_ticket_usage (user_id, draw_id, claim_ip, status, entries_created)
+       VALUES ($1, $2, $3, 'approved', 1)
+       ON CONFLICT (user_id) DO UPDATE
+         SET draw_id          = EXCLUDED.draw_id,
+             claim_ip         = EXCLUDED.claim_ip,
+             status           = 'approved',
+             entries_created  = 1,
+             rejection_reason = NULL,
+             activated_at     = NOW()`,
       [userId, activeDrawId, claimIp ?? null]
     );
 

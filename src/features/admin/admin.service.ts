@@ -916,7 +916,6 @@ export const getAdminAnalyticsService = async (businessId?: number, drawId?: num
 
   const [
     entrySrcRes,
-    amoeRes,
     fraudRes,
     quarantineRes,
     quarantineReasonsRes,
@@ -931,18 +930,9 @@ export const getAdminAnalyticsService = async (businessId?: number, drawId?: num
        GROUP BY entry_source`,
       [biz, draw],
     ),
-    // AMOE: filter by draw_id when provided
-    pool.query(
-      `SELECT
-         COUNT(*) AS total_requests,
-         SUM(CASE WHEN status = 'approved' THEN 1 ELSE 0 END) AS approved,
-         SUM(CASE WHEN status = 'rejected' THEN 1 ELSE 0 END) AS rejected,
-         SUM(CASE WHEN rejection_reason = 'weekly_limit_reached' THEN 1 ELSE 0 END) AS weekly_limit_count,
-         SUM(CASE WHEN rejection_reason = 'campaign_ended' THEN 1 ELSE 0 END) AS campaign_ended_count
-       FROM free_ticket_usage
-       WHERE ($1::int IS NULL OR draw_id = $1)`,
-      [draw],
-    ),
+    // Free/AMOE entry counts come from the ticket table (entry_source='free') via
+    // entrySourceMix below. free_ticket_usage is now a one-row-per-user eligibility
+    // tracker (no rejected rows), so it is no longer queried for analytics.
     pool.query(
       `SELECT
          SUM(CASE WHEN u.risk_score >= 20 THEN 1 ELSE 0 END) AS high_risk,
@@ -1026,13 +1016,6 @@ export const getAdminAnalyticsService = async (businessId?: number, drawId?: num
       free: entrySrcMap['free'] ?? 0,
       promo: entrySrcMap['promo'] ?? 0,
       total: entryTotal,
-    },
-    amoe: {
-      total_requests: parseInt(amoeRes.rows[0].total_requests) || 0,
-      approved: parseInt(amoeRes.rows[0].approved) || 0,
-      rejected: parseInt(amoeRes.rows[0].rejected) || 0,
-      weekly_limit_count: parseInt(amoeRes.rows[0].weekly_limit_count) || 0,
-      campaign_ended_count: parseInt(amoeRes.rows[0].campaign_ended_count) || 0,
     },
     fraud: {
       high_risk: parseInt(fraudRes.rows[0].high_risk) || 0,
