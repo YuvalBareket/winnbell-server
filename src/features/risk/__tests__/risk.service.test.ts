@@ -300,7 +300,7 @@ describe('Trash Picker — velocity + rapid both fire', () => {
 // ─────────────────────────────────────────────────────────────────────────────
 // 6. decayAllUserRiskScores — campaign-close bulk decay
 // Tiered: HIGH (≥20) → −4, MEDIUM (10–19) → −2, LOW (1–9) → −1
-// Score 0 is unchanged (WHERE risk_score > 0 guard)
+// Only users with score > 5 are decayed (WHERE risk_score > 5 guard)
 // ─────────────────────────────────────────────────────────────────────────────
 import { decayAllUserRiskScores } from '../risk.service';
 
@@ -312,12 +312,12 @@ describe('decayAllUserRiskScores — campaign-close bulk decay', () => {
 
     expect(result).toEqual({ updated: 42, unquarantinedUserIds: [] });
     expect(mockQuery).toHaveBeenCalledTimes(1);
-    // Verify the UPDATE targets only users with risk_score > 0
+    // Verify the UPDATE targets only users with risk_score > 5
     const [sql] = mockQuery.mock.calls[0] as [string];
-    expect(sql).toMatch(/WHERE risk_score > 0/);
+    expect(sql).toMatch(/WHERE risk_score > 5/);
   });
 
-  test('returns { updated: 0 } when no users have a score above 0', async () => {
+  test('returns { updated: 0 } when no users have a score above 5', async () => {
     mockQuery.mockResolvedValueOnce({ rowCount: 0, rows: [] });
 
     const result = await decayAllUserRiskScores();

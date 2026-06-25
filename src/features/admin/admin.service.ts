@@ -467,7 +467,7 @@ export const pickDrawWinnerService = async (drawId: number, applyPenalty = false
         [rejectedIds, drawId],
       );
       if (prevUserId !== null) {
-        const penalty = applyPenalty ? 10 : 0;
+        const penalty = applyPenalty ? 12 : 0;
         // Always quarantine the rejected ticket - the entry is invalid regardless of penalty
         await client.query(
           `UPDATE ticket SET is_quarantined = TRUE, quarantine_reason = 'admin_rejected_winner', quarantined_at = NOW() WHERE id = $1`,
@@ -645,8 +645,18 @@ export const confirmWinnerService = async (drawId: number): Promise<{
     try {
       const { unquarantinedUserIds } = await decayAllUserRiskScores();
       if (unquarantinedUserIds.length > 0) {
-        const { syncUserQuarantineState } = await import('../risk/risk.service.js');
-        await Promise.all(unquarantinedUserIds.map((uid) => syncUserQuarantineState(uid, drawId)));
+        // The just-confirmed draw is over, so its quarantine state is irrelevant. Re-validate
+        // these now-lower-risk users' entries ONLY in the current open draw (freshly opened, so
+        // very few tickets), in ONE bulk query instead of one call per user (pool-safe at scale).
+        // If no draw is open, the subquery is NULL and zero rows match (safe no-op).
+        await getPool().query(
+          `UPDATE ticket SET is_quarantined = FALSE, quarantine_reason = NULL, quarantined_at = NULL
+           WHERE draw_id = (SELECT id FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1)
+             AND activated_by_user_id = ANY($1::int[])
+             AND is_quarantined = TRUE
+             AND quarantine_reason = 'high_risk_user'`,
+          [unquarantinedUserIds],
+        );
       }
     } catch (err) {
       console.error('[confirmWinnerService] decayAllUserRiskScores failed (winner confirmation succeeded):', err);
