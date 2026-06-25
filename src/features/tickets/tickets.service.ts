@@ -170,8 +170,9 @@ export const getBusinessTicketsService = async (userId: number, drawId: number, 
   return { tickets: result.rows, totalCount, cap, perLocationCap, activeLocationCount };
 };
 
-export const getLocationTicketsService = async (userId: number, drawId: number) => {
+export const getLocationTicketsService = async (userId: number, drawId: number, page = 1, limit = 50) => {
   const pool = getPool();
+  const offset = (page - 1) * limit;
 
   const capRes = await pool.query(
     `SELECT COALESCE(s.entries_per_location, ps.global_entry_cap) AS per_location_cap
@@ -187,6 +188,16 @@ export const getLocationTicketsService = async (userId: number, drawId: number) 
     ? Number(capRes.rows[0].per_location_cap)
     : null;
 
+  // Total count (full result set) drives the client's "load more" stop condition.
+  const countRes = await pool.query(
+    `SELECT COUNT(*)::int AS total_count
+     FROM ticket t
+     INNER JOIN business_location bl ON t.location_id = bl.id
+     WHERE bl.manager_user_id = $1 AND t.draw_id = $2 AND t.is_quarantined = FALSE`,
+    [userId, drawId],
+  );
+  const totalCount: number = Number(countRes.rows[0]?.total_count ?? 0);
+
   const result = await pool.query(`
     SELECT
       t.id,
@@ -201,9 +212,10 @@ export const getLocationTicketsService = async (userId: number, drawId: number) 
     AND t.draw_id = $2
     AND t.is_quarantined = FALSE
     ORDER BY t.created_at DESC
-  `, [userId, drawId]);
+    LIMIT $3 OFFSET $4
+  `, [userId, drawId, limit, offset]);
 
-  return { tickets: result.rows, perLocationCap };
+  return { tickets: result.rows, totalCount, perLocationCap };
 };
 
 export const checkFreeTicketEligibility = async (userId: number): Promise<FreeTicketStatus> => {
