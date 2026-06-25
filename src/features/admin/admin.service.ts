@@ -490,6 +490,13 @@ export const pickDrawWinnerService = async (drawId: number, applyPenalty = false
       }
     }
 
+    // Winner selection scans this draw's eligible tickets once (ORDER BY random() LIMIT 1 is a
+    // single O(n) pass keeping the lowest random value, not a full sort). At a very large draw
+    // this can exceed the pool's default 10s statement_timeout, so raise it for THIS transaction
+    // only (SET LOCAL reverts at COMMIT/ROLLBACK). This is a once-a-month admin operation and a
+    // plain SELECT does not block normal user traffic, so a slower run is acceptable.
+    await client.query(`SET LOCAL statement_timeout = '60s'`);
+
     const ticketResult = await client.query(`
       SELECT
         t.id AS ticket_id,
