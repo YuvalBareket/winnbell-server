@@ -138,7 +138,9 @@ export const submitReceiptEntry = async (req: AuthRequest, res: Response) => {
       res.status(403).json({ message: 'PHONE_NOT_VERIFIED' });
       return;
     }
-    res.status(400).json({ message: 'Entry submission failed.' });
+    // Surface the service's curated, user-facing message (threshold, dates, duplicates, etc.).
+    const message = error instanceof Error && error.message ? error.message : 'Entry submission failed.';
+    res.status(400).json({ message });
   }
 };
 

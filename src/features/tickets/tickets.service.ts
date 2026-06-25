@@ -526,8 +526,19 @@ export const submitReceiptEntryService = async (
           await syncUserQuarantineState(userId, drawId);
         }
       }
-      throw new Error('Transaction amount is not sufficient to earn an entry.');
+      // Record this below-threshold attempt (via pool, so it survives the rollback) so a
+      // later qualifying resubmission of the same receipt at a changed amount is caught.
+      await pool.query(
+        `INSERT INTO receipt_threshold_attempt (user_id, business_id, receipt_identifier, attempted_amount)
+         VALUES ($1, $2, $3, $4)`,
+        [userId, business_id, input.receiptIdentifier, input.transactionAmount],
+      );
+      throw new Error(`So close! Entries at ${business_name} need a purchase of $${minTransactionAmount} or more. Come back next time with a qualifying receipt and you are in.`);
     }
+
+    // Note: amount manipulation (this same receipt previously rejected below threshold, now
+    // resubmitted at a different qualifying amount) is detected inside evaluateUserRisk below
+    // via the 'threshold_probing' signal, which reads the recorded below-threshold attempts.
 
     // Transaction date validation
     if (input.transactionDate) {

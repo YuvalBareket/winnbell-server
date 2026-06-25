@@ -175,9 +175,16 @@ export const evaluateUserRisk = async (
           ) sub
         ),
         probe AS (
-          SELECT COUNT(*)::int AS cnt FROM ticket
-          WHERE activated_by_user_id = $1 AND business_id = $2
-            AND receipt_identifier = $3 AND transaction_amount != $4
+          -- Same receipt submitted with a different amount: counts both accepted tickets
+          -- AND below-threshold attempts that were rejected (and left no ticket).
+          SELECT (
+            (SELECT COUNT(*) FROM ticket
+              WHERE activated_by_user_id = $1 AND business_id = $2
+                AND receipt_identifier = $3 AND transaction_amount != $4)
+            + (SELECT COUNT(*) FROM receipt_threshold_attempt
+              WHERE user_id = $1 AND business_id = $2
+                AND receipt_identifier = $3 AND attempted_amount != $4)
+          )::int AS cnt
         ),
         outlier AS (
           SELECT AVG(transaction_amount::float) AS avg_amount FROM ticket
