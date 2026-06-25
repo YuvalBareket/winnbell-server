@@ -428,7 +428,7 @@ export const reopenDrawService = async (drawId: number): Promise<void> => {
   }
 };
 
-export const pickDrawWinnerService = async (drawId: number, applyPenalty = false): Promise<{
+export const pickDrawWinnerService = async (drawId: number, applyPenalty = false, reason?: string): Promise<{
   winnerId: number;
   winnerName: string;
   winnerEmail: string;
@@ -466,27 +466,32 @@ export const pickDrawWinnerService = async (drawId: number, applyPenalty = false
     const prevTicketId: number | null = check.rows[0].winner_ticket_id;
     const prevUserId: number | null = check.rows[0].winner_user_id;
     if (prevTicketId !== null) {
+      // Disqualifying the current candidate requires a documented reason (legal/regulatory trail).
+      const disqualifyReason = (reason ?? '').trim();
+      if (!disqualifyReason) {
+        throw new Error('A reason is required to disqualify the current winner.');
+      }
       rejectedIds = [...rejectedIds, prevTicketId];
       await client.query(
         `UPDATE draw SET winner_user_id = NULL, winner_ticket_id = NULL, rejected_ticket_ids = $1 WHERE id = $2`,
         [rejectedIds, drawId],
       );
       if (prevUserId !== null) {
-        const penalty = applyPenalty ? 15 : 0;
+        const penalty = applyPenalty ? 10 : 0;
         // Always quarantine the rejected ticket - the entry is invalid regardless of penalty
         await client.query(
           `UPDATE ticket SET is_quarantined = TRUE, quarantine_reason = 'admin_rejected_winner', quarantined_at = NOW() WHERE id = $1`,
           [prevTicketId],
         );
         if (applyPenalty) {
-          await client.query(`UPDATE "user" SET risk_score = risk_score + 15 WHERE id = $1`, [prevUserId]);
+          await client.query(`UPDATE "user" SET risk_score = risk_score + $2 WHERE id = $1`, [prevUserId, penalty]);
         }
-        // Log rejection (always)
+        // Log rejection (always) with the admin's documented reason — append-only record.
         await client.query(
-          `INSERT INTO draw_rejected_winner (draw_id, ticket_id, user_id, risk_penalty) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING`,
-          [drawId, prevTicketId, prevUserId, penalty],
+          `INSERT INTO draw_rejected_winner (draw_id, ticket_id, user_id, risk_penalty, reason) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING`,
+          [drawId, prevTicketId, prevUserId, penalty, disqualifyReason],
         );
-        await logDrawAudit(client, drawId, 'winner_rejected', { ticket_id: prevTicketId, user_id: prevUserId, penalty });
+        await logDrawAudit(client, drawId, 'winner_rejected', { ticket_id: prevTicketId, user_id: prevUserId, penalty, reason: disqualifyReason });
       }
     }
 
@@ -1464,9 +1469,10 @@ export const getDrawCandidateService = async (drawId: number) => {
   `, [drawId]);
 
   const row = result.rows[0];
-  if (!row || !row.winner_ticket_id || row.winner_confirmed === true) return null;
+  if (!row || !row.winner_ticket_id) return null;
 
   return {
+    winnerConfirmed: row.winner_confirmed === true,
     winnerId: row.winner_user_id,
     winnerName: row.full_name,
     winnerEmail: row.email,
@@ -1488,7 +1494,7 @@ export const getDrawRejectedWinnersService = async (drawId: number) => {
   const pool = getPool();
   const result = await pool.query(`
     SELECT
-      drw.id, drw.rejected_at, drw.risk_penalty,
+      drw.id, drw.rejected_at, drw.risk_penalty, drw.reason,
       t.id AS ticket_id, t.code, t.receipt_identifier, t.transaction_amount,
       t.transaction_date, t.receipt_image_url, t.entry_source,
       u.id AS user_id, u.full_name, u.email, u.risk_score,
@@ -1506,6 +1512,7 @@ export const getDrawRejectedWinnersService = async (drawId: number) => {
     id: r.id,
     rejectedAt: r.rejected_at,
     riskPenalty: r.risk_penalty,
+    reason: r.reason ?? null,
     ticketId: r.ticket_id,
     ticketCode: r.code,
     receiptIdentifier: r.receipt_identifier ?? null,

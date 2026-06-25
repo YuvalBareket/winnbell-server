@@ -300,11 +300,13 @@ export const pickWinner = async (req: Request, res: Response) => {
     return;
   }
   const applyPenalty = req.body?.applyPenalty === true;
+  const reason = typeof req.body?.reason === 'string' ? req.body.reason : undefined;
   try {
-    const winner = await pickDrawWinnerService(drawId, applyPenalty);
+    const winner = await pickDrawWinnerService(drawId, applyPenalty, reason);
     res.status(200).json(winner);
   } catch (error) {
-    res.status(500).json({ message: 'Failed to pick winner' });
+    const message = error instanceof Error && error.message ? error.message : 'Failed to pick winner';
+    res.status(400).json({ message });
   }
 };
 
