@@ -1,6 +1,6 @@
 import { getPool, PoolClient } from '../../shared/db/db.js';
 import crypto from 'crypto';
-import { publicCache, invalidatePublicBusinessData } from '../../shared/cache/cache.js';
+import { invalidatePublicLocation } from '../../shared/cache/cache.js';
 import {
   ActivationResult,
   FreeTicketStatus,
@@ -73,7 +73,8 @@ export const activateTicket = async (code: string, userId: number) => {
     if (updateResult.rowCount === 0) throw new Error('This ticket has already been used or the draw is no longer open.');
 
     await client.query('COMMIT');
-    invalidatePublicBusinessData();
+    // Activating a ticket changes only this location's cap_reached count.
+    if (ticket.location_id != null) invalidatePublicLocation(ticket.location_id);
     return { message: 'Ticket activated successfully!' };
   } catch (err) {
     await client.query('ROLLBACK');
@@ -372,7 +373,7 @@ export const activateFreeTicket = async (userId: number, claimIp?: string): Prom
     `, [ticketCode, userId, activeDrawId]);
 
     await client.query('COMMIT');
-    invalidatePublicBusinessData();
+    // Free entries have no business/location — they affect no public cache, so nothing to invalidate.
 
     return {
       success: true,
@@ -755,8 +756,7 @@ export const submitReceiptEntryService = async (
     }
 
     await client.query('COMMIT');
-    invalidatePublicBusinessData();
-    publicCache.del(`business:location:${input.locationId}`);
+    invalidatePublicLocation(input.locationId);
 
     // Trigger async OCR validation — runs after commit, never blocks the response
     if (input.receiptImageUrl) {
@@ -883,7 +883,7 @@ export const activatePromotionalEntry = async (
     );
 
     await client.query('COMMIT');
-    invalidatePublicBusinessData();
+    // Promo entries have no business/location — they affect no public cache.
     return { entryId: result.rows[0].id, drawName: draw.name, ticketId: ticketResult.rows[0].id, code: ticketCode };
   } catch (err) {
     await client.query('ROLLBACK');
@@ -953,8 +953,7 @@ export const generateTicketService = async (user_id: number, location_id: number
     `, [code, business_id, location_id, drawId]);
 
     await client.query('COMMIT');
-    invalidatePublicBusinessData();
-    publicCache.del(`business:location:${location_id}`);
+    invalidatePublicLocation(location_id);
     return { code };
   } catch (error) {
     await client.query('ROLLBACK');

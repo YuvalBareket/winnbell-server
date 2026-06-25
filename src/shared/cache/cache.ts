@@ -44,12 +44,23 @@ export const invalidatePlatformSettings = (): void => {
 
 // ── Invalidation helpers ─────────────────────────────────────────────────────
 
-/** Flush all public-facing caches (nearby, participating, draws, etc.) */
+/** Flush all public-facing caches (nearby, participating, draws, etc.). Use only for
+ *  changes that affect public data broadly — a draw opening/closing, a business
+ *  subscribing/cancelling, a location being added/removed. NOT for ticket activations:
+ *  those only affect one location's cap_reached flag (see invalidatePublicLocation). */
 export const invalidatePublicBusinessData = (): void => {
   const keys = publicCache.keys().filter(k =>
     k.startsWith('business:') || k.startsWith('draws:') || k.startsWith('founding:'),
   );
   if (keys.length) publicCache.del(keys);
+};
+
+/** Invalidate the cached participating-location payload for ONE location. A ticket
+ *  write only changes that location's `cap_reached` count, so scope the flush to its
+ *  key instead of wiping every public business/draws/founding cache (which kept the
+ *  public cache from ever warming on a busy draw). */
+export const invalidatePublicLocation = (locationId: number): void => {
+  publicCache.del(`business:location:${locationId}`);
 };
 
 /** Invalidate a user's cached auth state (is_active/is_phone_verified guard AND
