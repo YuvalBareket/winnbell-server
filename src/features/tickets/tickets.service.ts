@@ -528,9 +528,14 @@ export const submitReceiptEntryService = async (
       }
       // Record this below-threshold attempt (via pool, so it survives the rollback) so a
       // later qualifying resubmission of the same receipt at a changed amount is caught.
+      // The same statement opportunistically purges rows older than the 7-day detection
+      // window, so the table self-maintains with no cron job (this path is rare).
       await pool.query(
-        `INSERT INTO receipt_threshold_attempt (user_id, business_id, receipt_identifier, attempted_amount)
-         VALUES ($1, $2, $3, $4)`,
+        `WITH ins AS (
+           INSERT INTO receipt_threshold_attempt (user_id, business_id, receipt_identifier, attempted_amount)
+           VALUES ($1, $2, $3, $4)
+         )
+         DELETE FROM receipt_threshold_attempt WHERE created_at < NOW() - INTERVAL '7 days'`,
         [userId, business_id, input.receiptIdentifier, input.transactionAmount],
       );
       throw new Error(`So close! Entries at ${business_name} need a purchase of $${minTransactionAmount} or more. Come back next time with a qualifying receipt and you are in.`);
