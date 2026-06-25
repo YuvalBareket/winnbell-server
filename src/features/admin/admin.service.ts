@@ -268,7 +268,7 @@ export const getDrawBusinessesService = async (
     pool.query(`
       SELECT
         b.id, b.name, b.sector, b.logo_url,
-        de.fee_at_entry, de.contribution_amount, de.created_at AS joined_at
+        de.fee_at_entry, de.created_at AS joined_at
       FROM draw_entry de
       JOIN business b ON b.id = de.business_id
       WHERE de.draw_id = $1 ${whereExtra}
@@ -313,8 +313,8 @@ export const openDrawService = async (drawId: number): Promise<void> => {
     //    covers this draw's date (current_period_end >= draw_date) — expires them
     //    automatically after 12 months.
     await client.query(`
-      INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, contribution_amount)
-      SELECT d.id, b.id, COALESCE(s.fee_at_entry, 0), 0
+      INSERT INTO draw_entry (draw_id, business_id, fee_at_entry)
+      SELECT d.id, b.id, COALESCE(s.fee_at_entry, 0)
       FROM draw d
       JOIN subscription s ON s.status IN ('Active', 'Trialing', 'Past_Due')
       JOIN business b ON b.id = s.business_id
@@ -1226,8 +1226,8 @@ export const addBusinessToDrawService = async (drawId: number, businessId: numbe
   const feeAtEntry = subCheck.rows[0]?.fee_at_entry ?? 0;
 
   await pool.query(
-    `INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, contribution_amount)
-     VALUES ($1, $2, $3, 0)
+    `INSERT INTO draw_entry (draw_id, business_id, fee_at_entry)
+     VALUES ($1, $2, $3)
      ON CONFLICT (draw_id, business_id) DO NOTHING`,
     [drawId, businessId, feeAtEntry],
   );

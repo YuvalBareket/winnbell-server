@@ -168,8 +168,8 @@ export const testSetup = async (req: Request, res: Response): Promise<void> => {
         }
 
         await client.query(
-          `INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, contribution_amount)
-           VALUES ($1, $2, 0, 0) ON CONFLICT (draw_id, business_id) DO NOTHING`,
+          `INSERT INTO draw_entry (draw_id, business_id, fee_at_entry)
+           VALUES ($1, $2, 0) ON CONFLICT (draw_id, business_id) DO NOTHING`,
           [drawId, bizId],
         );
 

@@ -122,33 +122,6 @@ describe('createDrawService', () => {
     expect(entryInserts).toHaveLength(0);
   });
 
-  test('sets contribution_amount to 0 for all enrolled businesses', async () => {
-    const subs = [
-      { business_id: 10, monthly_fee: 500 },
-      { business_id: 11, monthly_fee: 750 },
-    ];
-    setupClientQueries(
-      { rows: [] },
-      { rows: [DRAW_ROW] },
-      { rows: subs },
-      { rows: [], rowCount: 1 },
-      { rows: [], rowCount: 1 },
-      { rows: [] },
-    );
-
-    await createDrawService({ name: 'May 2026 Draw', prize_amount: 1000, draw_date: '2026-05-31' });
-
-    const entryInserts = mockClientQuery.mock.calls.filter(
-      ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO draw_entry'),
-    );
-    // Every draw_entry INSERT must pass 0 as the contribution_amount
-    for (const call of entryInserts) {
-      const sql: string = call[0];
-      // The literal 0 appears in the SQL for contribution_amount
-      expect(sql).toMatch(/,\s*0\s*\)/);
-    }
-  });
-
   test('does not UPDATE draw prize_pool after INSERT (prize is set at INSERT time)', async () => {
     const subs = [{ business_id: 10, monthly_fee: 500 }];
     setupClientQueries(
