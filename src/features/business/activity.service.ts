@@ -92,8 +92,7 @@ export const getBusinessActivity = async (
       ), 0)                                                        AS revenue_period,
       COUNT(*)                                                     AS entries_period
     FROM ticket t
-    JOIN business_location bl ON bl.id = t.location_id
-    WHERE bl.business_id = $1
+    WHERE t.business_id = $1
       ${periodClause}
       AND t.is_quarantined = FALSE
       ${summaryLocClause}
@@ -122,7 +121,9 @@ export const getBusinessActivity = async (
   // so we exclude only receipt-source secondaries.
   const feedParams: unknown[] = [businessId];
   const conditions: string[] = [
-    'bl.business_id = $1',
+    // Filter on the ticket's own business_id (indexed) rather than through the
+    // business_location join — the join is kept only to resolve the location name.
+    't.business_id = $1',
   ];
 
   if (dateRange === 'today') {
