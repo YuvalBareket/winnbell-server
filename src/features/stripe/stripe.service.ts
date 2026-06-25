@@ -4,7 +4,9 @@ import { getPool } from '../../shared/db/db.js';
 import { sendSubscriptionConfirmationEmail } from '../../shared/email/email.service.js';
 import { getPlatformSettings, publicCache, invalidatePublicBusinessData } from '../../shared/cache/cache.js';
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY as string);
+const stripeSecretKey = process.env.STRIPE_SECRET_KEY;
+if (!stripeSecretKey) throw new Error('STRIPE_SECRET_KEY is not configured — refusing to start the Stripe client.');
+const stripe = new Stripe(stripeSecretKey);
 
 // ─── Get Business For Checkout ────────────────────────────────────────────────
 
@@ -38,6 +40,47 @@ export const TIER_PRICE_MAP: Record<number, { envKey: string; price: number }> =
   2750: { envKey: 'STRIPE_PRICE_ID_2750', price: 2250 },
   3000: { envKey: 'STRIPE_PRICE_ID_3000', price: 2460 },
 };
+
+/**
+ * Resolve a subscription's monthly fee (dollars) — the value stored as
+ * `fee_at_entry`, which feeds prize-pool accounting. SINGLE SOURCE OF TRUTH is
+ * TIER_PRICE_MAP, so every write-path (initial activation, plan change, location
+ * sync) derives the fee the same way and they can never diverge.
+ *
+ * When the caller already has Stripe's live `unit_amount` in hand (no extra fetch),
+ * we cross-check it against the map and log a CRITICAL alert on drift — the Stripe
+ * price object and TIER_PRICE_MAP are supposed to stay aligned, so a mismatch is a
+ * config bug ops must reconcile. We still return the map value (not throw): the
+ * payment context already exists, and tearing it down over an internal pricing
+ * discrepancy would be worse than recording the canonical value and alerting.
+ */
+export function resolveMonthlyFee(
+  entriesPerLocation: number,
+  quantity: number,
+  stripeUnitAmountCents?: number | null,
+): number {
+  const qty = Math.max(1, quantity);
+  const tier = TIER_PRICE_MAP[entriesPerLocation];
+  if (!tier) {
+    console.error(
+      `[Stripe] CRITICAL: no TIER_PRICE_MAP entry for entries_per_location=${entriesPerLocation}; ` +
+      `falling back to Stripe unit_amount for fee_at_entry.`,
+    );
+    return Math.round((stripeUnitAmountCents ?? 0) * qty) / 100;
+  }
+  const mapFee = tier.price * qty;
+  if (stripeUnitAmountCents != null) {
+    const stripeFee = Math.round(stripeUnitAmountCents * qty) / 100;
+    if (Math.abs(stripeFee - mapFee) > 0.01) {
+      console.error(
+        `[Stripe] CRITICAL: fee drift for entries_per_location=${entriesPerLocation} qty=${qty} — ` +
+        `TIER_PRICE_MAP=$${mapFee} but Stripe unit_amount implies $${stripeFee}. ` +
+        `Align the Stripe price object with TIER_PRICE_MAP; recording the map value.`,
+      );
+    }
+  }
+  return mapFee;
+}
 
 // ─── Founding Member: Checkout Session ────────────────────────────────────────
 
@@ -260,7 +303,9 @@ async function createSubscriptionForSetupSession(pool: Pool, session: Stripe.Che
   );
 
   const item = subscription.items.data[0];
-  const monthlyFee = Math.round((item?.price.unit_amount ?? 0) * (item?.quantity ?? 1)) / 100;
+  // fee_at_entry from TIER_PRICE_MAP (single source of truth), cross-checked against
+  // the unit_amount Stripe just returned on the created subscription (no extra fetch).
+  const monthlyFee = resolveMonthlyFee(entriesPerLocation, item?.quantity ?? quantity, item?.price.unit_amount);
   const currentPeriodEnd = extractPeriodEnd(subscription);
 
   await activateBusinessSubscription(pool, businessId, subscription.id, customerId, priceId, currentPeriodEnd, monthlyFee, entriesPerLocation);
@@ -270,7 +315,8 @@ async function createSubscriptionForSetupSession(pool: Pool, session: Stripe.Che
 // ─── Handle Webhook ───────────────────────────────────────────────────────────
 
 export const handleStripeWebhook = async (rawBody: Buffer, signature: string): Promise<void> => {
-  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET as string;
+  const webhookSecret = process.env.STRIPE_WEBHOOK_SECRET;
+  if (!webhookSecret) throw new Error('STRIPE_WEBHOOK_SECRET is not configured — cannot verify webhook signatures.');
 
   let event: Stripe.Event;
   try {
@@ -399,6 +445,38 @@ async function processStripeEvent(event: Stripe.Event, pool: Pool): Promise<void
         invalidatePublicBusinessData();
       } catch (err: unknown) {
         console.error('[Stripe] ERROR in invoice.payment_failed:', err instanceof Error ? err.message : err);
+        throw err;
+      }
+      break;
+    }
+
+    case 'invoice.payment_succeeded': {
+      try {
+        const invoice = event.data.object as Stripe.Invoice;
+        const subscriptionId = getInvoiceSubscriptionId(invoice);
+        if (!subscriptionId) break; // one-time / founding payments have no subscription — ignore
+
+        // Symmetric counterpart to invoice.payment_failed. A paid invoice means the
+        // subscription is current, so clear a stale Past_Due immediately — otherwise a
+        // business that just recovered could be skipped by open-time draw enrollment if
+        // the authoritative customer.subscription.updated event is delayed or arrives
+        // out of order (Stripe does not guarantee ordering between the two).
+        //
+        // STATUS ONLY — we deliberately do NOT touch current_period_end here. This event
+        // also fires for the proration invoices we create in updateSubscriptionPlan /
+        // syncSubscriptionQuantity, whose line period is a short proration window; writing
+        // it would wrongly shorten the access window. Period sync stays owned by
+        // customer.subscription.updated. The `status <> 'Cancelled'` guard prevents
+        // resurrecting a cancelled subscription, and a missing row (event ordering vs
+        // checkout) is a safe no-op.
+        await pool.query(
+          `UPDATE subscription SET status = 'Active', updated_at = NOW()
+           WHERE stripe_subscription_id = $1 AND status <> 'Cancelled'`,
+          [subscriptionId],
+        );
+        invalidatePublicBusinessData();
+      } catch (err: unknown) {
+        console.error('[Stripe] ERROR in invoice.payment_succeeded:', err instanceof Error ? err.message : err);
         throw err;
       }
       break;
@@ -716,8 +794,9 @@ export const syncSubscriptionQuantity = async (userId: number, newLocationCount:
   const item = stripeSub.items.data[0];
   if (!item) throw new Error('Stripe subscription item not found');
 
-  // Price comes from the single TIER_PRICE_MAP constant (kept aligned to Stripe).
-  const newTotalFee = tierConfig.price * quantity;
+  // fee_at_entry from the single TIER_PRICE_MAP source of truth (same helper as every
+  // other write-path). The post-update unit_amount isn't fetched here, so no cross-check.
+  const newTotalFee = resolveMonthlyFee(sub.entries_per_location as number, quantity);
 
   const changeLabel = reason === 'location_added'
     ? `You added a location. Your plan now covers ${quantity} location${quantity !== 1 ? 's' : ''}.`
@@ -740,6 +819,7 @@ export const syncSubscriptionQuantity = async (userId: number, newLocationCount:
       description: changeLabel,
       auto_advance: false,
     });
+    if (!draftInvoice.id) throw new Error('Stripe did not return an invoice id for the proration charge');
     const finalizedInvoice = await stripe.invoices.finalizeInvoice(draftInvoice.id);
     if (finalizedInvoice.status === 'open') {
       await stripe.invoices.pay(draftInvoice.id);
@@ -798,8 +878,9 @@ export const updateSubscriptionPlan = async (userId: number, newEntriesPerLocati
 
   const locationCount = Math.max(1, Number(sub.location_count));
 
-  // Price comes from the single TIER_PRICE_MAP constant (kept aligned to Stripe).
-  const newTotalFee = tierConfig.price * locationCount;
+  // fee_at_entry from the single TIER_PRICE_MAP source of truth (same helper as every
+  // other write-path). The post-update unit_amount isn't fetched here, so no cross-check.
+  const newTotalFee = resolveMonthlyFee(newEntriesPerLocation, locationCount);
 
   // Fetch current Stripe subscription to get the item
   const stripeSub = await stripe.subscriptions.retrieve(sub.stripe_subscription_id, { expand: ['items'] });
@@ -827,6 +908,7 @@ export const updateSubscriptionPlan = async (userId: number, newEntriesPerLocati
       description: changeLabel,
       auto_advance: false,
     });
+    if (!draftInvoice.id) throw new Error('Stripe did not return an invoice id for the plan-change charge');
     const finalizedInvoice = await stripe.invoices.finalizeInvoice(draftInvoice.id);
     if (finalizedInvoice.status === 'open') {
       await stripe.invoices.pay(draftInvoice.id);

@@ -147,3 +147,49 @@ describe('handleStripeWebhook — customer.subscription.deleted', () => {
     expect(deletedDraw).toBeUndefined();
   });
 });
+
+// ─────────────────────────────────────────────
+// invoice.payment_succeeded — clears Past_Due (status only), never resurrects Cancelled
+// ─────────────────────────────────────────────
+describe('handleStripeWebhook — invoice.payment_succeeded', () => {
+  it("flips the subscription to Active with a 'status <> Cancelled' guard, and does NOT touch current_period_end", async () => {
+    mockConstructEvent.mockReturnValue({
+      id: 'evt_paid',
+      type: 'invoice.payment_succeeded',
+      data: { object: { subscription: 'sub_123' } },
+    });
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ event_id: 'evt_paid' }], rowCount: 1 }) // claim
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 });                        // UPDATE -> Active
+
+    await handleStripeWebhook(Buffer.from('{}'), 'sig');
+
+    const activated = mockQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes("status = 'Active'"),
+    );
+    expect(activated).toBeDefined();
+    // Best-practice guards: never resurrect a Cancelled sub; scope to this subscription.
+    expect(activated![0]).toMatch(/status <> 'Cancelled'/);
+    expect(activated![0]).toMatch(/WHERE stripe_subscription_id = \$1/);
+    // Proration invoices fire this event too — period must NOT be written here.
+    expect(activated![0]).not.toMatch(/current_period_end/);
+    expect(activated![1]).toEqual(['sub_123']);
+  });
+
+  it('ignores invoices with no subscription (one-time / founding payments)', async () => {
+    mockConstructEvent.mockReturnValue({
+      id: 'evt_onetime',
+      type: 'invoice.payment_succeeded',
+      data: { object: {} }, // no subscription field
+    });
+    mockQuery.mockResolvedValueOnce({ rows: [{ event_id: 'evt_onetime' }], rowCount: 1 }); // claim only
+
+    await handleStripeWebhook(Buffer.from('{}'), 'sig');
+
+    const activated = mockQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes("status = 'Active'"),
+    );
+    expect(activated).toBeUndefined(); // no UPDATE issued
+    expect(mockQuery).toHaveBeenCalledTimes(1); // only the claim
+  });
+});

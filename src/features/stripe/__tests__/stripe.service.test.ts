@@ -64,7 +64,43 @@ jest.mock('../../../shared/db/db.js', () => ({
 process.env.STRIPE_SECRET_KEY = 'sk_test_dummy';
 process.env.STRIPE_PRICE_ID_250 = 'price_test_250';
 
-import { createCheckoutSession, cancelSubscription, verifyAndActivateSession, resumeSubscription } from '../stripe.service';
+import { createCheckoutSession, cancelSubscription, verifyAndActivateSession, resumeSubscription, resolveMonthlyFee } from '../stripe.service';
+
+// ─────────────────────────────────────────────
+// resolveMonthlyFee — fee_at_entry single source of truth (TIER_PRICE_MAP) + drift guard
+// ─────────────────────────────────────────────
+describe('resolveMonthlyFee', () => {
+  afterEach(() => jest.restoreAllMocks());
+
+  it('returns the TIER_PRICE_MAP value × quantity when no Stripe amount is given', () => {
+    // tier 500 → $490/location
+    expect(resolveMonthlyFee(500, 3)).toBe(1470); // 490 × 3
+  });
+
+  it('returns the map value and does NOT log when Stripe unit_amount agrees', () => {
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    // 49000 cents = $490, matches the map
+    expect(resolveMonthlyFee(500, 2, 49000)).toBe(980);
+    expect(errSpy).not.toHaveBeenCalled();
+  });
+
+  it('logs CRITICAL drift but still returns the map value when Stripe disagrees', () => {
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    // Stripe says $500 (50000c), map says $490 → drift
+    expect(resolveMonthlyFee(500, 1, 50000)).toBe(490);
+    expect(errSpy).toHaveBeenCalledWith(expect.stringMatching(/CRITICAL: fee drift/));
+  });
+
+  it('falls back to Stripe unit_amount (and logs) when the tier is unknown', () => {
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    expect(resolveMonthlyFee(999, 2, 12300)).toBe(246); // 123 × 2
+    expect(errSpy).toHaveBeenCalledWith(expect.stringMatching(/no TIER_PRICE_MAP entry/));
+  });
+
+  it('clamps quantity to at least 1', () => {
+    expect(resolveMonthlyFee(500, 0)).toBe(490);
+  });
+});
 
 // ─────────────────────────────────────────────
 // Helpers
