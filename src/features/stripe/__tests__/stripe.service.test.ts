@@ -264,10 +264,15 @@ describe('cancelSubscription — founding refund', () => {
 
     mockQuery
       .mockResolvedValueOnce({ rows: [FOUNDING_ROW] })                                              // founding check
-      .mockResolvedValueOnce({ rows: [{ created_at: createdAt, current_period_end: periodEnd }] })  // membership period
-      .mockResolvedValueOnce({ rows: [{ draw_id: 9 }], rowCount: 1 })                               // DELETE draw_entry (upcoming)
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 })                                             // DELETE founding_member
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 });                                            // UPDATE -> Cancelled
+      .mockResolvedValueOnce({ rows: [{ created_at: createdAt, current_period_end: periodEnd }] }); // membership period
+    // Destructive writes (ledger + deletes + cancel) now run in a client transaction.
+    mockClientQuery.mockImplementation((sql: string) =>
+      Promise.resolve(
+        typeof sql === 'string' && sql.includes('DELETE FROM draw_entry')
+          ? { rows: [{ draw_id: 9 }], rowCount: 1 }
+          : { rows: [], rowCount: 1 },
+      ),
+    );
 
     const res = await cancelSubscription(7);
 
@@ -291,25 +296,18 @@ describe('cancelSubscription — founding refund', () => {
 
     await expect(cancelSubscription(7)).rejects.toThrow('REFUND_FAILED');
 
-    // Membership must remain intact — no deletes, no Cancelled update.
-    const destructive = mockQuery.mock.calls.find(
-      ([sql]: [string]) => typeof sql === 'string' && (
-        sql.includes('DELETE FROM founding_member') ||
-        sql.includes('DELETE FROM draw_entry') ||
-        (sql.includes('UPDATE subscription') && sql.includes("'Cancelled'"))
-      ),
-    );
-    expect(destructive).toBeUndefined();
+    // Membership must remain intact — the refund fails BEFORE the DB transaction opens,
+    // so the client (which now runs all destructive writes) is never even acquired.
+    expect(mockClientQuery).not.toHaveBeenCalled();
   });
 
   it('no refund when the membership year has already ended, but still tears down', async () => {
     mockDateNow(new RealDate('2026-06-01T00:00:00.000Z'));
     mockQuery
       .mockResolvedValueOnce({ rows: [FOUNDING_ROW] })
-      .mockResolvedValueOnce({ rows: [{ created_at: new RealDate('2025-01-01T00:00:00.000Z'), current_period_end: new RealDate('2026-01-01T00:00:00.000Z') }] })
-      .mockResolvedValueOnce({ rows: [], rowCount: 0 })  // DELETE draw_entry (none)
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 })  // DELETE founding_member
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 }); // UPDATE -> Cancelled
+      .mockResolvedValueOnce({ rows: [{ created_at: new RealDate('2025-01-01T00:00:00.000Z'), current_period_end: new RealDate('2026-01-01T00:00:00.000Z') }] });
+    // No refund, but the teardown still runs in a transaction; DELETE draw_entry finds none.
+    mockClientQuery.mockResolvedValue({ rows: [], rowCount: 0 });
 
     const res = await cancelSubscription(7);
 
@@ -324,10 +322,8 @@ describe('cancelSubscription — founding refund', () => {
     mockRefundsCreate.mockResolvedValue({ id: 're_1' });
     mockQuery
       .mockResolvedValueOnce({ rows: [FOUNDING_ROW] })
-      .mockResolvedValueOnce({ rows: [{ created_at: new RealDate('2026-01-01T00:00:00.000Z'), current_period_end: new RealDate('2027-01-01T00:00:00.000Z') }] })
-      .mockResolvedValueOnce({ rows: [], rowCount: 0 })
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 })
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 });
+      .mockResolvedValueOnce({ rows: [{ created_at: new RealDate('2026-01-01T00:00:00.000Z'), current_period_end: new RealDate('2027-01-01T00:00:00.000Z') }] });
+    mockClientQuery.mockResolvedValue({ rows: [], rowCount: 0 });
 
     await cancelSubscription(7);
 

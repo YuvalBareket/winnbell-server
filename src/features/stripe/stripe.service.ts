@@ -620,6 +620,7 @@ async function cancelFoundingMembership(
   // still deleted and the user told a refund was issued.)
   let refundType: CancelRefundType = 'none';
   let refundAmount = 0;
+  let refundCents = 0;
 
   if (sub) {
     const now = new Date();
@@ -628,54 +629,81 @@ async function cancelFoundingMembership(
     const totalMs = periodEnd.getTime() - periodStart.getTime();
     const remainingMs = Math.max(0, periodEnd.getTime() - now.getTime());
     const remainingFraction = totalMs > 0 ? remainingMs / totalMs : 0;
-    const refundCents = Math.round(120000 * remainingFraction * 0.5);
+    refundCents = Math.round(120000 * remainingFraction * 0.5);
+  }
 
-    if (refundCents > 0) {
-      try {
-        await stripe.refunds.create({ payment_intent: paymentIntentId, amount: refundCents });
-      } catch (err: unknown) {
-        console.error(`[Founding] Stripe refund failed — cancellation aborted for business ${businessId}: ${err instanceof Error ? err.message : err}`);
-        throw new Error('REFUND_FAILED');
-      }
-      refundAmount = refundCents / 100;
-      // Always 50% of remaining time — never the full payment
-      refundType = 'prorated';
+  // Step 1 — Stripe refund FIRST. A refund cannot be rolled back, so it must precede
+  // every DB change: if Stripe rejects it the cancellation aborts and the business
+  // keeps its membership intact (no destructive change has happened yet).
+  if (refundCents > 0) {
+    try {
+      await stripe.refunds.create({ payment_intent: paymentIntentId, amount: refundCents });
+    } catch (err: unknown) {
+      console.error(`[Founding] Stripe refund failed — cancellation aborted for business ${businessId}: ${err instanceof Error ? err.message : err}`);
+      throw new Error('REFUND_FAILED');
+    }
+    refundAmount = refundCents / 100;
+    refundType = 'prorated'; // always 50% of remaining time — never the full payment
+  }
 
-      // Record the refund on the ledger so the plan page shows net/refund state
-      // from the DB alone (no live Stripe call needed on every history load).
-      await pool.query(
+  // Step 2 — all DB writes atomically. Record the refund on the ledger AND apply the
+  // destructive cancellation in ONE transaction, so the business is never left
+  // half-cancelled (e.g. refunded but still a founding_member with an active sub).
+  const client = await pool.connect();
+  let removedFromDraw = false;
+  let removedCount = 0;
+  try {
+    await client.query('BEGIN');
+
+    if (refundAmount > 0) {
+      // Ledger record so the plan page shows net/refund state from the DB alone.
+      await client.query(
         `UPDATE founding_payment SET refunded_amount = refunded_amount + $1 WHERE stripe_payment_intent_id = $2`,
         [refundAmount, paymentIntentId],
       );
     }
+
+    // Remove from all upcoming draws
+    const deleteResult = await client.query(
+      `DELETE FROM draw_entry de
+       USING draw d
+       WHERE de.draw_id = d.id AND de.business_id = $1 AND d.status = 'Upcoming'
+       RETURNING de.draw_id`,
+      [businessId],
+    );
+    removedCount = deleteResult.rowCount ?? 0;
+    removedFromDraw = removedCount > 0;
+
+    // Remove founding_member record entirely — they had their chance, no longer founding.
+    await client.query(`DELETE FROM founding_member WHERE business_id = $1`, [businessId]);
+
+    // Cancel subscription immediately (one-time payment, nothing to cancel on Stripe).
+    await client.query(
+      `UPDATE subscription SET status = 'Cancelled', cancel_at_period_end = false, updated_at = NOW()
+       WHERE business_id = $1`,
+      [businessId],
+    );
+
+    await client.query('COMMIT');
+    console.log(`[Founding] Business ${businessId} cancelled. Removed from ${removedCount} upcoming draws. Refunded $${refundAmount} (50% of remaining time).`);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    // Stripe-vs-DB can't be one atomic unit: if the refund already went through but the
+    // DB cancellation rolled back, the money was returned yet the membership is intact.
+    // This is the unavoidable edge — make it LOUD so ops can reconcile manually.
+    if (refundAmount > 0) {
+      console.error(
+        `[Founding] CRITICAL: refund of $${refundAmount} was issued to Stripe for business ${businessId} ` +
+        `but the DB cancellation ROLLED BACK — manual reconciliation needed.`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+    throw err;
+  } finally {
+    client.release();
   }
 
-  // Refund succeeded (or none was due) — now apply the destructive changes.
-  // Remove from all upcoming draws
-  const deleteResult = await pool.query(
-    `DELETE FROM draw_entry de
-     USING draw d
-     WHERE de.draw_id = d.id AND de.business_id = $1 AND d.status = 'Upcoming'
-     RETURNING de.draw_id`,
-    [businessId],
-  );
-  const removedFromDraw = deleteResult.rowCount! > 0;
-
-  // Remove founding_member record entirely — they had their chance, no longer a founding member
-  await pool.query(
-    `DELETE FROM founding_member WHERE business_id = $1`,
-    [businessId],
-  );
-
-  // Cancel subscription immediately (one-time payment, nothing to cancel on Stripe)
-  await pool.query(
-    `UPDATE subscription SET status = 'Cancelled', cancel_at_period_end = false, updated_at = NOW()
-     WHERE business_id = $1`,
-    [businessId],
-  );
-
   invalidatePublicBusinessData();
-  console.log(`[Founding] Business ${businessId} cancelled. Removed from ${deleteResult.rowCount} upcoming draws. Refunded $${refundAmount} (50% of remaining time).`);
   return { removedFromDraw, refundType, refundAmount };
 }
 
