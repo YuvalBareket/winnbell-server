@@ -227,32 +227,29 @@ export const checkFreeTicketEligibility = async (userId: number): Promise<FreeTi
     return { canActivate: false, reason: 'no_campaign' };
   }
 
+  // Week boundary is the ET Sunday-start week (must match the activation guard in
+  // activateFreeTicket exactly, or the UI would show READY and then the claim would be rejected).
   const result = await pool.query(`
-    SELECT activated_at
-    FROM free_ticket_usage
-    WHERE user_id = $1 AND status = 'approved'
-    ORDER BY activated_at DESC
-    LIMIT 1
+    SELECT
+      u.activated_at,
+      (u.activated_at >= ws.week_start)            AS used_this_week,
+      (ws.week_start + interval '7 days')          AS next_available
+    FROM (
+      SELECT (date_trunc('week', ((now() AT TIME ZONE 'America/New_York') + interval '1 day'))
+              - interval '1 day') AT TIME ZONE 'America/New_York' AS week_start
+    ) ws
+    LEFT JOIN LATERAL (
+      SELECT activated_at FROM free_ticket_usage
+      WHERE user_id = $1 AND status = 'approved'
+      ORDER BY activated_at DESC LIMIT 1
+    ) u ON true
   `, [userId]);
 
-  const lastUsage = result.rows[0];
+  const row = result.rows[0];
+  if (!row?.activated_at) return { canActivate: true };
+  if (!row.used_this_week) return { canActivate: true };
 
-  if (!lastUsage) return { canActivate: true };
-
-  const now = new Date();
-  const weekStart = new Date(now);
-  weekStart.setDate(now.getDate() - now.getDay());
-  weekStart.setHours(0, 0, 0, 0);
-
-  const lastDate = new Date(lastUsage.activated_at);
-  const usedThisWeek = lastDate >= weekStart;
-
-  if (!usedThisWeek) return { canActivate: true };
-
-  const nextSunday = new Date(weekStart);
-  nextSunday.setDate(weekStart.getDate() + 7);
-
-  return { canActivate: false, nextAvailableDate: nextSunday };
+  return { canActivate: false, nextAvailableDate: row.next_available };
 };
 
 const CODE_CHARS = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // 32 chars, no ambiguous O/0/I/1/L
@@ -285,8 +282,13 @@ export const activateFreeTicket = async (userId: number, claimIp?: string): Prom
     // Must be a standalone query so PostgreSQL serializes concurrent requests before the eligibility check.
     await client.query('SELECT pg_advisory_xact_lock(2, $1)', [userId]);
 
+    // "Used this week" is computed in SQL against a fixed business timezone (America/New_York),
+    // NOT the server's local/UTC clock. Using the server clock let a US-evening user double-claim
+    // around the Sunday-00:00-UTC boundary (Sat 8pm ET). The +1day/-1day keeps a Sunday-start week.
     const eligibilityResult = await client.query(`
-      SELECT u.activated_at, usr.is_email_verified, usr.is_phone_verified, usr.created_at AS account_created_at
+      SELECT u.activated_at, usr.is_email_verified, usr.is_phone_verified, usr.created_at AS account_created_at,
+        (u.activated_at >= (date_trunc('week', ((now() AT TIME ZONE 'America/New_York') + interval '1 day'))
+                            - interval '1 day') AT TIME ZONE 'America/New_York') AS used_this_week
       FROM (SELECT is_email_verified, is_phone_verified, created_at FROM "user" WHERE id = $1) AS usr
       LEFT JOIN LATERAL (
         SELECT activated_at FROM free_ticket_usage WHERE user_id = $1 AND status = 'approved'
@@ -316,21 +318,14 @@ export const activateFreeTicket = async (userId: number, claimIp?: string): Prom
       throw new Error('PHONE_NOT_VERIFIED');
     }
 
-    // Guard 2: weekly usage check (1 free entry per user per week)
-    if (lastUsage?.activated_at) {
-      const now = new Date();
-      const weekStart = new Date(now);
-      weekStart.setDate(now.getDate() - now.getDay());
-      weekStart.setHours(0, 0, 0, 0);
-      const usedThisWeek = new Date(lastUsage.activated_at) >= weekStart;
-      if (usedThisWeek) {
-        await client.query(
-          `INSERT INTO free_ticket_usage (user_id, status, rejection_reason, entries_created) VALUES ($1, 'rejected', 'weekly_limit_reached', 0)`,
-          [userId]
-        );
-        await client.query('COMMIT');
-        throw new Error('Weekly limit reached. Please wait until your next available date.');
-      }
+    // Guard 2: weekly usage check (1 free entry per user per week, ET week boundary computed above)
+    if (lastUsage?.used_this_week) {
+      await client.query(
+        `INSERT INTO free_ticket_usage (user_id, status, rejection_reason, entries_created) VALUES ($1, 'rejected', 'weekly_limit_reached', 0)`,
+        [userId]
+      );
+      await client.query('COMMIT');
+      throw new Error('Weekly limit reached. Please wait until your next available date.');
     }
 
 
