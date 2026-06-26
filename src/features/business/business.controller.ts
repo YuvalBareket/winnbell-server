@@ -224,17 +224,16 @@ export const updateCampaignSettingsController = async (req: AuthRequest, res: Re
       receipt_example_image_url?: string | null;
     };
 
+    // A specific minimum is mandatory — null/"no minimum" is no longer allowed.
     if (
-      min_transaction_amount !== null &&
-      min_transaction_amount !== undefined &&
-      (typeof min_transaction_amount !== 'number' || Number.isNaN(min_transaction_amount) ||
-        min_transaction_amount <= 0 || min_transaction_amount > 100000)
+      typeof min_transaction_amount !== 'number' || Number.isNaN(min_transaction_amount) ||
+      min_transaction_amount <= 0 || min_transaction_amount > 100000
     ) {
-      res.status(400).json({ message: 'Minimum transaction amount must be a positive number up to 100,000.' });
+      res.status(400).json({ message: 'A minimum transaction amount is required (a positive number up to 100,000).' });
       return;
     }
 
-    const data: { min_transaction_amount: number | null; receipt_example_image_url?: string | null } = {
+    const data: { min_transaction_amount: number; receipt_example_image_url?: string | null } = {
       min_transaction_amount,
     };
     if ('receipt_example_image_url' in req.body) {

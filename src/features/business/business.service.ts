@@ -141,7 +141,8 @@ export const createFullBusinessProfile = async (userId: number, data: BusinessSe
       `INSERT INTO business (user_id, name, sector, description, min_transaction_amount)
        VALUES ($1, $2, $3, $4, $5)
        RETURNING id`,
-      [userId, data.businessName, data.businessSector, data.description, data.min_transaction_amount ?? null],
+      // A specific minimum is mandatory; default to $50 when the setup form omits one.
+      [userId, data.businessName, data.businessSector, data.description, data.min_transaction_amount ?? 50],
     );
     const businessId = businessResult.rows[0].id;
 

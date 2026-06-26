@@ -60,7 +60,7 @@ export interface MyBusinessData {
 }
 
 export interface UpdateCampaignSettingsInput {
-  min_transaction_amount: number | null;
+  min_transaction_amount: number; // mandatory — a specific threshold is required
   receipt_example_image_url?: string | null;
 }
 
