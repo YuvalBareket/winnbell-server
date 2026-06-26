@@ -118,7 +118,8 @@ export const submitReceiptEntry = async (req: AuthRequest, res: Response) => {
     const result = await ticketService.submitReceiptEntryService(userId, {
       locationId: Number(locationId),
       receiptIdentifier: String(receiptIdentifier).trim(),
-      transactionAmount: Number(transactionAmount),
+      // Round to 2 dp (cents) so the stored amount and entry math never carry float noise.
+      transactionAmount: Math.round(Number(transactionAmount) * 100) / 100,
       transactionDate: typeof transactionDate === 'string' ? transactionDate : undefined,
       receiptImageUrl: receiptImageUrl ?? undefined,
       typingDurationMs: typingDurationMs !== undefined ? Number(typingDurationMs) : undefined,

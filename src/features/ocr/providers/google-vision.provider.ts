@@ -60,7 +60,10 @@ export class GoogleVisionProvider implements OcrProvider {
     const businessNameFound = expected.businessName ? matchBusinessName(normalizedText, expected.businessName) : null;
     const confidence = scoreConfidence(identifierFound, amountMatches, dateMatches);
 
-    console.log('[OCR] Google Vision raw text:', JSON.stringify(rawText));
+    // Raw receipt text contains PII (names, card last-4, addresses) — never log it in production.
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('[OCR] Google Vision raw text:', JSON.stringify(rawText));
+    }
     console.log('[OCR] Result:', JSON.stringify({ isReceipt, identifierFound, amountMatches, dateMatches, businessNameFound, confidence }));
 
     return { isReceipt, identifierFound, amountMatches, dateMatches, businessNameFound, confidence, rawText };

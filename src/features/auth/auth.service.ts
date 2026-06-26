@@ -76,7 +76,9 @@ export const getRegionFromIp = async (ip: string): Promise<IpRegion> => {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 2000);
     const tokenParam = process.env.IPINFO_TOKEN ? `?token=${process.env.IPINFO_TOKEN}` : '';
-    const res = await fetch(`https://ipinfo.io/${ip}/json${tokenParam}`, { signal: controller.signal });
+    // encode the client-controlled IP (from X-Forwarded-For/cf-connecting-ip) so a crafted
+    // value can't inject path/query into the external URL or maneuver around the token param.
+    const res = await fetch(`https://ipinfo.io/${encodeURIComponent(ip)}/json${tokenParam}`, { signal: controller.signal });
     clearTimeout(timeout);
     if (!res.ok) return { country: null, stateCode: null };
     const data = await res.json() as { country?: string; region?: string };

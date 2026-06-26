@@ -113,7 +113,8 @@ export const getAddressCoords = async (placeId: string): Promise<{ lat: number; 
   if (!apiKey) throw new Error('Missing GOOGLE_PLACES_API');
 
   const res = await fetch(
-    `https://places.googleapis.com/v1/places/${placeId}?fields=formattedAddress,location`,
+    // encode the client-supplied placeId so it can't inject path/query into the external URL
+    `https://places.googleapis.com/v1/places/${encodeURIComponent(placeId)}?fields=formattedAddress,location`,
     { headers: { 'X-Goog-Api-Key': apiKey } },
   );
 
