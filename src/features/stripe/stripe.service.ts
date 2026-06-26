@@ -149,7 +149,7 @@ export const getFoundingMemberCount = async (): Promise<{
   ]);
   const taken = countResult.rows[0]?.taken ?? 0;
   const cap = settings.founding_member_cap ?? 30;
-  const active = (settings as any).founding_phase_active ?? true;
+  const active = settings.founding_phase_active ?? true;
   const value = { taken, remaining: Math.max(0, cap - taken), cap, price: 1200, active };
   publicCache.set(CACHE_KEY, value, 60);
   return value;

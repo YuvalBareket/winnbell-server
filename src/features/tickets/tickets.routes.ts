@@ -1,8 +1,9 @@
-import { Router } from 'express';
+import { Router, Request } from 'express';
 import rateLimit from 'express-rate-limit';
 import * as ticketController from './tickets.controller.js';
 import { requireRole, requirePhoneVerified, requireActive } from '../../shared/middleware/auth.middleware.js';
 import { makeRateLimitStore } from '../../shared/rateLimitStore.js';
+import { getClientIp } from '../../shared/clientIp.js';
 
 // 5 entry attempts per minute per user (keyed on JWT user ID, not IP)
 const entryLimiter = rateLimit({
@@ -10,7 +11,7 @@ const entryLimiter = rateLimit({
   max: 5,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req: any) => req.user?.id?.toString(),
+  keyGenerator: (req: Request) => req.user?.id?.toString() ?? getClientIp(req),
   store: makeRateLimitStore('entry'),
   message: { message: 'Too many attempts, please slow down.' },
 });

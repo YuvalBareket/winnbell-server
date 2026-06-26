@@ -828,7 +828,7 @@ export const getPlatformSettingsService = async (): Promise<{
     // Empty array = no region restriction (matches evaluateRegionRestriction semantics)
     allowed_states: settings.allowed_states ?? [],
     founding_member_cap: settings.founding_member_cap ?? 30,
-    founding_phase_active: (settings as any).founding_phase_active ?? true,
+    founding_phase_active: settings.founding_phase_active ?? true,
   };
 };
 

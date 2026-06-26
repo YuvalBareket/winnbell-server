@@ -75,7 +75,7 @@ const ticketsLimiter = rateLimit({
   max: 30,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req: any) => req.user?.id?.toString(),
+  keyGenerator: (req: express.Request) => req.user?.id?.toString() ?? getClientIp(req),
   store: makeRateLimitStore('tickets'),
   message: { message: 'Too many requests, please slow down.' },
 });
@@ -151,7 +151,7 @@ app.use('/phone', phoneRouter);
 app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
   console.error(err);
   // Report to Sentry with request context (no-op unless SENTRY_DSN is set)
-  captureError(err, { method: req.method, url: req.originalUrl, userId: (req as any).user?.id });
+  captureError(err, { method: req.method, url: req.originalUrl, userId: req.user?.id });
   res.status(500).json({ message: 'Internal server error' });
 });
 

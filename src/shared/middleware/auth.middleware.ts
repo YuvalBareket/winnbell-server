@@ -15,6 +15,17 @@ export interface AuthRequest extends Request {
   user?: UserPayload;
 }
 
+// Global augmentation so `req.user` is typed on the base Express Request everywhere
+// (error handler, rate-limiter keyGenerators, etc.) without resorting to `as any`.
+declare global {
+  // eslint-disable-next-line @typescript-eslint/no-namespace
+  namespace Express {
+    interface Request {
+      user?: UserPayload;
+    }
+  }
+}
+
 // Guards ticket mutation routes: checks both is_active and is_phone_verified in one query.
 // Business/Admin roles skip phone verification but still get the is_active check.
 export const requirePhoneVerified = async (
