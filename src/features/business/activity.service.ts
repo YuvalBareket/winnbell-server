@@ -16,7 +16,6 @@ export interface ActivityItem {
   status: 'active' | 'under_review';
   quarantine_reason: string | null;
   created_at: string;
-  entry_count: number;
 }
 
 export interface ActivityResult {
@@ -157,18 +156,7 @@ export const getBusinessActivity = async (
       t.entry_source,
       t.is_quarantined,
       t.quarantine_reason,
-      t.created_at,
-      -- Count all tickets (anchor + bonus) for the same submission
-      (
-        SELECT COUNT(*)
-        FROM ticket t2
-        WHERE t2.activated_by_user_id = t.activated_by_user_id
-          AND t2.business_id = t.business_id
-          AND t2.draw_id = t.draw_id
-          AND t2.activated_at = t.activated_at
-          AND t2.entry_source = 'receipt'
-          AND t2.is_quarantined = FALSE
-      )                                         AS entry_count
+      t.created_at
     FROM ticket t
     JOIN business_location bl ON bl.id = t.location_id
     WHERE ${conditions.join(' AND ')}
@@ -190,7 +178,6 @@ export const getBusinessActivity = async (
     status: r.is_quarantined ? 'under_review' : 'active',
     quarantine_reason: r.quarantine_reason ?? null,
     created_at: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
-    entry_count: Number(r.entry_count ?? 1),
   }));
 
   return {

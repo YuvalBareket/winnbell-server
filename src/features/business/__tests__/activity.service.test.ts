@@ -272,95 +272,13 @@ describe('quarantined tickets excluded from all summary counts', () => {
     expect(summarySql).toMatch(/is_quarantined\s*=\s*FALSE/i);
   });
 
-  it('feed SQL WHERE clause should include is_quarantined = FALSE', async () => {
-    setupPoolQueries(
-      BIZ_ROW,
-      summaryRow({}),
-      monthlyRow({}),
-      emptyFeed(),
-    );
-
-    await getBusinessActivity(1, null);
-
-    const feedSql = mockQuery.mock.calls[3]?.[0] as string;
-    expect(feedSql).toBeDefined();
-    expect(feedSql).toMatch(/is_quarantined\s*=\s*FALSE/i);
-  });
+  // NOTE: the FEED intentionally does NOT filter is_quarantined — under-review entries
+  // are shown to the business (mapped to status 'under_review') so they can act on them.
+  // Only the summary counts exclude quarantined.
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 5. entry_count on feed items — only non-quarantined tickets per submission
-// ─────────────────────────────────────────────────────────────────────────────
-describe('entry_count on feed items', () => {
-  it('should map entry_count from the subquery result on each feed row', async () => {
-    const feedRow = {
-      ticket_id: 10,
-      location_name: 'Shop A',
-      transaction_amount: '50.00',
-      receipt_identifier: 'RCP-001',
-      entry_source: 'receipt',
-      is_quarantined: false,
-      quarantine_reason: null,
-      created_at: new Date().toISOString(),
-      entry_count: 3, // 3 non-quarantined tickets for this submission
-    };
-
-    setupPoolQueries(
-      BIZ_ROW,
-      summaryRow({}),
-      monthlyRow({}),
-      { rows: [feedRow] },
-    );
-
-    const result = await getBusinessActivity(1, null);
-
-    expect(result.items).toHaveLength(1);
-    expect(result.items[0].entry_count).toBe(3);
-  });
-
-  it('should default entry_count to 1 when the subquery returns null/0', async () => {
-    const feedRow = {
-      ticket_id: 11,
-      location_name: 'Shop B',
-      transaction_amount: null,
-      receipt_identifier: null,
-      entry_source: 'code',
-      is_quarantined: false,
-      quarantine_reason: null,
-      created_at: new Date().toISOString(),
-      entry_count: null, // subquery returned null for non-receipt
-    };
-
-    setupPoolQueries(
-      BIZ_ROW,
-      summaryRow({}),
-      monthlyRow({}),
-      { rows: [feedRow] },
-    );
-
-    const result = await getBusinessActivity(1, null);
-
-    expect(result.items[0].entry_count).toBe(1);
-  });
-
-  it('feed SQL entry_count subquery should filter t2.is_quarantined = FALSE', async () => {
-    setupPoolQueries(
-      BIZ_ROW,
-      summaryRow({}),
-      monthlyRow({}),
-      emptyFeed(),
-    );
-
-    await getBusinessActivity(1, null);
-
-    const feedSql = mockQuery.mock.calls[3]?.[0] as string;
-    // The entry_count subquery (SELECT COUNT(*) FROM ticket t2 WHERE ...) must exclude quarantined
-    expect(feedSql).toMatch(/t2\.is_quarantined\s*=\s*FALSE/i);
-  });
-});
-
-// ─────────────────────────────────────────────────────────────────────────────
-// 6. monthly_cap returned correctly
+// 5. monthly_cap returned correctly
 // ─────────────────────────────────────────────────────────────────────────────
 describe('monthly_cap handling', () => {
   it('should return monthly_cap as a number when set', async () => {
