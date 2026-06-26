@@ -12,12 +12,24 @@ export class GoogleVisionProvider implements OcrProvider {
       throw new Error('Invalid image URL: must reference the application storage bucket');
     }
 
-    // Download image and encode as base64 for Vision API
+    // Download image and encode as base64 for the Vision API. Defensive size cap: uploads
+    // are already capped at 10 MB (signed into the presigned URL), but never load an
+    // unbounded body into memory here. Check the declared length first, then verify the
+    // actual bytes in case the header is missing or wrong.
+    const MAX_IMAGE_BYTES = 10 * 1024 * 1024; // 10 MB — matches the upload cap
+    const TOO_LARGE = 'Receipt image is too large to process. Please upload a photo under 10 MB.';
     const imageResponse = await fetch(imageUrl);
     if (!imageResponse.ok) {
-      throw new Error(`Failed to download image for OCR: ${imageResponse.status}`);
+      throw new Error(`Failed to download the receipt image (status ${imageResponse.status}). Please try submitting it again.`);
+    }
+    const declaredLength = Number(imageResponse.headers.get('content-length'));
+    if (declaredLength && declaredLength > MAX_IMAGE_BYTES) {
+      throw new Error(TOO_LARGE);
     }
     const buffer = Buffer.from(await imageResponse.arrayBuffer());
+    if (buffer.byteLength > MAX_IMAGE_BYTES) {
+      throw new Error(TOO_LARGE);
+    }
     const base64Image = buffer.toString('base64');
 
     // Call Vision REST API — TEXT_DETECTION is optimised for sparse text (receipts)
