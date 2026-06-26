@@ -114,13 +114,10 @@ export const getUserTicketsService = async (userId: number, drawId: number) => {
     ORDER BY t.activated_at DESC
   `, [userId, drawId]);
 
-  // Effective count: all the user's tickets in this draw (promo entries are tickets too)
-  const countResult = await pool.query(
-    `SELECT COUNT(*)::int AS effective_count FROM ticket
-     WHERE activated_by_user_id = $1 AND draw_id = $2`,
-    [userId, drawId],
-  );
-  const totalCount: number = Number(countResult.rows[0]?.effective_count ?? 0);
+  // Effective count: the query has no LIMIT (a user is capped at 30 entries per draw),
+  // so it always returns the full set — the count is just the rows we already fetched.
+  // No second COUNT round-trip needed.
+  const totalCount: number = result.rows.length;
 
   return { tickets: result.rows, totalCount };
 };
