@@ -1,4 +1,5 @@
 import type { Request } from 'express';
+import { ipKeyGenerator } from 'express-rate-limit';
 
 /**
  * Resolve the real client IP behind the Cloudflare -> Render proxy chain.
@@ -21,3 +22,11 @@ export const getClientIp = (req: Request): string => {
 
   return req.ip || '';
 };
+
+/**
+ * Rate-limit key derived from the client IP, normalized for IPv6 via express-rate-limit's
+ * `ipKeyGenerator` (groups IPv6 addresses by /64 so a user can't bypass limits by rotating
+ * within their subnet). Use this in ANY rate-limiter keyGenerator that falls back to the IP —
+ * a raw IP key throws ERR_ERL_KEY_GEN_IPV6 at startup in express-rate-limit v7+.
+ */
+export const getClientIpKey = (req: Request): string => ipKeyGenerator(getClientIp(req));

@@ -24,7 +24,7 @@ import {
 import { getFoundingAvailability } from './features/stripe/stripe.controller.js';
 
 import { authenticateToken } from './shared/middleware/auth.middleware.js';
-import { getClientIp } from './shared/clientIp.js';
+import { getClientIpKey } from './shared/clientIp.js';
 import { makeRateLimitStore } from './shared/rateLimitStore.js';
 import { captureError } from './shared/monitoring.js';
 
@@ -53,7 +53,7 @@ const authLimiter = rateLimit({
   max: 30,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: getClientIp,
+  keyGenerator: getClientIpKey,
   store: makeRateLimitStore('auth'),
   message: { message: 'Too many requests, please try again later.' },
 });
@@ -65,7 +65,7 @@ const registrationLimiter = rateLimit({
   max: 5,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: getClientIp,
+  keyGenerator: getClientIpKey,
   store: makeRateLimitStore('registration'),
   message: { message: 'Too many registration attempts from this IP. Please try again later.' },
 });
@@ -75,7 +75,7 @@ const ticketsLimiter = rateLimit({
   max: 30,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: (req: express.Request) => req.user?.id?.toString() ?? getClientIp(req),
+  keyGenerator: (req: express.Request) => req.user?.id?.toString() ?? getClientIpKey(req),
   store: makeRateLimitStore('tickets'),
   message: { message: 'Too many requests, please slow down.' },
 });
@@ -85,7 +85,7 @@ const publicLimiter = rateLimit({
   max: 20,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: getClientIp,
+  keyGenerator: getClientIpKey,
   store: makeRateLimitStore('public'),
   message: { message: 'Too many requests, please slow down.' },
 });
@@ -97,7 +97,7 @@ const otpLimiter = rateLimit({
   max: 50,
   standardHeaders: true,
   legacyHeaders: false,
-  keyGenerator: getClientIp,
+  keyGenerator: getClientIpKey,
   store: makeRateLimitStore('otp'),
   message: { message: 'Too many verification requests from this device. Please try again later.' },
 });
