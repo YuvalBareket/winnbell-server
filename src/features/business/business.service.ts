@@ -26,7 +26,13 @@ export const getNearbyBusinessesService = async (
   limit = 30,
   name?: string,
 ): Promise<NearbyBusiness[]> => {
-  const CACHE_KEY = `business:nearby:${Math.round(minLat * 100)}:${Math.round(maxLat * 100)}:${Math.round(minLng * 100)}:${Math.round(maxLng * 100)}:${sector || 'all'}:${name || ''}`;
+  // Cap the user-controlled filter values so they can't bloat the cache key (heap-DoS via
+  // unbounded distinct keys). The SAME capped values feed both the key and the query, so a
+  // cached entry can never be returned for a different effective filter.
+  const safeSector = sector ? String(sector).slice(0, 32) : undefined;
+  const safeName = name ? String(name).trim().slice(0, 40) : undefined;
+
+  const CACHE_KEY = `business:nearby:${Math.round(minLat * 100)}:${Math.round(maxLat * 100)}:${Math.round(minLng * 100)}:${Math.round(maxLng * 100)}:${safeSector || 'all'}:${safeName || ''}`;
   const cached = publicCache.get<NearbyBusiness[]>(CACHE_KEY);
   if (cached !== undefined) return cached;
 
@@ -34,9 +40,9 @@ export const getNearbyBusinessesService = async (
 
   const cappedLimit = Math.min(limit, 100);
   const params: (number | string)[] = [minLat, maxLat, minLng, maxLng];
-  const sectorClause = sector ? `AND b.sector = $${params.push(sector)}` : '';
-  const nameClause = name ? `AND b.name ILIKE $${params.push(`%${name}%`)}` : '';
-  const limitPlaceholder = `$${params.push(name ? 100 : cappedLimit)}`;
+  const sectorClause = safeSector ? `AND b.sector = $${params.push(safeSector)}` : '';
+  const nameClause = safeName ? `AND b.name ILIKE $${params.push(`%${safeName}%`)}` : '';
+  const limitPlaceholder = `$${params.push(safeName ? 100 : cappedLimit)}`;
 
   const query = `
     SELECT
