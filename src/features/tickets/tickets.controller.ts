@@ -229,8 +229,10 @@ export const getMyRiskLevel = async (req: AuthRequest, res: Response) => {
           WHERE t2.activated_by_user_id = $1 AND t2.entry_source = 'receipt'
             AND t2.receipt_identifier IS NOT NULL
             AND t2.activated_at >= NOW() - INTERVAL '24 hours') AS daily_count,
+         -- Count ALL of the user's tickets in the open draw (incl. under-review), matching
+         -- the per-user cap and the total they see, so isDrawCapped fires exactly at the cap.
          (SELECT COUNT(*)::int FROM ticket t3 JOIN draw d ON t3.draw_id = d.id
-          WHERE t3.activated_by_user_id = $1 AND d.status = 'Open' AND t3.is_quarantined = FALSE
+          WHERE t3.activated_by_user_id = $1 AND d.status = 'Open'
          ) AS draw_entry_count
        FROM "user" u WHERE u.id = $1`,
       [userId],

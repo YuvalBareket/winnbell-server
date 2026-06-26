@@ -9,6 +9,10 @@ import {
 } from './tickets.types.js';
 
 const MAX_ENTRIES_PER_RECEIPT = 3;
+// Hard per-user cap on total entries in a single draw, across ALL entry types
+// (scanned code, free weekly, receipt, promo). Change here only (client mirrors it
+// in its own constant). This is a legal/fairness limit and must never be exceeded.
+export const MAX_ENTRIES_PER_DRAW = 30;
 import {
   evaluateUserRisk,
   updateUserRiskScore,
@@ -48,16 +52,20 @@ export const activateTicket = async (code: string, userId: number) => {
       throw new Error('Business owners and managers cannot activate tickets for their own business.');
     }
 
-    // Advisory lock on (userId, drawId) to prevent concurrent cap bypass
-    await client.query(`SELECT pg_advisory_xact_lock(1, hashtext($1::text || '_' || $2::text))`, [userId, ticket.draw_id]);
+    // Shared per-user cap lock: ALL entry types (code/free/receipt/promo) serialize on this
+    // one key before the per-draw cap check, so parallel multi-type requests can't each read
+    // count-1 and all commit past the cap. One open draw at a time, so per-user == per-draw here.
+    await client.query(`SELECT pg_advisory_xact_lock(10, hashtext('udcap:' || $1::text))`, [userId]);
 
+    // Cap counts ALL of the user's tickets in this draw (including under-review ones),
+    // matching the total they see — so the visible entry count can never exceed the cap.
     const drawCapResult = await client.query(
       `SELECT COUNT(*) AS count FROM ticket
-       WHERE activated_by_user_id = $1 AND draw_id = $2 AND is_quarantined = FALSE`,
+       WHERE activated_by_user_id = $1 AND draw_id = $2`,
       [userId, ticket.draw_id],
     );
-    if (parseInt(drawCapResult.rows[0].count, 10) >= 30) {
-      throw new Error('You have reached the maximum of 30 entries for this draw.');
+    if (parseInt(drawCapResult.rows[0].count, 10) >= MAX_ENTRIES_PER_DRAW) {
+      throw new Error(`You have reached the maximum of ${MAX_ENTRIES_PER_DRAW} entries for this draw.`);
     }
 
     const updateResult = await client.query(`
@@ -327,14 +335,19 @@ export const activateFreeTicket = async (userId: number, claimIp?: string): Prom
       throw new Error('No active campaign found. Please try again later.');
     }
 
-    // Per-draw per-user cap — counts non-quarantined tickets (promo entries are tickets too)
+    // Shared per-user cap lock (same key as code/receipt/promo) so the 4 entry types can't
+    // each slip past the per-draw cap in parallel.
+    await client.query(`SELECT pg_advisory_xact_lock(10, hashtext('udcap:' || $1::text))`, [userId]);
+
+    // Per-draw per-user cap — counts ALL the user's tickets (incl. under-review), matching
+    // their visible total, so the count can never exceed the cap regardless of quarantine.
     const drawCapResult = await client.query(
       `SELECT COUNT(*)::int AS total_count FROM ticket
-       WHERE activated_by_user_id = $1 AND draw_id = $2 AND is_quarantined = FALSE`,
+       WHERE activated_by_user_id = $1 AND draw_id = $2`,
       [userId, activeDrawId],
     );
-    if (parseInt(drawCapResult.rows[0].total_count, 10) >= 30) {
-      throw new Error('You have reached the maximum of 30 entries for this draw.');
+    if (parseInt(drawCapResult.rows[0].total_count, 10) >= MAX_ENTRIES_PER_DRAW) {
+      throw new Error(`You have reached the maximum of ${MAX_ENTRIES_PER_DRAW} entries for this draw.`);
     }
 
     // One row per user: insert on first-ever claim, otherwise update the approved date.
@@ -395,6 +408,10 @@ export const submitReceiptEntryService = async (
       [userId],
     );
 
+    // Shared per-user cap lock (same key as code/free/promo). Must be held before the
+    // preflight reads draw_count, so the four entry types serialize on the per-draw cap.
+    await client.query(`SELECT pg_advisory_xact_lock(10, hashtext('udcap:' || $1::text))`, [userId]);
+
     // Single pre-flight query: replaces 7 sequential round trips with 1
     const preflightRes = await client.query(
       `WITH
@@ -442,7 +459,7 @@ export const submitReceiptEntryService = async (
         )                                                                     AS daily_count,
         COALESCE((
           SELECT COUNT(*)::int FROM ticket
-          WHERE activated_by_user_id = $1 AND draw_id = (SELECT draw_id FROM od) AND is_quarantined = FALSE
+          WHERE activated_by_user_id = $1 AND draw_id = (SELECT draw_id FROM od)
         ), 0)                                                                 AS draw_count`,
       [userId, input.locationId],
     );
@@ -485,9 +502,9 @@ export const submitReceiptEntryService = async (
       : 1;
 
     const currentDrawCount = Number(pf.draw_count);
-    const remainingDrawEntries = 30 - currentDrawCount;
+    const remainingDrawEntries = MAX_ENTRIES_PER_DRAW - currentDrawCount;
     if (remainingDrawEntries <= 0) {
-      throw new Error('You have reached the maximum of 30 entries for this draw.');
+      throw new Error(`You have reached the maximum of ${MAX_ENTRIES_PER_DRAW} entries for this draw.`);
     }
 
     // Minimum transaction amount check
@@ -835,14 +852,19 @@ export const activatePromotionalEntry = async (
       throw new Error('You can only use one promotional code per campaign.');
     }
 
-    // Per-draw per-user cap — promo tickets live in the ticket table like every other entry
+    // Shared per-user cap lock (same key as code/free/receipt) so the 4 entry types can't
+    // each slip past the per-draw cap in parallel.
+    await client.query(`SELECT pg_advisory_xact_lock(10, hashtext('udcap:' || $1::text))`, [userId]);
+
+    // Per-draw per-user cap — counts ALL the user's tickets (incl. under-review) to match
+    // their visible total; promo tickets live in the ticket table like every other entry.
     const capResult = await client.query(
       `SELECT COUNT(*)::int AS total_count FROM ticket
-       WHERE activated_by_user_id = $1 AND draw_id = $2 AND is_quarantined = FALSE`,
+       WHERE activated_by_user_id = $1 AND draw_id = $2`,
       [userId, draw.id],
     );
-    if (parseInt(capResult.rows[0].total_count, 10) >= 30) {
-      throw new Error('You have reached the maximum of 30 entries for this campaign.');
+    if (parseInt(capResult.rows[0].total_count, 10) >= MAX_ENTRIES_PER_DRAW) {
+      throw new Error(`You have reached the maximum of ${MAX_ENTRIES_PER_DRAW} entries for this campaign.`);
     }
 
     // Redemption log — the UNIQUE(code, user_id) constraint rejects duplicate use per account.
