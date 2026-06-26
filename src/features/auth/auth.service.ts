@@ -8,6 +8,39 @@ const getAllowedStates = async (): Promise<string[]> => {
   return settings.allowed_states ?? [];
 };
 
+// Cap on simultaneously-live refresh tokens per user. Each login/auth inserts a 30-day
+// token; without a cap a user accumulates unlimited live "remember me" sessions (row
+// bloat + a larger stolen-token surface). Keep only the N most recent, prune the rest.
+const MAX_REFRESH_TOKENS_PER_USER = 5;
+
+// Accepts a Pool or a transaction PoolClient (both expose .query).
+type DbExecutor = { query: (text: string, params: unknown[]) => Promise<unknown> };
+
+/**
+ * Insert a refresh token, then prune the user's tokens down to the most recent N.
+ * Bounds live sessions per user. The just-inserted token is always among the newest,
+ * so it survives; the oldest (least-recently-active) sessions beyond N are evicted.
+ */
+export const insertRefreshTokenCapped = async (
+  exec: DbExecutor,
+  userId: number,
+  tokenHash: string,
+  expiresAt: Date,
+): Promise<void> => {
+  await exec.query(
+    `INSERT INTO refresh_token (user_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
+    [userId, tokenHash, expiresAt],
+  );
+  await exec.query(
+    `DELETE FROM refresh_token
+     WHERE user_id = $1
+       AND id NOT IN (
+         SELECT id FROM refresh_token WHERE user_id = $1 ORDER BY id DESC LIMIT $2
+       )`,
+    [userId, MAX_REFRESH_TOKENS_PER_USER],
+  );
+};
+
 // US state full name (as returned by ipinfo's `region` field) → USPS 2-letter code.
 // allowed_states in platform_settings stores the 2-letter codes (admin picks from US_STATES).
 const US_STATE_NAME_TO_CODE: Record<string, string> = {
@@ -183,10 +216,7 @@ export const registerUser = async (
     const refreshHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
     const refreshExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
-    await client.query(
-      `INSERT INTO refresh_token (user_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
-      [newUser.id, refreshHash, refreshExpiry],
-    );
+    await insertRefreshTokenCapped(client, newUser.id, refreshHash, refreshExpiry);
 
     await client.query('COMMIT');
     invalidateUserAuth(newUser.id);
@@ -325,10 +355,7 @@ export const loginUser = async (
   const refreshHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
   const refreshExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
-  await pool.query(
-    `INSERT INTO refresh_token (user_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
-    [user.id, refreshHash, refreshExpiry],
-  );
+  await insertRefreshTokenCapped(pool, user.id, refreshHash, refreshExpiry);
 
   return {
     message: 'Login successful',
@@ -489,10 +516,7 @@ export const syncExternalUser = async (
     const refreshHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
     const refreshExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
-    await client.query(
-      `INSERT INTO refresh_token (user_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
-      [dbUser.id, refreshHash, refreshExpiry],
-    );
+    await insertRefreshTokenCapped(client, dbUser.id, refreshHash, refreshExpiry);
 
     await client.query('COMMIT');
     invalidateUserAuth(dbUser.id);

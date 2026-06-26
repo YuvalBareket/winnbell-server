@@ -314,10 +314,7 @@ export const refreshTokenController = async (req: Request, res: Response): Promi
     const newRefreshHash = crypto.createHash('sha256').update(newRefreshToken).digest('hex');
     const newRefreshExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
-    await pool.query(
-      `INSERT INTO refresh_token (user_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
-      [user.id, newRefreshHash, newRefreshExpiry],
-    );
+    await authService.insertRefreshTokenCapped(pool, user.id, newRefreshHash, newRefreshExpiry);
 
     res.json({ token: newToken, refreshToken: newRefreshToken });
   } catch (err: unknown) {
