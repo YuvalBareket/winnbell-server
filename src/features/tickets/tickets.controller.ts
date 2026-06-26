@@ -18,7 +18,9 @@ export const redeemCode = async (req: AuthRequest, res: Response) => {
     const result = await ticketService.activateTicket(code, userId);
     res.status(200).json(result);
   } catch (error: unknown) {
-    res.status(400).json({ message: 'Redeem failed' });
+    // Surface the service's curated, user-facing message (already used, draw closed, cap reached, etc.).
+    const message = error instanceof Error && error.message ? error.message : 'Redeem failed';
+    res.status(400).json({ message });
   }
 };
 
@@ -211,7 +213,9 @@ export const activatePromotional = async (req: AuthRequest, res: Response) => {
     const result = await ticketService.activatePromotionalEntry(userId, code);
     res.status(201).json({ success: true, ...result });
   } catch (error: unknown) {
-    res.status(400).json({ message: 'Promotional entry failed.' });
+    // Surface the service's curated, user-facing message (invalid code, max uses, one-per-campaign, cap).
+    const message = error instanceof Error && error.message ? error.message : 'Promotional entry failed.';
+    res.status(400).json({ message });
   }
 };
 
