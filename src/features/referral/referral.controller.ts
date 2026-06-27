@@ -2,13 +2,14 @@ import { Request, Response } from 'express';
 import { AuthRequest } from '../../shared/middleware/auth.middleware.js';
 import { getOrCreateReferralCode, resolveReferrerByCode } from './referral.service.js';
 
-// GET /referral/link  (auth) — the logged-in user's shareable referral code + full link.
+// GET /referral/link  (auth) — the logged-in user's shareable referral code.
+// Returns only the code; the client builds the full link from its own origin
+// (window.location.origin + /join?ref=), the same way the business flyer link is built.
 export const getMyReferralLink = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const userId = req.user!.id;
     const code = await getOrCreateReferralCode(userId);
-    const base = (process.env.CLIENT_URL || 'http://localhost:8081').split(',')[0].trim();
-    res.json({ code, link: `${base}/join?ref=${code}` });
+    res.json({ code });
   } catch (err: unknown) {
     console.error('[referral.getMyReferralLink]', err instanceof Error ? err.message : err);
     res.status(500).json({ message: 'Could not generate your referral link.' });
