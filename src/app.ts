@@ -11,6 +11,8 @@ import * as drawsController from './features/draws/draws.controller.js';
 import stripeWebhookRoutes from './features/stripe/stripe.routes.js';
 import notificationRoutes from './features/notifications/notifications.routes.js';
 import phoneRouter from './features/phone/phone.routes.js';
+import referralRoutes from './features/referral/referral.routes.js';
+import { resolveReferral } from './features/referral/referral.controller.js';
 import { Router } from 'express';
 import {
   getNearby,
@@ -136,6 +138,9 @@ publicDrawsRouter.get('/history', drawsController.getDrawHistory);
 publicDrawsRouter.get('/:drawId', drawsController.getDrawById);
 app.use('/draws', publicDrawsRouter);
 
+// Public referral resolve — the /join landing fetches the referrer's first name before login.
+app.get('/referral/resolve', publicLimiter, resolveReferral);
+
 // ── Authenticated routes ──
 app.use(authenticateToken);
 
@@ -146,6 +151,7 @@ app.use('/business', businessRoutes);
 app.use('/notifications', notificationRoutes);
 app.use('/phone/send-otp', otpLimiter);
 app.use('/phone', phoneRouter);
+app.use('/referral', referralRoutes);
 
 // Global error handler — prevents stack traces and file paths from leaking to clients
 app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {

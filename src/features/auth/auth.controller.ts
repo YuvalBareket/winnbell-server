@@ -154,7 +154,7 @@ export const syncUser = async (req: Request, res: Response): Promise<void> => {
     const email = payload['email'] as string;
     const meta = (payload['user_metadata'] ?? {}) as Record<string, unknown>;
     const fullName = ((meta['full_name'] ?? meta['name'] ?? '') as string).trim();
-    const { inviteToken, role: bodyRole } = req.body;
+    const { inviteToken, role: bodyRole, referralCode } = req.body;
     // Role comes from JWT user_metadata (set at signUp time) — atomic, no race condition.
     // For OAuth sign-ins user_metadata.role is absent; fall back to req.body.role (set
     // from pendingRole localStorage by useSupabaseSync before calling syncUser).
@@ -165,6 +165,7 @@ export const syncUser = async (req: Request, res: Response): Promise<void> => {
       role: roleFromToken,
       inviteToken: inviteToken || (meta['invite_token'] as string) || null,
       ip,
+      referralCode: (referralCode as string) || (meta['referral_code'] as string) || null,
     });
 
     res.json(result);

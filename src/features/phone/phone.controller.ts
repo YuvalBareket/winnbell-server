@@ -57,8 +57,8 @@ export const verifyOtp = async (req: Request, res: Response): Promise<void> => {
   if (codeErr) { res.status(400).json({ message: codeErr }); return; }
 
   try {
-    await phoneService.verifyPhoneOtp(userId, code);
-    res.json({ success: true });
+    const { referralBonusGranted } = await phoneService.verifyPhoneOtp(userId, code);
+    res.json({ success: true, referralBonusGranted });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : '';
     if (msg === 'NO_OTP') { res.status(400).json({ message: 'No verification code found. Please request a new one.' }); return; }

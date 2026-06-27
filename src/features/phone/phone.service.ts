@@ -1,6 +1,7 @@
 import twilio from 'twilio';
 import { getPool } from '../../shared/db/db.js';
 import { invalidateUserAuth } from '../../shared/cache/cache.js';
+import { grantPendingReferralBonus } from '../referral/referral.service.js';
 import crypto from 'crypto';
 
 const twilioClient = twilio(
@@ -84,7 +85,10 @@ export const sendPhoneOtp = async (userId: number, phoneNumber: string): Promise
 };
 
 
-export const verifyPhoneOtp = async (userId: number, code: string): Promise<void> => {
+export const verifyPhoneOtp = async (
+  userId: number,
+  code: string,
+): Promise<{ referralBonusGranted: boolean }> => {
   const pool = getPool();
   const client = await pool.connect();
 
@@ -146,4 +150,27 @@ export const verifyPhoneOtp = async (userId: number, code: string): Promise<void
   } finally {
     client.release();
   }
+
+  // Phone is now verified (committed above). Grant any pending referral bonus in its OWN
+  // transaction — best-effort, so a bonus failure can never roll back or block the core
+  // phone verification. Idempotent (rewarded_at guard), so a later retry is safe.
+  // The result is returned so the client can show a congrats screen for the new entry.
+  let referralBonusGranted = false;
+  try {
+    const bonusClient = await pool.connect();
+    try {
+      await bonusClient.query('BEGIN');
+      referralBonusGranted = await grantPendingReferralBonus(bonusClient, userId);
+      await bonusClient.query('COMMIT');
+    } catch (e) {
+      await bonusClient.query('ROLLBACK');
+      throw e;
+    } finally {
+      bonusClient.release();
+    }
+  } catch (err) {
+    console.error('[verifyPhoneOtp] referral bonus grant failed (non-fatal):', err instanceof Error ? err.message : err);
+  }
+
+  return { referralBonusGranted };
 };

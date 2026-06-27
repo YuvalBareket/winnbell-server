@@ -3,6 +3,7 @@ import { getPool } from '../../shared/db/db.js';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import { getPlatformSettings, invalidateUserAuth } from '../../shared/cache/cache.js';
+import { resolveReferrerIdForSignup } from '../referral/referral.service.js';
 const getAllowedStates = async (): Promise<string[]> => {
   const settings = await getPlatformSettings();
   return settings.allowed_states ?? [];
@@ -383,7 +384,7 @@ export const syncExternalUser = async (
   externalId: string,
   email: string,
   fullName: string,
-  metadata?: { role?: string; inviteToken?: string | null; ip?: string },
+  metadata?: { role?: string; inviteToken?: string | null; ip?: string; referralCode?: string | null },
 ) => {
   const pool = getPool();
   email = email.toLowerCase().trim();
@@ -429,16 +430,21 @@ export const syncExternalUser = async (
       throw new Error('ACCOUNT_DELETED');
     }
 
+    // Referral capture: resolve the ?ref= code to a referrer ONLY for a fresh new account.
+    // referred_by_user_id is set on INSERT but NOT in the ON CONFLICT clause, so an existing
+    // user re-syncing (or self-referral, which resolveReferrerIdForSignup rejects) never gets it.
+    const referrerId = await resolveReferrerIdForSignup(metadata?.referralCode, email);
+
     const upsertResult = await client.query(
-      `INSERT INTO "user" (external_auth_id, email, full_name, role, is_active, is_email_verified, declared_state)
-       VALUES ($1, $2, $3, $4, true, true, $5)
+      `INSERT INTO "user" (external_auth_id, email, full_name, role, is_active, is_email_verified, declared_state, referred_by_user_id)
+       VALUES ($1, $2, $3, $4, true, true, $5, $6)
        ON CONFLICT (email) DO UPDATE
          SET external_auth_id = EXCLUDED.external_auth_id,
              is_email_verified = true,
              declared_state = COALESCE(EXCLUDED.declared_state, "user".declared_state),
              updated_at = NOW()
        RETURNING id, role, full_name AS "fullName", email`,
-      [externalId, email, fullName, role, detectedState],
+      [externalId, email, fullName, role, detectedState, referrerId],
     );
     const dbUser = upsertResult.rows[0];
 
