@@ -284,6 +284,32 @@ export const getDrawBusinessesService = async (
   return { rows: rows.rows, total: count.rows[0].total };
 };
 
+// Open a draw inside an EXISTING transaction: flip to Open, enrol the currently-paid
+// businesses (the single enrolment point), and log the audit event. The caller must have
+// already verified the draw is Upcoming and that no other draw is Open (the close hand-off
+// guarantees this by closing the current Open draw first, in the same transaction).
+//
+// Enrollment happens HERE — the single point a business joins a draw. Open runs from the 1st
+// (after month-end charges), so only paid businesses get in:
+//  - regular subs (stripe_subscription_id NOT NULL): Active/Trialing, plus Past_Due during
+//    Stripe's retry grace (the draw-time check at close removes any still-unpaid).
+//  - founding members (no stripe sub): only while their prepaid year still covers this draw's
+//    date (current_period_end >= draw_date) — expires them automatically after 12 months.
+const openDrawInTx = async (client: import('pg').PoolClient, drawId: number): Promise<void> => {
+  await client.query(`UPDATE draw SET status = 'Open', opened_at = NOW() WHERE id = $1`, [drawId]);
+  await client.query(`
+    INSERT INTO draw_entry (draw_id, business_id, fee_at_entry)
+    SELECT d.id, b.id, COALESCE(s.fee_at_entry, 0)
+    FROM draw d
+    JOIN subscription s ON s.status IN ('Active', 'Trialing', 'Past_Due')
+    JOIN business b ON b.id = s.business_id
+    WHERE d.id = $1
+      AND (s.stripe_subscription_id IS NOT NULL OR s.current_period_end >= d.draw_date)
+    ON CONFLICT (draw_id, business_id) DO NOTHING
+  `, [drawId]);
+  await logDrawAudit(client, drawId, 'opened');
+};
+
 export const openDrawService = async (drawId: number): Promise<void> => {
   const pool = getPool();
   const client = await pool.connect();
@@ -302,28 +328,7 @@ export const openDrawService = async (drawId: number): Promise<void> => {
     const openCheck = await client.query(`SELECT id FROM draw WHERE status = 'Open' FOR UPDATE SKIP LOCKED`);
     if (openCheck.rows.length > 0) throw new Error('A draw is already Open. Close it before opening another.');
 
-    await client.query(`UPDATE draw SET status = 'Open', opened_at = NOW() WHERE id = $1`, [drawId]);
-
-    // Enrollment happens HERE — the single point a business joins a draw. Open
-    // runs from the 1st (after month-end charges), so only paid businesses get in:
-    //  - regular subs (stripe_subscription_id NOT NULL): Active/Trialing, plus
-    //    Past_Due during Stripe's retry grace (the draw-time check at close removes
-    //    any still-unpaid).
-    //  - founding members (no stripe sub): only while their prepaid year still
-    //    covers this draw's date (current_period_end >= draw_date) — expires them
-    //    automatically after 12 months.
-    await client.query(`
-      INSERT INTO draw_entry (draw_id, business_id, fee_at_entry)
-      SELECT d.id, b.id, COALESCE(s.fee_at_entry, 0)
-      FROM draw d
-      JOIN subscription s ON s.status IN ('Active', 'Trialing', 'Past_Due')
-      JOIN business b ON b.id = s.business_id
-      WHERE d.id = $1
-        AND (s.stripe_subscription_id IS NOT NULL OR s.current_period_end >= d.draw_date)
-      ON CONFLICT (draw_id, business_id) DO NOTHING
-    `, [drawId]);
-
-    await logDrawAudit(client, drawId, 'opened');
+    await openDrawInTx(client, drawId);
     await client.query('COMMIT');
     invalidatePublicBusinessData();
   } catch (err) {
@@ -344,6 +349,17 @@ export const closeDrawService = async (drawId: number): Promise<void> => {
 
     if (check.rows.length === 0) throw new Error('Draw not found');
     if (check.rows[0].status.toUpperCase() !== 'OPEN') throw new Error('Draw is not Open');
+
+    // Always keep exactly one Open draw. Closing the current one atomically opens the next
+    // Upcoming draw (earliest draw_date). If there is no Upcoming draw to take over, the close
+    // is blocked entirely so the platform is never left with zero Open draws — this is the
+    // safeguard against an accidental close. It is all one transaction, so any failure here
+    // rolls the close back and the current draw stays Open.
+    const nextUpcoming = await client.query(
+      `SELECT id FROM draw WHERE status = 'Upcoming' ORDER BY draw_date ASC LIMIT 1 FOR UPDATE`,
+    );
+    if (nextUpcoming.rows.length === 0) throw new Error('NO_UPCOMING_DRAW');
+    const nextDrawId = nextUpcoming.rows[0].id as number;
 
     await client.query(`UPDATE draw SET status = 'Closed', closed_at = NOW() WHERE id = $1`, [drawId]);
     await logDrawAudit(client, drawId, 'closed');
@@ -366,6 +382,9 @@ export const closeDrawService = async (drawId: number): Promise<void> => {
           pending_min_transaction_amount = NULL
       WHERE pending_min_transaction_amount IS NOT NULL
     `);
+
+    // Hand off: open the next Upcoming draw in the SAME transaction so there is never a gap.
+    await openDrawInTx(client, nextDrawId);
 
     await client.query('COMMIT');
     invalidatePublicBusinessData();
@@ -391,9 +410,22 @@ export const reopenDrawService = async (drawId: number): Promise<void> => {
     if (check.rows[0].status.toUpperCase() !== 'CLOSED') throw new Error('Draw is not Closed');
     if (check.rows[0].winner_confirmed === true) throw new Error('Cannot reopen a draw whose winner has been confirmed');
 
-    // Atomically check for existing open draw
-    const openCheck = await client.query(`SELECT id FROM draw WHERE status = 'Open' FOR UPDATE SKIP LOCKED`);
-    if (openCheck.rows.length > 0) throw new Error('A draw is already Open. Close it before reopening another.');
+    // Closing a draw auto-opens the next Upcoming one, so there is normally exactly one Open
+    // draw when an admin reopens. To preserve the "always one Open" invariant, reopening does an
+    // atomic SWAP: revert that auto-opened draw back to Upcoming (un-enrol it) and reopen this one.
+    // The swap is only safe while the auto-opened draw has NO activity yet (no tickets) — i.e. the
+    // close is being undone before anything happened on the new draw. If it already has any tickets,
+    // we block, because reverting it would strand real entries.
+    const openRows = await client.query(`SELECT id FROM draw WHERE status = 'Open' FOR UPDATE`);
+    for (const row of openRows.rows) {
+      if (row.id === drawId) continue; // defensive: this draw is Closed, so it won't be here
+      const activity = await client.query(`SELECT 1 FROM ticket WHERE draw_id = $1 LIMIT 1`, [row.id]);
+      if (activity.rows.length > 0) throw new Error('NEXT_DRAW_HAS_ACTIVITY');
+      // Revert the auto-opened draw to its exact pre-open state: Upcoming, no enrolment, no opened_at.
+      await client.query(`DELETE FROM draw_entry WHERE draw_id = $1`, [row.id]);
+      await client.query(`UPDATE draw SET status = 'Upcoming', opened_at = NULL WHERE id = $1`, [row.id]);
+      await logDrawAudit(client, row.id, 'reverted_to_upcoming', { reason: 'reopen_swap', reopened_draw_id: drawId });
+    }
 
     await client.query(
       `UPDATE draw

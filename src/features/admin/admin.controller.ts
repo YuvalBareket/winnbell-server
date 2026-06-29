@@ -165,6 +165,10 @@ export const closeDraw = async (req: Request, res: Response) => {
     await closeDrawService(drawId);
     res.status(200).json({ message: 'Campaign closed successfully' });
   } catch (error) {
+    if (error instanceof Error && error.message === 'NO_UPCOMING_DRAW') {
+      res.status(400).json({ message: 'Cannot close this campaign: there is no upcoming campaign to open next. Create the next campaign first so the draw is never left without an open campaign.' });
+      return;
+    }
     res.status(500).json({ message: 'Failed to close campaign' });
   }
 };
@@ -332,6 +336,10 @@ export const reopenDraw = async (req: Request, res: Response) => {
     await reopenDrawService(drawId);
     res.status(200).json({ message: 'Campaign reopened successfully' });
   } catch (error) {
+    if (error instanceof Error && error.message === 'NEXT_DRAW_HAS_ACTIVITY') {
+      res.status(400).json({ message: 'Cannot reopen: the next campaign that opened already has entries. Reopening would discard them.' });
+      return;
+    }
     res.status(500).json({ message: 'Failed to reopen campaign' });
   }
 };
