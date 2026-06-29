@@ -5,7 +5,7 @@ import { INearbyQuery } from './business.types.js';
 import {
   addBusinessLocation,
   createFullBusinessProfile,
-  createManagerInviteLink,
+  createManagerInviteToken,
   deleteBusinessLocation,
   getAddress,
   getAddressCoords,
@@ -483,12 +483,12 @@ export const createInviteLink = async (req: AuthRequest, res: Response): Promise
   try {
     const { locationId } = req.params;
 
-    const inviteLink = await createManagerInviteLink(
+    const token = await createManagerInviteToken(
       Number(locationId),
       req.user!.id,
     );
 
-    res.json({ inviteLink });
+    res.json({ token });
   } catch (error: unknown) {
     if (error instanceof Error && error.message === 'UNAUTHORIZED_OR_INVALID_LOCATION') {
       res.status(403).json({ message: 'Forbidden' });

@@ -236,7 +236,7 @@ export const getMyBusinessData = async (userId: number, managedLocationId?: numb
   return full;
 };
 
-export const createManagerInviteLink = async (locationId: number, ownerUserId: number) => {
+export const createManagerInviteToken = async (locationId: number, ownerUserId: number) => {
   const pool = getPool();
 
   const result = await pool.query(`
@@ -264,8 +264,10 @@ export const createManagerInviteLink = async (locationId: number, ownerUserId: n
     [tokenHash, locationId],
   );
 
-  const baseUrl = (process.env.CLIENT_URL || 'http://localhost:8081').split(',')[0].trim();
-  return `${baseUrl}/register/Location?token=${token}`;
+  // Return only the signed invite token. The client builds the full URL from its own origin
+  // (window.location.origin + /register/Location?token=), the same way the referral link is
+  // built, so the link always matches the environment the owner is actually using.
+  return token;
 };
 
 // Demote a detached manager to a regular 'User' (unless they own a business or
