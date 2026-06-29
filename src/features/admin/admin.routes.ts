@@ -45,6 +45,7 @@ router.get('/notifications/history', adminController.getNotificationHistory);
 
 router.patch('/tickets/:ticketId/image-decision', adminController.adminImageDecision);
 router.get('/analytics', adminController.getAnalytics);
+router.get('/analytics/growth', adminController.getGrowth);
 router.get('/analytics/entry-volume', adminController.getEntryVolume);
 router.get('/analytics/campaigns', adminController.getCampaignComparison);
 router.get('/analytics/locations', adminController.getLocationBreakdown);

@@ -2,6 +2,7 @@ import bcrypt from 'bcryptjs';
 import { getPool } from '../../shared/db/db.js';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
+import { isIP } from 'net';
 import { getPlatformSettings, invalidateUserAuth } from '../../shared/cache/cache.js';
 import { resolveReferrerIdForSignup } from '../referral/referral.service.js';
 const getAllowedStates = async (): Promise<string[]> => {
@@ -63,6 +64,8 @@ export interface IpRegion {
   country: string | null;
   /** USPS state code, e.g. 'FL'. Only set for US IPs whose region was recognised. */
   stateCode: string | null;
+  /** City name from the IP geo lookup (ipinfo). Null when detection failed. */
+  city: string | null;
 }
 
 /**
@@ -72,7 +75,7 @@ export interface IpRegion {
  * Returns nulls on any failure — callers fail open.
  */
 export const getRegionFromIp = async (ip: string): Promise<IpRegion> => {
-  if (!ip) return { country: null, stateCode: null };
+  if (!ip) return { country: null, stateCode: null, city: null };
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 2000);
@@ -81,13 +84,14 @@ export const getRegionFromIp = async (ip: string): Promise<IpRegion> => {
     // value can't inject path/query into the external URL or maneuver around the token param.
     const res = await fetch(`https://ipinfo.io/${encodeURIComponent(ip)}/json${tokenParam}`, { signal: controller.signal });
     clearTimeout(timeout);
-    if (!res.ok) return { country: null, stateCode: null };
-    const data = await res.json() as { country?: string; region?: string };
+    if (!res.ok) return { country: null, stateCode: null, city: null };
+    const data = await res.json() as { country?: string; region?: string; city?: string };
     const country = typeof data.country === 'string' && data.country.length === 2 ? data.country : null;
     const stateCode = country === 'US' && data.region ? (US_STATE_NAME_TO_CODE[data.region] ?? null) : null;
-    return { country, stateCode };
+    const city = typeof data.city === 'string' && data.city.trim() ? data.city.trim().slice(0, 120) : null;
+    return { country, stateCode, city };
   } catch {
-    return { country: null, stateCode: null };
+    return { country: null, stateCode: null, city: null };
   }
 };
 
@@ -95,6 +99,7 @@ export interface RegionCheckResult {
   blocked: boolean;
   country: string | null;
   state: string | null;
+  city: string | null;
 }
 
 /**
@@ -103,14 +108,14 @@ export interface RegionCheckResult {
  * geo-API hiccup never locks out legitimate users.
  */
 export const evaluateRegionRestriction = async (ip: string): Promise<RegionCheckResult> => {
-  const { country, stateCode } = await getRegionFromIp(ip);
+  const { country, stateCode, city } = await getRegionFromIp(ip);
   const allowedStates = await getAllowedStates();
 
-  if (allowedStates.length === 0) return { blocked: false, country, state: stateCode };
-  if (!country) return { blocked: false, country, state: stateCode }; // fail open
-  if (country !== 'US') return { blocked: true, country, state: stateCode };
-  if (!stateCode) return { blocked: false, country, state: stateCode }; // US, state unknown — fail open
-  return { blocked: !allowedStates.includes(stateCode), country, state: stateCode };
+  if (allowedStates.length === 0) return { blocked: false, country, state: stateCode, city };
+  if (!country) return { blocked: false, country, state: stateCode, city }; // fail open
+  if (country !== 'US') return { blocked: true, country, state: stateCode, city };
+  if (!stateCode) return { blocked: false, country, state: stateCode, city }; // US, state unknown — fail open
+  return { blocked: !allowedStates.includes(stateCode), country, state: stateCode, city };
 };
 
 // ── Bot / throwaway-email protection ──────────────────────────────────────────
@@ -384,7 +389,7 @@ export const syncExternalUser = async (
   externalId: string,
   email: string,
   fullName: string,
-  metadata?: { role?: string; inviteToken?: string | null; ip?: string; referralCode?: string | null },
+  metadata?: { role?: string; inviteToken?: string | null; ip?: string; referralCode?: string | null; acquisitionSource?: string | null },
 ) => {
   const pool = getPool();
   email = email.toLowerCase().trim();
@@ -403,6 +408,7 @@ export const syncExternalUser = async (
   // Existing Admin accounts are exempt — admins must be able to sign in from anywhere
   // (e.g. operating the platform from outside the allowed states).
   let detectedState: string | null = null;
+  let detectedCity: string | null = null;
   if (metadata?.ip) {
     const adminCheck = await pool.query(
       `SELECT role FROM "user" WHERE external_auth_id = $1 OR email = $2 LIMIT 1`,
@@ -413,6 +419,7 @@ export const syncExternalUser = async (
       const region = await evaluateRegionRestriction(metadata.ip);
       if (region.blocked) throw new Error('REGION_RESTRICTED');
       detectedState = region.state ?? region.country;
+      detectedCity = region.city;
     }
   }
 
@@ -435,16 +442,31 @@ export const syncExternalUser = async (
     // user re-syncing (or self-referral, which resolveReferrerIdForSignup rejects) never gets it.
     const referrerId = await resolveReferrerIdForSignup(metadata?.referralCode, email);
 
+    // Acquisition channel (analytics §4): validate the client-derived source against the enum,
+    // default 'direct'. Set on INSERT only (not in ON CONFLICT) so a login/re-sync never
+    // overwrites a user's original signup channel.
+    const ALLOWED_SOURCES = ['referral', 'promo_code', 'location_flyer', 'direct'];
+    const acquisitionSource = ALLOWED_SOURCES.includes(metadata?.acquisitionSource ?? '')
+      ? (metadata!.acquisitionSource as string)
+      : 'direct';
+
+    // registration_ip is an INET column — only pass a value that is a valid IPv4/IPv6 address,
+    // otherwise the cast would throw and break signup. This field is analytics-only; never let
+    // a bad/empty IP block registration. Falls back to NULL.
+    const safeIp = metadata?.ip && isIP(metadata.ip) ? metadata.ip : null;
+
     const upsertResult = await client.query(
-      `INSERT INTO "user" (external_auth_id, email, full_name, role, is_active, is_email_verified, declared_state, referred_by_user_id)
-       VALUES ($1, $2, $3, $4, true, true, $5, $6)
+      `INSERT INTO "user" (external_auth_id, email, full_name, role, is_active, is_email_verified, declared_state, referred_by_user_id, registration_ip, city, acquisition_source)
+       VALUES ($1, $2, $3, $4, true, true, $5, $6, $7, $8, $9)
        ON CONFLICT (email) DO UPDATE
          SET external_auth_id = EXCLUDED.external_auth_id,
              is_email_verified = true,
              declared_state = COALESCE(EXCLUDED.declared_state, "user".declared_state),
+             registration_ip = COALESCE("user".registration_ip, EXCLUDED.registration_ip),
+             city = COALESCE("user".city, EXCLUDED.city),
              updated_at = NOW()
        RETURNING id, role, full_name AS "fullName", email`,
-      [externalId, email, fullName, role, detectedState, referrerId],
+      [externalId, email, fullName, role, detectedState, referrerId, safeIp, detectedCity, acquisitionSource],
     );
     const dbUser = upsertResult.rows[0];
 

@@ -42,6 +42,7 @@ import {
   getDrawRejectedWinnersService,
   getDrawAuditLogService,
 } from './admin.service.js';
+import { getGrowthAnalyticsService } from './growth.service.js';
 
 export const getDashboardData = async (req: Request, res: Response) => {
   try {
@@ -373,6 +374,16 @@ export const deactivatePromoCode = async (req: Request, res: Response) => {
   } catch (error) {
     console.error('[admin.deactivatePromoCode]', error);
     res.status(500).json({ message: 'Failed to deactivate promo code' });
+  }
+};
+
+export const getGrowth = async (_req: Request, res: Response) => {
+  try {
+    const data = await getGrowthAnalyticsService();
+    res.json(data);
+  } catch (error) {
+    console.error('[admin.getGrowth]', error);
+    res.status(500).json({ message: 'Failed to fetch growth analytics' });
   }
 };
 
