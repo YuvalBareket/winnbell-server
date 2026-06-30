@@ -227,7 +227,7 @@ export const getRevenueAnalytics = async (
 ) => {
   const { businessId, scopedLocationId } = await resolveScope(userId, jwtLocationId, filterLocationId);
   if (businessId == null) {
-    return { total_qualifying_revenue: 0, threshold: 0, avg_purchase_amount: 0, revenue_change_pct: null, qualifying_purchases: 0, series: [] };
+    return { total_qualifying_revenue: 0, threshold: 0, avg_purchase_amount: 0, revenue_change_pct: null, series: [] };
   }
   const loc = scopedLocationId;
   const a = [businessId, loc, p.from, p.to] as const;
@@ -235,7 +235,6 @@ export const getRevenueAnalytics = async (
   const [revenue, threshold, draws, series] = await Promise.all([
     pool.query(
       `SELECT COALESCE(SUM(transaction_amount),0) AS total_revenue,
-              COUNT(*) FILTER (WHERE transaction_amount IS NOT NULL) AS qual_count,
               COALESCE(AVG(transaction_amount),0) AS avg_purchase
        FROM ticket WHERE business_id=$1 AND ($2::int IS NULL OR location_id=$2) AND is_quarantined=FALSE
          AND activated_at >= $3 AND activated_at < $4`, [...a]),
@@ -264,7 +263,6 @@ export const getRevenueAnalytics = async (
     threshold: thr,
     avg_purchase_amount: avgPurchase,
     revenue_change_pct: revenueChangePct,
-    qualifying_purchases: num(revenue.rows[0].qual_count),
     series,
   };
 };
