@@ -87,8 +87,9 @@ export const grantPendingReferralBonus = async (
   // Shared per-user cap lock (same key the entry paths use) so the bonus can't overshoot 30.
   await client.query(`SELECT pg_advisory_xact_lock(10, hashtext('udcap:' || $1::text))`, [userId]);
 
+  // Referral attribution + reward state live in user_acquisition (1:1 with the user).
   const u = await client.query(
-    `SELECT referred_by_user_id, referral_rewarded_at FROM "user" WHERE id = $1 FOR UPDATE`,
+    `SELECT referred_by_user_id, referral_rewarded_at FROM user_acquisition WHERE user_id = $1 FOR UPDATE`,
     [userId],
   );
   const row = u.rows[0];
@@ -112,6 +113,6 @@ export const grantPendingReferralBonus = async (
      VALUES ($1, 'Activated', 'referral', NULL, NULL, $2, $3, NOW())`,
     [code, drawId, userId],
   );
-  await client.query(`UPDATE "user" SET referral_rewarded_at = NOW() WHERE id = $1`, [userId]);
+  await client.query(`UPDATE user_acquisition SET referral_rewarded_at = NOW() WHERE user_id = $1`, [userId]);
   return true;
 };

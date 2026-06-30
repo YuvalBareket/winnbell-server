@@ -146,6 +146,7 @@ describe('syncExternalUser — existing user role is never downgraded', () => {
       { rows: [] }, // deletedCheck — not a deleted account
       // Simulates ON CONFLICT DO UPDATE returning the existing DB role (Admin)
       { rows: [{ id: 99, role: 'Admin', fullName: 'Admin User', email: 'admin@prod.com' }] },
+      { rows: [] }, // user_acquisition INSERT (added after upsert)
       { rows: [] }, // business_location check
       { rows: [] }, // COMMIT
     );
@@ -163,6 +164,7 @@ describe('syncExternalUser — existing user role is never downgraded', () => {
       { rows: [] }, // deletedCheck
       // ON CONFLICT returns existing Business role from DB
       { rows: [{ id: 50, role: 'Business', fullName: 'Biz User', email: 'biz@prod.com' }] },
+      { rows: [] }, // user_acquisition INSERT (added after upsert)
       { rows: [] }, // no location
       { rows: [{ id: 77, is_subscribed: true, logo_url: null }] }, // has biz row
       { rows: [] }, // COMMIT
@@ -227,6 +229,7 @@ describe('syncExternalUser — region blocking via IP', () => {
       { rows: [] },
       { rows: [] }, // deletedCheck
       { rows: [{ id: 42, role: 'User', fullName: 'FL User', email: 'fl@test.com' }] },
+      { rows: [] }, // user_acquisition INSERT (added after upsert)
       { rows: [] },
       { rows: [] },
     );
@@ -255,6 +258,7 @@ describe('syncExternalUser — region blocking via IP', () => {
       { rows: [] },
       { rows: [] }, // deletedCheck
       { rows: [{ id: 40, role: 'User', fullName: 'Roaming User', email: 'roam@test.com' }] },
+      { rows: [] }, // user_acquisition INSERT (added after upsert)
       { rows: [] }, // no location
       { rows: [] }, // COMMIT
     );
@@ -277,6 +281,7 @@ describe('syncExternalUser — region blocking via IP', () => {
       { rows: [] },
       { rows: [] }, // deletedCheck
       { rows: [{ id: 43, role: 'User', fullName: 'Mystery State', email: 'us@test.com' }] },
+      { rows: [] }, // user_acquisition INSERT (added after upsert)
       { rows: [] },
       { rows: [] },
     );
@@ -299,6 +304,7 @@ describe('syncExternalUser — region blocking via IP', () => {
       { rows: [] },
       { rows: [] }, // deletedCheck
       { rows: [{ id: 44, role: 'User', fullName: 'IL User', email: 'il@test.com' }] },
+      { rows: [] }, // user_acquisition INSERT (added after upsert)
       { rows: [] },
       { rows: [] },
     );
@@ -323,6 +329,7 @@ describe('syncExternalUser — region blocking via IP', () => {
       { rows: [] },
       { rows: [] }, // deletedCheck
       { rows: [{ id: 90, role: 'Admin', fullName: 'Platform Admin', email: 'admin@winnbell.com' }] },
+      { rows: [] }, // user_acquisition INSERT (added after upsert)
       { rows: [] },
       { rows: [] },
     );
@@ -343,6 +350,7 @@ describe('syncExternalUser — region blocking via IP', () => {
       { rows: [] },
       { rows: [] }, // deletedCheck
       { rows: [{ id: 41, role: 'User', fullName: 'No IP', email: 'noip@test.com' }] },
+      { rows: [] }, // user_acquisition INSERT (added after upsert)
       { rows: [] },
       { rows: [] },
     );
@@ -362,6 +370,7 @@ describe('syncExternalUser — Manager detection via business_location', () => {
       { rows: [] },
       { rows: [] }, // deletedCheck
       { rows: [{ id: 60, role: 'Business', fullName: 'Mgr', email: 'mgr@biz.com' }] },
+      { rows: [] }, // user_acquisition INSERT (added after upsert)
       { rows: [{ id: 7 }] }, // business_location — user is manager
       { rows: [] }, // COMMIT
     );
@@ -381,6 +390,7 @@ describe('syncExternalUser — Manager detection via business_location', () => {
       { rows: [] },
       { rows: [] }, // deletedCheck
       { rows: [{ id: 50, role: 'User', fullName: 'Invited Mgr', email: 'invited@biz.com' }] },
+      { rows: [] }, // user_acquisition INSERT (added after upsert)
       { rows: [{ id: 20 }], rowCount: 1 }, // UPDATE biz_loc
       { rows: [] }, // UPDATE role
       { rows: [] }, // COMMIT
@@ -403,6 +413,7 @@ describe('syncExternalUser — businessIsActive field', () => {
       { rows: [] },
       { rows: [] }, // deletedCheck
       { rows: [{ id: 70, role: 'Business', fullName: 'Active Biz', email: 'active@biz.com' }] },
+      { rows: [] }, // user_acquisition INSERT (added after upsert)
       { rows: [] }, // no location
       { rows: [{ id: 80, is_subscribed: true, logo_url: null }] },
       { rows: [] }, // COMMIT
@@ -419,6 +430,7 @@ describe('syncExternalUser — businessIsActive field', () => {
       { rows: [] },
       { rows: [] }, // deletedCheck
       { rows: [{ id: 71, role: 'Business', fullName: 'Inactive Biz', email: 'inactive@biz.com' }] },
+      { rows: [] }, // user_acquisition INSERT (added after upsert)
       { rows: [] },
       { rows: [{ id: 81, is_subscribed: false, logo_url: null }] },
       { rows: [] },
@@ -434,6 +446,7 @@ describe('syncExternalUser — businessIsActive field', () => {
       { rows: [] },
       { rows: [] }, // deletedCheck
       { rows: [{ id: 72, role: 'Business', fullName: 'Null Biz', email: 'null@biz.com' }] },
+      { rows: [] }, // user_acquisition INSERT (added after upsert)
       { rows: [] },
       { rows: [{ id: 82, is_subscribed: null, logo_url: null }] },
       { rows: [] },
@@ -503,6 +516,7 @@ describe('syncExternalUser — Admin role escalation blocked', () => {
       { rows: [] },
       { rows: [] }, // deletedCheck
       { rows: [{ id: 99, role: 'User', fullName: 'Hacker', email: 'hacker@test.com' }] },
+      { rows: [] }, // user_acquisition INSERT (added after upsert)
       { rows: [] }, // no location
       { rows: [] }, // COMMIT
     );

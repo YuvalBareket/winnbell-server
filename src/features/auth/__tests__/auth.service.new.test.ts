@@ -133,6 +133,7 @@ describe('syncExternalUser — tolerant invite handling (invalid invite is ignor
       { rows: [] }, // BEGIN
       { rows: [] }, // deletedCheck
       { rows: [{ id: 60, role: 'User', fullName: 'Former Mgr', email: 'former@test.com' }] }, // upsert
+      { rows: [] }, // user_acquisition INSERT (added after upsert)
       // No UPDATE biz_loc — expired token is caught and ignored
       { rows: [] }, // SELECT active managed location — none
       { rows: [] }, // INSERT refresh_token
@@ -161,6 +162,7 @@ describe('syncExternalUser — tolerant invite handling (invalid invite is ignor
       { rows: [] }, // BEGIN
       { rows: [] }, // deletedCheck
       { rows: [{ id: 61, role: 'User', fullName: 'Wrong Type', email: 'wrong@test.com' }] }, // upsert
+      { rows: [] }, // user_acquisition INSERT (added after upsert)
       { rows: [] }, // SELECT active managed location — none (falls into !inviteApplied path)
       { rows: [] }, // INSERT refresh_token
       { rows: [] }, // COMMIT
@@ -187,6 +189,7 @@ describe('syncExternalUser — tolerant invite handling (invalid invite is ignor
       { rows: [] }, // BEGIN
       { rows: [] }, // deletedCheck
       { rows: [{ id: 62, role: 'User', fullName: 'No Loc', email: 'noloc@test.com' }] }, // upsert
+      { rows: [] }, // user_acquisition INSERT (added after upsert)
       { rows: [] }, // SELECT active managed location — falls into !inviteApplied path
       { rows: [] }, // INSERT refresh_token
       { rows: [] }, // COMMIT
@@ -207,6 +210,7 @@ describe('syncExternalUser — tolerant invite handling (invalid invite is ignor
       { rows: [] },
       { rows: [] }, // deletedCheck
       { rows: [{ id: 70, role: 'User', fullName: 'New Mgr', email: 'newmgr@test.com' }] },
+      { rows: [] }, // user_acquisition INSERT (added after upsert)
       { rows: [{ id: 25 }], rowCount: 1 }, // UPDATE biz_loc — invite accepted
       { rows: [] }, // UPDATE user role
       { rows: [] }, // INSERT refresh_token
@@ -228,6 +232,7 @@ describe('syncExternalUser — tolerant invite handling (invalid invite is ignor
       { rows: [] },
       { rows: [] }, // deletedCheck
       { rows: [{ id: 80, role: 'Business', fullName: 'Active Mgr', email: 'activemgr@test.com' }] },
+      { rows: [] }, // user_acquisition INSERT (added after upsert)
       { rows: [{ id: 33 }] }, // SELECT active managed location
       { rows: [] }, // INSERT refresh_token
       { rows: [] }, // COMMIT
@@ -246,6 +251,7 @@ describe('syncExternalUser — tolerant invite handling (invalid invite is ignor
       { rows: [] },
       { rows: [] }, // deletedCheck
       { rows: [{ id: 90, role: 'Business', fullName: 'Check SQL', email: 'checksql@test.com' }] },
+      { rows: [] }, // user_acquisition INSERT (added after upsert)
       { rows: [] }, // location lookup — empty result
       { rows: [] }, // INSERT refresh_token
       { rows: [] }, // COMMIT
@@ -271,6 +277,7 @@ describe('syncExternalUser — tolerant invite handling (invalid invite is ignor
       { rows: [] },
       { rows: [] }, // deletedCheck
       { rows: [{ id: 91, role: 'Business', fullName: 'Removed Mgr', email: 'removedmgr@test.com' }] },
+      { rows: [] }, // user_acquisition INSERT (added after upsert)
       { rows: [] }, // is_active=TRUE filter excludes the inactive location
       { rows: [{ id: 99, is_subscribed: true, logo_url: null }] }, // business row exists (not a manager-only user)
       { rows: [] }, // COMMIT

@@ -64,16 +64,10 @@ CREATE TABLE "user" (
   -- Geo detected at registration: USPS state code for US users (e.g. 'FL'),
   -- ISO country code otherwise (only stored when allowed_states is unrestricted)
   declared_state       VARCHAR(10) NULL,
-  -- Referral program: each user's own shareable code (generated on first invite);
-  -- who referred this user (set ONLY on fresh registration via a ?ref= link); and when
-  -- the one-time referral bonus entry was granted (NULL = pending until phone-verified).
+  -- Each user's own shareable referral code (generated on first invite). How this user was
+  -- acquired (channel, referrer, reward state) lives in the user_acquisition table, not here.
   referral_code        VARCHAR(12) UNIQUE,
-  referred_by_user_id  INTEGER NULL REFERENCES "user"(id) ON DELETE SET NULL,
-  referral_rewarded_at TIMESTAMP NULL,
-  -- Acquisition channel (analytics §4): how the user arrived (referral link, promo code,
-  -- location flyer, or direct). Derived at signup; set ONLY on fresh registration.
-  acquisition_source   acquisition_source_enum NOT NULL DEFAULT 'direct',
-  -- City resolved from the registration IP (ipinfo) at signup — no user-typed field (analytics §9).
+  -- City resolved from the registration IP (ipinfo) at signup — no user-typed field.
   city                 VARCHAR(120) NULL,
   created_at           TIMESTAMP NOT NULL DEFAULT NOW(),
   updated_at           TIMESTAMP NOT NULL DEFAULT NOW()
@@ -617,3 +611,20 @@ CREATE TABLE IF NOT EXISTS draw_rejected_winner (
   UNIQUE (draw_id, ticket_id)
 );
 CREATE INDEX IF NOT EXISTS idx_draw_rejected_draw ON draw_rejected_winner (draw_id, rejected_at DESC);
+
+-- ── user_acquisition (how each user arrived — 1:1 with "user", written once at signup) ────────
+-- Single home for acquisition attribution + the referral reward state (the referral bonus grant
+-- reads/updates referred_by_user_id + referral_rewarded_at here). The user's OWN shareable code
+-- stays on "user".referral_code (that's outbound identity, not acquisition).
+CREATE TABLE IF NOT EXISTS user_acquisition (
+  user_id              INTEGER PRIMARY KEY REFERENCES "user"(id) ON DELETE CASCADE,
+  source               acquisition_source_enum NOT NULL DEFAULT 'direct',  -- referral|promo_code|location_flyer|direct
+  location_id          INTEGER NULL REFERENCES business_location(id) ON DELETE SET NULL,  -- which flyer/location (location_flyer)
+  promo_code           VARCHAR(100) NULL,                                  -- which promo code (promo_code)
+  referred_by_user_id  INTEGER NULL REFERENCES "user"(id) ON DELETE SET NULL,  -- who referred them (referral)
+  referral_rewarded_at TIMESTAMP NULL,                                     -- NULL = bonus pending until phone-verified
+  created_at           TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_user_acq_source    ON user_acquisition (source);
+CREATE INDEX IF NOT EXISTS idx_user_acq_referrer  ON user_acquisition (referred_by_user_id) WHERE referred_by_user_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_user_acq_location  ON user_acquisition (location_id) WHERE location_id IS NOT NULL;

@@ -289,6 +289,7 @@ describe('syncExternalUser', () => {
       { rows: [] },  // BEGIN
       { rows: [] },  // deletedCheck — not a deleted account
       { rows: [{ id: 40, role: 'User', fullName: 'NewUser', email: 'new@test.com' }] }, // upsert
+      { rows: [] }, // user_acquisition INSERT (added after upsert)
       { rows: [] },  // business_location manager check
       { rows: [] },  // COMMIT
     );
@@ -304,6 +305,7 @@ describe('syncExternalUser', () => {
       { rows: [] },
       { rows: [] },  // deletedCheck
       { rows: [{ id: 41, role: 'User', fullName: 'AdminWannabe', email: 'admin@test.com' }] },
+      { rows: [] }, // user_acquisition INSERT (added after upsert)
       { rows: [] },  // business_location check
       { rows: [] },
     );
@@ -317,6 +319,7 @@ describe('syncExternalUser', () => {
       { rows: [] },
       { rows: [] },  // deletedCheck
       { rows: [{ id: 50, role: 'User', fullName: 'Mgr', email: 'mgr@sync.com' }] },
+      { rows: [] }, // user_acquisition INSERT (added after upsert)
       { rows: [{ id: 20 }], rowCount: 1 }, // UPDATE biz_loc
       { rows: [] },                         // UPDATE role
       { rows: [] },                         // COMMIT
@@ -333,6 +336,7 @@ describe('syncExternalUser', () => {
       { rows: [] },                                                                  // BEGIN
       { rows: [] },                                                                  // deletedCheck
       { rows: [{ id: 51, role: 'User', fullName: 'Dup', email: 'dup@sync.com' }] },  // upsert
+      { rows: [] }, // user_acquisition INSERT (added after upsert)
       { rows: [], rowCount: 0 },                                                     // UPDATE biz_loc — already used (invite ignored)
       { rows: [] },                                                                  // SELECT active managed location — none
       { rows: [] },                                                                  // INSERT refresh_token
@@ -348,6 +352,7 @@ describe('syncExternalUser', () => {
       { rows: [] },
       { rows: [] },  // deletedCheck
       { rows: [{ id: 60, role: 'Business', fullName: 'Biz', email: 'biz@sync.com' }] },
+      { rows: [] }, // user_acquisition INSERT (added after upsert)
       { rows: [] }, // business_location — no location
       { rows: [] }, // business lookup — empty
       { rows: [] }, // COMMIT
@@ -361,6 +366,7 @@ describe('syncExternalUser', () => {
       { rows: [] },
       { rows: [] },  // deletedCheck
       { rows: [{ id: 61, role: 'Business', fullName: 'Biz2', email: 'biz2@sync.com' }] },
+      { rows: [] }, // user_acquisition INSERT (added after upsert)
       { rows: [] }, // no location
       { rows: [{ id: 77, is_subscribed: true, logo_url: null }] }, // business exists
       { rows: [] }, // COMMIT

@@ -81,11 +81,13 @@ export const getGrowthAnalyticsService = async () => {
 
     pool.query(`SELECT COUNT(*) AS founding_members FROM founding_member`),
 
-    // ── §4 acquisition source breakdown ────────────────────────────────────────
+    // ── §4 acquisition source breakdown (from the user_acquisition table) ──────
     pool.query(`
-      SELECT acquisition_source AS source, COUNT(*) AS count
-      FROM "user" WHERE role = 'User'
-      GROUP BY acquisition_source
+      SELECT COALESCE(ua.source::text, 'direct') AS source, COUNT(*) AS count
+      FROM "user" u
+      LEFT JOIN user_acquisition ua ON ua.user_id = u.id
+      WHERE u.role = 'User'
+      GROUP BY COALESCE(ua.source::text, 'direct')
     `),
 
     // ── §5 business retention (snapshot) ───────────────────────────────────────

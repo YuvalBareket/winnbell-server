@@ -181,6 +181,12 @@ export const registerUser = async (
     );
     const newUser = result.rows[0];
 
+    // Keep the 1:1 acquisition row invariant (legacy password path has no channel metadata).
+    await client.query(
+      `INSERT INTO user_acquisition (user_id, source) VALUES ($1, 'direct') ON CONFLICT (user_id) DO NOTHING`,
+      [newUser.id],
+    );
+
     if (inviteToken) {
       try {
         const decoded = jwt.verify(
@@ -389,7 +395,7 @@ export const syncExternalUser = async (
   externalId: string,
   email: string,
   fullName: string,
-  metadata?: { role?: string; inviteToken?: string | null; ip?: string; referralCode?: string | null; acquisitionSource?: string | null },
+  metadata?: { role?: string; inviteToken?: string | null; ip?: string; referralCode?: string | null; acquisitionSource?: string | null; acquiredViaLocationId?: number | null; promoCode?: string | null },
 ) => {
   const pool = getPool();
   email = email.toLowerCase().trim();
@@ -437,27 +443,35 @@ export const syncExternalUser = async (
       throw new Error('ACCOUNT_DELETED');
     }
 
-    // Referral capture: resolve the ?ref= code to a referrer ONLY for a fresh new account.
-    // referred_by_user_id is set on INSERT but NOT in the ON CONFLICT clause, so an existing
-    // user re-syncing (or self-referral, which resolveReferrerIdForSignup rejects) never gets it.
+    // Acquisition attribution (its own 1:1 table, written once at signup). Resolve the ?ref= code
+    // to a referrer — resolveReferrerIdForSignup rejects self-referral and unknown codes.
     const referrerId = await resolveReferrerIdForSignup(metadata?.referralCode, email);
 
-    // Acquisition channel (analytics §4): validate the client-derived source against the enum,
-    // default 'direct'. Set on INSERT only (not in ON CONFLICT) so a login/re-sync never
-    // overwrites a user's original signup channel.
+    // Channel: validate the client-derived source against the enum, default 'direct'.
     const ALLOWED_SOURCES = ['referral', 'promo_code', 'location_flyer', 'direct'];
     const acquisitionSource = ALLOWED_SOURCES.includes(metadata?.acquisitionSource ?? '')
       ? (metadata!.acquisitionSource as string)
       : 'direct';
 
-    // registration_ip is an INET column — only pass a value that is a valid IPv4/IPv6 address,
-    // otherwise the cast would throw and break signup. This field is analytics-only; never let
-    // a bad/empty IP block registration. Falls back to NULL.
+    // registration_ip is an INET column — only pass a valid IPv4/IPv6 address, else NULL, so a
+    // bad/empty IP can never break signup.
     const safeIp = metadata?.ip && isIP(metadata.ip) ? metadata.ip : null;
 
+    // Acquiring location (location_flyer signups): only attribute when the location exists, so a
+    // bad/stale id can never violate the FK. Validated against business_location, else NULL.
+    let acquiredViaLocationId: number | null = null;
+    const rawLoc = metadata?.acquiredViaLocationId;
+    if (acquisitionSource === 'location_flyer' && typeof rawLoc === 'number' && Number.isInteger(rawLoc) && rawLoc > 0) {
+      const locCheck = await client.query(`SELECT 1 FROM business_location WHERE id = $1`, [rawLoc]);
+      if (locCheck.rows.length > 0) acquiredViaLocationId = rawLoc;
+    }
+    const promoCode = acquisitionSource === 'promo_code' && typeof metadata?.promoCode === 'string'
+      ? (metadata.promoCode.trim().slice(0, 100) || null)
+      : null;
+
     const upsertResult = await client.query(
-      `INSERT INTO "user" (external_auth_id, email, full_name, role, is_active, is_email_verified, declared_state, referred_by_user_id, registration_ip, city, acquisition_source)
-       VALUES ($1, $2, $3, $4, true, true, $5, $6, $7, $8, $9)
+      `INSERT INTO "user" (external_auth_id, email, full_name, role, is_active, is_email_verified, declared_state, registration_ip, city)
+       VALUES ($1, $2, $3, $4, true, true, $5, $6, $7)
        ON CONFLICT (email) DO UPDATE
          SET external_auth_id = EXCLUDED.external_auth_id,
              is_email_verified = true,
@@ -466,9 +480,18 @@ export const syncExternalUser = async (
              city = COALESCE("user".city, EXCLUDED.city),
              updated_at = NOW()
        RETURNING id, role, full_name AS "fullName", email`,
-      [externalId, email, fullName, role, detectedState, referrerId, safeIp, detectedCity, acquisitionSource],
+      [externalId, email, fullName, role, detectedState, safeIp, detectedCity],
     );
     const dbUser = upsertResult.rows[0];
+
+    // Write the acquisition row once (fresh signup). ON CONFLICT DO NOTHING so an existing user
+    // re-syncing never overwrites their original acquisition.
+    await client.query(
+      `INSERT INTO user_acquisition (user_id, source, location_id, promo_code, referred_by_user_id)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (user_id) DO NOTHING`,
+      [dbUser.id, acquisitionSource, acquiredViaLocationId, promoCode, referrerId],
+    );
 
     let inviteApplied = false;
     if (inviteToken) {
