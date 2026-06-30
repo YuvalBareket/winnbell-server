@@ -21,7 +21,7 @@ import {
   updateLogo,
 } from './business.controller.js';
 import { getStats } from './stats.controller.js';
-import { getActivity, qualifyTicket } from './activity.controller.js';
+import { qualifyTicket, getCampaignHeaderController, getCampaignKpisController, getCampaignEntriesController } from './activity.controller.js';
 import { createCheckout, verifySession, getSubscription, cancelSub, resumeSub, getFoundingAvailability, updatePlan, getInvoices } from '../stripe/stripe.controller.js';
 
 const router = Router();
@@ -49,7 +49,9 @@ router.delete('/locations/:locationId', requireRole('Business'), deleteLocation)
 router.post('/locations/:locationId/invite', requireRole('Business'), createInviteLink);
 router.delete('/locations/:locationId/manager', requireRole('Business'), removeManager);
 router.get('/stats', requireRole('Business'), getStats);
-router.get('/activity', requireRole('Business'), getActivity);
+router.get('/campaign/header', requireRole('Business'), getCampaignHeaderController);
+router.get('/campaign/kpis', requireRole('Business'), getCampaignKpisController);
+router.get('/campaign/entries', requireRole('Business'), getCampaignEntriesController);
 router.patch('/tickets/:ticketId/qualify', requireRole('Business'), qualifyTicket);
 router.post('/subscription/checkout', requireRole('Business'), createCheckout);
 router.post('/subscription/verify-session', requireRole('Business'), verifySession);

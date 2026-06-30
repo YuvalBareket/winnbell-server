@@ -1,27 +1,45 @@
 import { Response } from 'express';
 import { AuthRequest } from '../../shared/middleware/auth.middleware.js';
-import { getBusinessActivity, setTicketQualification } from './activity.service.js';
+import {
+  setTicketQualification,
+  getCampaignHeader, getCampaignKpis, getCampaignEntries,
+} from './activity.service.js';
+import type { DateRange } from './activity.service.js';
 
-export const getActivity = async (req: AuthRequest, res: Response): Promise<void> => {
+const parseRange = (raw: unknown): DateRange => {
+  const r = String(raw);
+  return (r === 'wtd' || r === 'mtd' || r === '7d' || r === '30d') ? r : 'today';
+};
+const parseLoc = (req: AuthRequest): number | undefined =>
+  req.query.location_id ? parseInt(req.query.location_id as string, 10) : undefined;
+
+export const getCampaignHeaderController = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const userId = req.user!.id;
-    const jwtLocationId = req.user!.location_id ?? null;
+    const data = await getCampaignHeader(req.user!.id, req.user!.location_id ?? null, parseLoc(req));
+    res.json(data);
+  } catch {
+    res.status(500).json({ message: 'Failed to load campaign' });
+  }
+};
 
-    const filterLocationId = req.query.location_id
-      ? parseInt(req.query.location_id as string, 10)
-      : undefined;
+export const getCampaignKpisController = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const data = await getCampaignKpis(req.user!.id, req.user!.location_id ?? null, parseLoc(req), parseRange(req.query.date_range));
+    res.json(data);
+  } catch {
+    res.status(500).json({ message: 'Failed to load KPIs' });
+  }
+};
 
-    const rawRange = req.query.date_range as string;
-    const dateRange: 'today' | '7d' | '30d' =
-      rawRange === '7d' ? '7d' : rawRange === '30d' ? '30d' : 'today';
-
+export const getCampaignEntriesController = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const needsReviewOnly = req.query.needs_review === 'true' || req.query.needs_review === '1';
     const cursor = req.query.cursor ? parseInt(req.query.cursor as string, 10) : undefined;
     const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 25;
-
-    const data = await getBusinessActivity(userId, jwtLocationId, filterLocationId, dateRange, cursor, limit);
+    const data = await getCampaignEntries(req.user!.id, req.user!.location_id ?? null, parseLoc(req), needsReviewOnly, cursor, limit);
     res.json(data);
-  } catch (err: unknown) {
-    res.status(500).json({ message: 'Failed to load activity' });
+  } catch {
+    res.status(500).json({ message: 'Failed to load entries' });
   }
 };
 

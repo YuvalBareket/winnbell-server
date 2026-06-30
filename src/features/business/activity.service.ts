@@ -1,191 +1,85 @@
 import { getPool } from '../../shared/db/db.js';
 
-export interface ActivitySummary {
-  receipts_period: number;
-  revenue_period: number;
-  entries_period: number;
-  monthly_cap: number | null;
+export type DateRange = 'today' | 'wtd' | 'mtd' | '7d' | '30d';
+
+// ── Campaign Dashboard payloads (period KPIs + campaign-scoped feed) ──
+export interface CampaignKpis {
+  entries: number;
+  revenue: number;
+  customers: number;
 }
 
-export interface ActivityItem {
+export interface CampaignEntry {
   ticket_id: number;
   location_name: string;
+  customer_masked: string;
   transaction_amount: number | null;
-  receipt_identifier_masked: string | null;
   entry_source: string;
   status: 'active' | 'under_review';
-  quarantine_reason: string | null;
+  reviewable: boolean;        // true only for business_review quarantines the business can approve
   created_at: string;
 }
 
-export interface ActivityResult {
-  summary: ActivitySummary;
-  items: ActivityItem[];
+export interface CampaignEntriesResult {
+  items: CampaignEntry[];
   next_cursor: number | null;
 }
 
-function maskReceiptId(id: string | null | undefined): string | null {
-  if (!id) return null;
-  if (id.length <= 4) return '***' + id;
-  return id.slice(0, 3) + '...' + id.slice(-4);
+// Campaign Dashboard header (current-campaign monitoring, NOT period-scoped).
+export interface CampaignHeader {
+  has_campaign: boolean;
+  campaign_name: string | null;
+  prize_amount: number | null;
+  draw_date: string | null;
+  days_remaining: number | null;
+  entries_used: number;        // campaign-total, quarantined excluded, respecting scope
+  entry_cap: number | null;
+  cap_reached: boolean;
+  needs_review_count: number;  // actionable (business_review) under-review entries in this campaign
 }
 
-export const getBusinessActivity = async (
+// Customer display for the business feed: first name + last initial (e.g. "Jane D."). Never the
+// full name/email, so it stays privacy-light while still being human to the business.
+function maskCustomer(fullName: string | null | undefined): string {
+  const name = (fullName ?? '').trim();
+  if (!name) return 'Customer';
+  const parts = name.split(/\s+/);
+  const first = parts[0];
+  if (parts.length === 1) return first;
+  return `${first} ${parts[parts.length - 1][0].toUpperCase()}.`;
+}
+
+// created_at period predicate. WTD/MTD use calendar boundaries (week starts Monday in PG),
+// which is NOT the same as "last 7/30 days" — important so month-end numbers aren't misleading.
+function periodPredicate(range: DateRange): string {
+  switch (range) {
+    case '7d':  return "t.created_at >= NOW() - INTERVAL '7 days'";
+    case '30d': return "t.created_at >= NOW() - INTERVAL '30 days'";
+    case 'wtd': return "t.created_at >= date_trunc('week', CURRENT_DATE)";
+    case 'mtd': return "t.created_at >= date_trunc('month', CURRENT_DATE)";
+    default:    return 't.created_at >= CURRENT_DATE'; // today
+  }
+}
+
+// Resolve the caller's business + the location they are scoped to. Managers (jwtLocationId set)
+// are always locked to their own location; owners see all unless they pass a location filter.
+async function resolveScope(
   userId: number,
   jwtLocationId: number | null | undefined,
   filterLocationId?: number,
-  dateRange: 'today' | '7d' | '30d' = 'today',
-  cursor?: number,
-  limit = 25,
-): Promise<ActivityResult> => {
+): Promise<{ businessId: number | null; scopedLocationId: number | null }> {
   const pool = getPool();
-
-  let businessId: number;
-  let scopedLocationId: number | null = null;
-
   if (jwtLocationId) {
-    // Location manager — always scoped to their location only
-    const locRes = await pool.query(
-      'SELECT business_id FROM business_location WHERE id = $1',
-      [jwtLocationId],
-    );
+    const locRes = await pool.query('SELECT business_id FROM business_location WHERE id = $1', [jwtLocationId]);
     const row = locRes.rows[0];
     if (!row) throw new Error('Location not found');
-    businessId = row.business_id;
-    scopedLocationId = jwtLocationId;
-  } else {
-    const bizRes = await pool.query('SELECT id FROM business WHERE user_id = $1', [userId]);
-    const row = bizRes.rows[0];
-    if (!row) {
-      return {
-        summary: { receipts_period: 0, revenue_period: 0, entries_period: 0, monthly_cap: null },
-        items: [],
-        next_cursor: null,
-      };
-    }
-    businessId = row.id;
-    if (filterLocationId) scopedLocationId = filterLocationId;
+    return { businessId: row.business_id, scopedLocationId: jwtLocationId };
   }
-
-  // ── Period summary KPIs (follows date_range filter) ──
-  const summaryParams: unknown[] = [businessId];
-  const summaryLocClause = scopedLocationId
-    ? (summaryParams.push(scopedLocationId), ` AND t.location_id = $${summaryParams.length}`)
-    : '';
-
-  let periodClause: string;
-  if (dateRange === 'today') {
-    periodClause = 'AND t.created_at >= CURRENT_DATE';
-  } else if (dateRange === '7d') {
-    periodClause = "AND t.created_at >= NOW() - INTERVAL '7 days'";
-  } else {
-    periodClause = "AND t.created_at >= NOW() - INTERVAL '30 days'";
-  }
-
-  const summaryRes = await pool.query(`
-    SELECT
-      COUNT(*) FILTER (WHERE t.entry_source != 'receipt' OR t.receipt_identifier IS NOT NULL)
-                                                                  AS receipts_period,
-      COALESCE(SUM(t.transaction_amount) FILTER (
-        WHERE t.entry_source != 'receipt' OR t.receipt_identifier IS NOT NULL
-      ), 0)                                                        AS revenue_period,
-      COUNT(*)                                                     AS entries_period
-    FROM ticket t
-    WHERE t.business_id = $1
-      ${periodClause}
-      AND t.is_quarantined = FALSE
-      ${summaryLocClause}
-  `, summaryParams);
-
-  // ── Monthly cap ──
-  const capRes = await pool.query(`
-    SELECT COALESCE(s.entries_per_location, ps.global_entry_cap) AS monthly_cap
-    FROM business b
-    LEFT JOIN subscription s ON s.business_id = b.id
-    LEFT JOIN platform_settings ps ON ps.id = 1
-    WHERE b.id = $1
-  `, [businessId]);
-
-  const summary: ActivitySummary = {
-    receipts_period: Number(summaryRes.rows[0]?.receipts_period ?? 0),
-    revenue_period: parseFloat(summaryRes.rows[0]?.revenue_period ?? '0'),
-    entries_period: Number(summaryRes.rows[0]?.entries_period ?? 0),
-    monthly_cap: capRes.rows[0]?.monthly_cap != null ? Number(capRes.rows[0].monthly_cap) : null,
-  };
-
-  // ── Activity feed with cursor-based pagination ──
-  // Only show primary receipt tickets (receipt_identifier IS NOT NULL) to avoid
-  // showing blank secondary rows from multi-entry submissions.
-  // Non-receipt tickets (code/free/promo) always have receipt_identifier = NULL,
-  // so we exclude only receipt-source secondaries.
-  const feedParams: unknown[] = [businessId];
-  const conditions: string[] = [
-    // Filter on the ticket's own business_id (indexed) rather than through the
-    // business_location join — the join is kept only to resolve the location name.
-    't.business_id = $1',
-  ];
-
-  if (dateRange === 'today') {
-    conditions.push("t.created_at >= CURRENT_DATE");
-  } else if (dateRange === '7d') {
-    conditions.push("t.created_at >= NOW() - INTERVAL '7 days'");
-  } else {
-    conditions.push("t.created_at >= NOW() - INTERVAL '30 days'");
-  }
-
-  if (scopedLocationId) {
-    feedParams.push(scopedLocationId);
-    conditions.push(`t.location_id = $${feedParams.length}`);
-  }
-
-  if (cursor) {
-    feedParams.push(cursor);
-    conditions.push(`t.id < $${feedParams.length}`);
-  }
-
-  const safeLimit = Math.min(Math.max(1, limit), 50);
-  feedParams.push(safeLimit + 1); // fetch one extra to detect next page
-  const limitParam = feedParams.length;
-
-  const feedRes = await pool.query(`
-    SELECT
-      t.id                                      AS ticket_id,
-      COALESCE(bl.name, bl.address)             AS location_name,
-      t.transaction_amount,
-      t.receipt_identifier,
-      t.entry_source,
-      t.is_quarantined,
-      t.quarantine_reason,
-      t.created_at
-    FROM ticket t
-    JOIN business_location bl ON bl.id = t.location_id
-    WHERE ${conditions.join(' AND ')}
-      AND (t.entry_source != 'receipt' OR t.receipt_identifier IS NOT NULL)
-    ORDER BY t.id DESC
-    LIMIT $${limitParam}
-  `, feedParams);
-
-  const rows = feedRes.rows;
-  const hasMore = rows.length > safeLimit;
-  if (hasMore) rows.pop();
-
-  const items: ActivityItem[] = rows.map(r => ({
-    ticket_id: Number(r.ticket_id),
-    location_name: String(r.location_name),
-    transaction_amount: r.transaction_amount != null ? parseFloat(r.transaction_amount) : null,
-    receipt_identifier_masked: maskReceiptId(r.receipt_identifier),
-    entry_source: r.entry_source ?? 'receipt',
-    status: r.is_quarantined ? 'under_review' : 'active',
-    quarantine_reason: r.quarantine_reason ?? null,
-    created_at: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
-  }));
-
-  return {
-    summary,
-    items,
-    next_cursor: hasMore ? items[items.length - 1].ticket_id : null,
-  };
-};
+  const bizRes = await pool.query('SELECT id FROM business WHERE user_id = $1', [userId]);
+  const row = bizRes.rows[0];
+  if (!row) return { businessId: null, scopedLocationId: null };
+  return { businessId: row.id, scopedLocationId: filterLocationId ?? null };
+}
 
 /**
  * Business owner or location manager manually disqualifies (or restores) a receipt entry.
@@ -251,4 +145,160 @@ export const setTicketQualification = async (
       [ticketId],
     );
   }
+};
+
+// ── Campaign Dashboard: monitoring header (NOT period-scoped) ──────────────────
+export const getCampaignHeader = async (
+  userId: number,
+  jwtLocationId: number | null | undefined,
+  filterLocationId?: number,
+): Promise<CampaignHeader> => {
+  const pool = getPool();
+  const empty: CampaignHeader = {
+    has_campaign: false, campaign_name: null, prize_amount: null, draw_date: null,
+    days_remaining: null, entries_used: 0, entry_cap: null, cap_reached: false, needs_review_count: 0,
+  };
+  const { businessId, scopedLocationId } = await resolveScope(userId, jwtLocationId, filterLocationId);
+  if (businessId == null) return empty;
+
+  // Current campaign = the Open draw this business is enrolled in.
+  const drawRes = await pool.query(
+    `SELECT d.id, d.name, d.prize_pool, d.draw_date
+     FROM draw d JOIN draw_entry de ON de.draw_id = d.id AND de.business_id = $1
+     WHERE d.status = 'Open' ORDER BY d.draw_date ASC LIMIT 1`,
+    [businessId],
+  );
+  const draw = drawRes.rows[0];
+  if (!draw) return empty;
+
+  const usedParams: unknown[] = [businessId, draw.id];
+  const usedLoc = scopedLocationId ? (usedParams.push(scopedLocationId), ` AND location_id = $${usedParams.length}`) : '';
+  const usedRes = await pool.query(
+    `SELECT COUNT(*)::int AS used FROM ticket
+     WHERE business_id = $1 AND draw_id = $2 AND is_quarantined = FALSE ${usedLoc}`,
+    usedParams,
+  );
+
+  const capRes = await pool.query(
+    `SELECT COALESCE(s.entries_per_location, ps.global_entry_cap) AS per_loc,
+            (SELECT COUNT(*) FROM business_location WHERE business_id = $1 AND is_active = TRUE) AS loc_count
+     FROM business b
+     LEFT JOIN subscription s ON s.business_id = b.id
+     LEFT JOIN platform_settings ps ON ps.id = 1
+     WHERE b.id = $1`,
+    [businessId],
+  );
+  const perLoc = capRes.rows[0]?.per_loc != null ? Number(capRes.rows[0].per_loc) : null;
+  const locCount = Number(capRes.rows[0]?.loc_count ?? 0);
+  const entryCap = perLoc != null ? perLoc * (scopedLocationId ? 1 : Math.max(locCount, 1)) : null;
+
+  const nrParams: unknown[] = [businessId, draw.id];
+  const nrLoc = scopedLocationId ? (nrParams.push(scopedLocationId), ` AND location_id = $${nrParams.length}`) : '';
+  const nrRes = await pool.query(
+    `SELECT COUNT(*)::int AS n FROM ticket
+     WHERE business_id = $1 AND draw_id = $2 AND is_quarantined = TRUE AND quarantine_reason = 'business_review' ${nrLoc}`,
+    nrParams,
+  );
+
+  const used = Number(usedRes.rows[0]?.used ?? 0);
+  const drawDate = draw.draw_date instanceof Date ? draw.draw_date : new Date(draw.draw_date);
+  const daysRemaining = Math.max(0, Math.ceil((drawDate.getTime() - Date.now()) / 86400000));
+
+  return {
+    has_campaign: true,
+    campaign_name: draw.name,
+    prize_amount: Number(draw.prize_pool),
+    draw_date: drawDate.toISOString(),
+    days_remaining: daysRemaining,
+    entries_used: used,
+    entry_cap: entryCap,
+    cap_reached: entryCap != null && used >= entryCap,
+    needs_review_count: Number(nrRes.rows[0]?.n ?? 0),
+  };
+};
+
+// ── Campaign Dashboard: light KPIs (period-scoped: today / wtd / mtd) ──────────
+export const getCampaignKpis = async (
+  userId: number,
+  jwtLocationId: number | null | undefined,
+  filterLocationId: number | undefined,
+  dateRange: DateRange = 'today',
+): Promise<CampaignKpis> => {
+  const pool = getPool();
+  const { businessId, scopedLocationId } = await resolveScope(userId, jwtLocationId, filterLocationId);
+  if (businessId == null) return { entries: 0, revenue: 0, customers: 0 };
+
+  const params: unknown[] = [businessId];
+  const locClause = scopedLocationId ? (params.push(scopedLocationId), ` AND t.location_id = $${params.length}`) : '';
+  const res = await pool.query(
+    `SELECT COUNT(*) AS entries,
+            COALESCE(SUM(t.transaction_amount), 0) AS revenue,
+            COUNT(DISTINCT t.activated_by_user_id) AS customers
+     FROM ticket t
+     WHERE t.business_id = $1 AND ${periodPredicate(dateRange)} AND t.is_quarantined = FALSE ${locClause}`,
+    params,
+  );
+  return {
+    entries: Number(res.rows[0]?.entries ?? 0),
+    revenue: parseFloat(res.rows[0]?.revenue ?? '0'),
+    customers: Number(res.rows[0]?.customers ?? 0),
+  };
+};
+
+// ── Campaign Dashboard: entries feed (current-campaign scoped, NOT date-scoped) ─
+export const getCampaignEntries = async (
+  userId: number,
+  jwtLocationId: number | null | undefined,
+  filterLocationId: number | undefined,
+  needsReviewOnly = false,
+  cursor?: number,
+  limit = 25,
+): Promise<CampaignEntriesResult> => {
+  const pool = getPool();
+  const { businessId, scopedLocationId } = await resolveScope(userId, jwtLocationId, filterLocationId);
+  if (businessId == null) return { items: [], next_cursor: null };
+
+  const drawRes = await pool.query(
+    `SELECT d.id FROM draw d JOIN draw_entry de ON de.draw_id = d.id AND de.business_id = $1
+     WHERE d.status = 'Open' ORDER BY d.draw_date ASC LIMIT 1`,
+    [businessId],
+  );
+  const drawId = drawRes.rows[0]?.id;
+  if (!drawId) return { items: [], next_cursor: null };
+
+  const params: unknown[] = [businessId, drawId];
+  const conditions: string[] = ['t.business_id = $1', 't.draw_id = $2'];
+  if (scopedLocationId) { params.push(scopedLocationId); conditions.push(`t.location_id = $${params.length}`); }
+  if (needsReviewOnly) conditions.push(`t.is_quarantined = TRUE AND t.quarantine_reason = 'business_review'`);
+  if (cursor) { params.push(cursor); conditions.push(`t.id < $${params.length}`); }
+  const safeLimit = Math.min(Math.max(1, limit), 50);
+  params.push(safeLimit + 1);
+
+  const res = await pool.query(
+    `SELECT t.id AS ticket_id, COALESCE(bl.name, bl.address) AS location_name,
+            u.full_name AS customer_name, t.transaction_amount, t.entry_source,
+            t.is_quarantined, t.quarantine_reason, t.created_at
+     FROM ticket t
+     JOIN business_location bl ON bl.id = t.location_id
+     LEFT JOIN "user" u ON u.id = t.activated_by_user_id
+     WHERE ${conditions.join(' AND ')}
+       AND (t.entry_source != 'receipt' OR t.receipt_identifier IS NOT NULL)
+     ORDER BY t.id DESC LIMIT $${params.length}`,
+    params,
+  );
+
+  const rows = res.rows;
+  const hasMore = rows.length > safeLimit;
+  if (hasMore) rows.pop();
+  const items: CampaignEntry[] = rows.map(r => ({
+    ticket_id: Number(r.ticket_id),
+    location_name: String(r.location_name),
+    customer_masked: maskCustomer(r.customer_name),
+    transaction_amount: r.transaction_amount != null ? parseFloat(r.transaction_amount) : null,
+    entry_source: r.entry_source ?? 'receipt',
+    status: r.is_quarantined ? 'under_review' : 'active',
+    reviewable: r.is_quarantined === true && r.quarantine_reason === 'business_review',
+    created_at: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
+  }));
+  return { items, next_cursor: hasMore ? items[items.length - 1].ticket_id : null };
 };
