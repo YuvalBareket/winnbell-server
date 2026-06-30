@@ -9,6 +9,7 @@ import {
   getEntryMode,
   getMyBusiness,
   getNearby,
+  logProfileView,
   getParticipating,
   getUploadUrl,
   getParticipatingLocationById,
@@ -21,6 +22,7 @@ import {
   updateLogo,
 } from './business.controller.js';
 import { getStats } from './stats.controller.js';
+import { getBusinessAnalytics } from './businessAnalytics.controller.js';
 import { qualifyTicket, getCampaignHeaderController, getCampaignKpisController, getCampaignEntriesController } from './activity.controller.js';
 import { createCheckout, verifySession, getSubscription, cancelSub, resumeSub, getFoundingAvailability, updatePlan, getInvoices } from '../stripe/stripe.controller.js';
 
@@ -39,6 +41,7 @@ router.get('/subscription/founding-availability', getFoundingAvailability);
 // /setup requires the user to already have role 'Business' (assigned at registration via invite or sign-up flow)
 router.post('/setup', requireRole('Business'), setupBusiness);
 router.get('/my-business', getMyBusiness);
+router.post('/profile-view', logProfileView);
 router.patch('/', requireRole('Business'), updateBusiness);
 router.patch('/campaign-settings', requireRole('Business'), updateCampaignSettingsController);
 router.get('/upload-url', requireRole('Business'), getUploadUrl);
@@ -49,6 +52,7 @@ router.delete('/locations/:locationId', requireRole('Business'), deleteLocation)
 router.post('/locations/:locationId/invite', requireRole('Business'), createInviteLink);
 router.delete('/locations/:locationId/manager', requireRole('Business'), removeManager);
 router.get('/stats', requireRole('Business'), getStats);
+router.get('/analytics/:category', requireRole('Business'), getBusinessAnalytics);
 router.get('/campaign/header', requireRole('Business'), getCampaignHeaderController);
 router.get('/campaign/kpis', requireRole('Business'), getCampaignKpisController);
 router.get('/campaign/entries', requireRole('Business'), getCampaignEntriesController);

@@ -63,7 +63,7 @@ function periodPredicate(range: DateRange): string {
 
 // Resolve the caller's business + the location they are scoped to. Managers (jwtLocationId set)
 // are always locked to their own location; owners see all unless they pass a location filter.
-async function resolveScope(
+export async function resolveScope(
   userId: number,
   jwtLocationId: number | null | undefined,
   filterLocationId?: number,

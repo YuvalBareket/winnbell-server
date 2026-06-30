@@ -270,6 +270,35 @@ export const createManagerInviteToken = async (locationId: number, ownerUserId: 
   return token;
 };
 
+// Log a business profile view (Acquisition analytics). One row per (user, business, location):
+// repeat opens of the same location bump last_viewed_at (so multiple views = one view). Owner
+// self-views and unknown businesses are skipped. Fire-and-forget: callers must never let this
+// disrupt the user experience.
+export const logBusinessProfileViewService = async (
+  userId: number,
+  businessId: number,
+  locationId: number | null,
+): Promise<void> => {
+  const pool = getPool();
+  const biz = await pool.query(`SELECT user_id FROM business WHERE id = $1`, [businessId]);
+  if (biz.rows.length === 0) return;            // unknown business — skip (no FK error)
+  if (biz.rows[0].user_id === userId) return;   // owner viewing own profile — don't inflate
+
+  let locId: number | null = null;
+  if (locationId && Number.isInteger(locationId) && locationId > 0) {
+    const loc = await pool.query(`SELECT 1 FROM business_location WHERE id = $1 AND business_id = $2`, [locationId, businessId]);
+    if (loc.rows.length > 0) locId = locationId; // only store a location that belongs to the business
+  }
+
+  await pool.query(
+    `INSERT INTO business_profile_view (business_id, location_id, user_id)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (user_id, business_id, location_id)
+     DO UPDATE SET last_viewed_at = NOW()`,
+    [businessId, locId, userId],
+  );
+};
+
 // Demote a detached manager to a regular 'User' (unless they own a business or
 // still manage another location) and revoke all their sessions, so they are
 // thrown out and re-sync from the DB as a regular user on next sign-in. Assumes

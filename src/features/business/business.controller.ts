@@ -6,6 +6,7 @@ import {
   addBusinessLocation,
   createFullBusinessProfile,
   createManagerInviteToken,
+  logBusinessProfileViewService,
   deleteBusinessLocation,
   getAddress,
   getAddressCoords,
@@ -476,6 +477,22 @@ export const updateLogo = async (req: AuthRequest, res: Response): Promise<void>
       return;
     }
     res.status(500).json({ message: 'Failed to update logo' });
+  }
+};
+
+// POST /business/profile-view  (any authenticated user) — fire-and-forget analytics; always 204.
+export const logProfileView = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const userId = req.user!.id;
+    const businessId = Number(req.body?.businessId);
+    const locationId = req.body?.locationId != null ? Number(req.body.locationId) : null;
+    if (Number.isInteger(businessId) && businessId > 0) {
+      await logBusinessProfileViewService(userId, businessId, locationId);
+    }
+    res.status(204).end();
+  } catch (err) {
+    console.error('[business.logProfileView]', err instanceof Error ? err.message : err);
+    res.status(204).end(); // analytics must never disrupt the client
   }
 };
 

@@ -628,3 +628,18 @@ CREATE TABLE IF NOT EXISTS user_acquisition (
 CREATE INDEX IF NOT EXISTS idx_user_acq_source    ON user_acquisition (source);
 CREATE INDEX IF NOT EXISTS idx_user_acq_referrer  ON user_acquisition (referred_by_user_id) WHERE referred_by_user_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_user_acq_location  ON user_acquisition (location_id) WHERE location_id IS NOT NULL;
+
+-- ── business_profile_view (business Analytics: Acquisition / profile-view funnel) ─────────────
+-- One row per (user, business, location): a logged-in user opening a specific location's profile
+-- (views are always logged from the map, which is per location). Repeat opens of the same location
+-- just bump last_viewed_at, so "multiple views = one view". Owner self-views are excluded at write time.
+CREATE TABLE IF NOT EXISTS business_profile_view (
+  id              SERIAL PRIMARY KEY,
+  business_id     INTEGER NOT NULL REFERENCES business(id) ON DELETE CASCADE,
+  location_id     INTEGER NULL REFERENCES business_location(id) ON DELETE SET NULL,
+  user_id         INTEGER NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
+  first_viewed_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  last_viewed_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+  UNIQUE (user_id, business_id, location_id)
+);
+CREATE INDEX IF NOT EXISTS idx_bpv_business_time ON business_profile_view (business_id, last_viewed_at);
