@@ -35,6 +35,7 @@ export const getDrawHistoryService = async () => {
       CASE WHEN u.full_name IS NOT NULL THEN CONCAT(SPLIT_PART(u.full_name, ' ', 1), ' ', LEFT(SPLIT_PART(u.full_name, ' ', 2), 1), '.') END AS winner_name,
       b.name AS winner_business_name,
       bl.name AS winner_location_name,
+      bl.id AS winner_location_id,
       COUNT(t.id) AS entry_count
     FROM draw d
     LEFT JOIN ticket wt ON wt.id = d.winner_ticket_id AND d.winner_confirmed = TRUE
@@ -73,7 +74,8 @@ export const getDrawResultService = async (drawId: number) => {
       wt.code AS winning_ticket_code,
       CASE WHEN u.full_name IS NOT NULL THEN CONCAT(SPLIT_PART(u.full_name, ' ', 1), ' ', LEFT(SPLIT_PART(u.full_name, ' ', 2), 1), '.') END AS winner_name,
       b.name AS winner_business_name,
-      bl.name AS winner_location_name
+      bl.name AS winner_location_name,
+      bl.id AS winner_location_id
     FROM draw d
     LEFT JOIN ticket wt ON wt.id = d.winner_ticket_id AND d.winner_confirmed = TRUE
     LEFT JOIN "user" u ON wt.activated_by_user_id = u.id

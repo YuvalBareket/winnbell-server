@@ -98,6 +98,8 @@ export interface ParticipatingLocation {
   cap_reached?: boolean;
   draw_prize_amount?: number | null;
   draw_date?: string | null;
+  // active location + active subscription + enrolled in the current open draw. Gates the submit button.
+  is_participating?: boolean;
 }
 
 export type AddressSuggestion = {

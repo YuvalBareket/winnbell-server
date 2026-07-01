@@ -17,7 +17,7 @@ import { Router } from 'express';
 import {
   getNearby,
   getParticipating,
-  getParticipatingLocationById,
+  getLocationProfileById,
   searchParticipatingLocations,
   getEntryMode,
   getAddressController,
@@ -25,7 +25,7 @@ import {
 } from './features/business/business.controller.js';
 import { getFoundingAvailability } from './features/stripe/stripe.controller.js';
 
-import { authenticateToken } from './shared/middleware/auth.middleware.js';
+import { authenticateToken, optionalAuth } from './shared/middleware/auth.middleware.js';
 import { getClientIpKey } from './shared/clientIp.js';
 import { makeRateLimitStore } from './shared/rateLimitStore.js';
 import { captureError } from './shared/monitoring.js';
@@ -124,7 +124,7 @@ publicBusinessRouter.use(publicLimiter);
 publicBusinessRouter.get('/nearby', getNearby);
 publicBusinessRouter.get('/participating', getParticipating);
 publicBusinessRouter.get('/participating/locations/search', searchParticipatingLocations);
-publicBusinessRouter.get('/participating/locations/:locationId', getParticipatingLocationById);
+publicBusinessRouter.get('/locations/:locationId/profile', optionalAuth, getLocationProfileById);
 publicBusinessRouter.get('/mode', getEntryMode);
 publicBusinessRouter.post('/address', getAddressController);
 publicBusinessRouter.get('/address-coords', getAddressCoordsController);

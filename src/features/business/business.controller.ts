@@ -14,7 +14,7 @@ import {
   getMyBusinessData,
   getNearbyBusinessesService,
   getParticipatingBusinessesService,
-  getParticipatingLocationByIdService,
+  getLocationProfileByIdService,
   removeLocationManagerService,
   searchParticipatingLocationsService,
   updateBusinessLocation,
@@ -68,12 +68,21 @@ export const searchParticipatingLocations = async (req: Request, res: Response) 
   }
 };
 
-export const getParticipatingLocationById = async (req: Request, res: Response) => {
+export const getLocationProfileById = async (req: AuthRequest, res: Response) => {
   const locationId = Number(req.params.locationId);
   if (isNaN(locationId)) return res.status(400).json({ message: 'Invalid location ID' });
   try {
-    const location = await getParticipatingLocationByIdService(locationId);
+    const location = await getLocationProfileByIdService(locationId);
     if (!location) return res.status(404).json({ message: 'Location not found' });
+    // Count a profile view here (when the profile is actually fetched) and ONLY for a genuine
+    // customer: role 'User' AND no managed location. This excludes Business owners (role 'Business'),
+    // Managers (a location_id in the token, even with role 'User') and Admins, so they can never
+    // inflate a business's view count. optionalAuth populates req.user when logged in; anonymous
+    // callers are simply not counted. Fire-and-forget so analytics never delays or breaks the response.
+    if (req.user?.role === 'User' && req.user.location_id == null && location.business_id) {
+      logBusinessProfileViewService(req.user.id, location.business_id, location.location_id ?? null)
+        .catch((err) => console.error('[profile-view]', err instanceof Error ? err.message : err));
+    }
     res.json(location);
   } catch {
     res.status(500).json({ message: 'Server error' });
@@ -480,21 +489,6 @@ export const updateLogo = async (req: AuthRequest, res: Response): Promise<void>
   }
 };
 
-// POST /business/profile-view  (any authenticated user) — fire-and-forget analytics; always 204.
-export const logProfileView = async (req: AuthRequest, res: Response): Promise<void> => {
-  try {
-    const userId = req.user!.id;
-    const businessId = Number(req.body?.businessId);
-    const locationId = req.body?.locationId != null ? Number(req.body.locationId) : null;
-    if (Number.isInteger(businessId) && businessId > 0) {
-      await logBusinessProfileViewService(userId, businessId, locationId);
-    }
-    res.status(204).end();
-  } catch (err) {
-    console.error('[business.logProfileView]', err instanceof Error ? err.message : err);
-    res.status(204).end(); // analytics must never disrupt the client
-  }
-};
 
 export const createInviteLink = async (req: AuthRequest, res: Response): Promise<void> => {
   try {

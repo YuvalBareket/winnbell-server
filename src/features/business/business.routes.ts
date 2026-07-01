@@ -9,10 +9,9 @@ import {
   getEntryMode,
   getMyBusiness,
   getNearby,
-  logProfileView,
   getParticipating,
   getUploadUrl,
-  getParticipatingLocationById,
+  getLocationProfileById,
   removeManager,
   searchParticipatingLocations,
   setupBusiness,
@@ -32,7 +31,7 @@ const router = Router();
 router.get('/nearby', getNearby);
 router.get('/participating', getParticipating);
 router.get('/participating/locations/search', searchParticipatingLocations);
-router.get('/participating/locations/:locationId', getParticipatingLocationById);
+router.get('/locations/:locationId/profile', getLocationProfileById);
 router.get('/mode', getEntryMode);
 // /address is handled by publicBusinessRouter in app.ts with rate limiter
 router.get('/subscription/founding-availability', getFoundingAvailability);
@@ -41,7 +40,6 @@ router.get('/subscription/founding-availability', getFoundingAvailability);
 // /setup requires the user to already have role 'Business' (assigned at registration via invite or sign-up flow)
 router.post('/setup', requireRole('Business'), setupBusiness);
 router.get('/my-business', getMyBusiness);
-router.post('/profile-view', logProfileView);
 router.patch('/', requireRole('Business'), updateBusiness);
 router.patch('/campaign-settings', requireRole('Business'), updateCampaignSettingsController);
 router.get('/upload-url', requireRole('Business'), getUploadUrl);

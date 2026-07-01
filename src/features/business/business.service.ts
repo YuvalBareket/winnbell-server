@@ -537,7 +537,7 @@ export const searchParticipatingLocationsService = async (query: string): Promis
   return result.rows;
 };
 
-export const getParticipatingLocationByIdService = async (locationId: number): Promise<ParticipatingLocation | null> => {
+export const getLocationProfileByIdService = async (locationId: number): Promise<ParticipatingLocation | null> => {
   const CACHE_KEY = `business:location:${locationId}`;
   const cached = publicCache.get<ParticipatingLocation | null>(CACHE_KEY);
   if (cached !== undefined) return cached;
@@ -575,18 +575,27 @@ export const getParticipatingLocationByIdService = async (locationId: number): P
           AND t.location_id = bl.id
           AND t.draw_id = (SELECT id FROM open_draw)
           AND t.is_quarantined = FALSE
-      ) >= COALESCE(s.entries_per_location, (SELECT global_entry_cap FROM platform_settings WHERE id = 1)) AS cap_reached,
+      ) >= COALESCE(
+            (SELECT entries_per_location FROM subscription WHERE business_id = b.id AND status IN ('Active', 'Trialing') LIMIT 1),
+            (SELECT global_entry_cap FROM platform_settings WHERE id = 1)
+          ) AS cap_reached,
       (SELECT prize_pool FROM open_draw) AS draw_prize_amount,
-      (SELECT draw_date FROM open_draw) AS draw_date
+      (SELECT draw_date FROM open_draw) AS draw_date,
+      -- Currently participating = active location + active subscription + enrolled in the open draw.
+      -- The location data is returned regardless; the client uses this to decide whether to show
+      -- the "Submit a Receipt" action (a non-participating winner profile shows info only).
+      (
+        bl.is_active
+        AND EXISTS (SELECT 1 FROM subscription s WHERE s.business_id = b.id AND s.status IN ('Active', 'Trialing'))
+        AND EXISTS (SELECT 1 FROM draw_entry de JOIN draw d ON d.id = de.draw_id WHERE de.business_id = b.id AND d.status = 'Open')
+      ) AS is_participating
     FROM business_location bl
     JOIN business b ON bl.business_id = b.id
-    JOIN subscription s ON s.business_id = b.id AND s.status IN ('Active', 'Trialing')
-    WHERE bl.id = $1 AND bl.is_active = true
-      AND EXISTS (
-        SELECT 1 FROM draw_entry de
-        JOIN draw d ON d.id = de.draw_id
-        WHERE de.business_id = b.id AND d.status = 'Open'
-      )`,
+    -- Fetch the location profile by id with NO participation / subscription / active gating.
+    -- The map controls its own visibility upstream (getNearby only shows markers for current
+    -- open-draw participants), and the draw-history winner link must be able to open ANY past
+    -- winner's location profile regardless of whether that business is still participating.
+    WHERE bl.id = $1`,
     [locationId],
   );
   const value = result.rows[0] ?? null;

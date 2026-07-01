@@ -177,3 +177,24 @@ export const authenticateToken = async (
     res.status(401).json({ message: 'Invalid or expired token.' });
   }
 };
+
+// Populates req.user when a valid Bearer token is present, but NEVER rejects. For public routes
+// that must stay open to anonymous callers yet want to know the user when they are logged in
+// (e.g. attributing a profile view to a real User and excluding Business/Manager accounts).
+export const optionalAuth = (
+  req: AuthRequest,
+  _res: Response,
+  next: NextFunction,
+): void => {
+  const authHeader = req.headers['authorization'];
+  const token = authHeader && authHeader.split(' ')[1];
+  if (token) {
+    try {
+      const jwtSecret = process.env.JWT_SECRET;
+      if (jwtSecret) req.user = jwt.verify(token, jwtSecret) as UserPayload;
+    } catch {
+      // invalid/expired token — treat as anonymous, do not block the request
+    }
+  }
+  next();
+};
