@@ -246,42 +246,29 @@ export const getRevenueAnalytics = async (
 ) => {
   const { businessId, scopedLocationId } = await resolveScope(userId, jwtLocationId, filterLocationId);
   if (businessId == null) {
-    return { total_qualifying_revenue: 0, threshold: 0, avg_purchase_amount: 0, revenue_change_pct: null, series: [] };
+    return { total_qualifying_revenue: 0, threshold: 0, avg_purchase_amount: 0, qualifying_receipts: 0, series: [] };
   }
   const loc = scopedLocationId;
   const a = [businessId, loc, p.from, p.to] as const;
   const pool = getPool();
-  const [revenue, threshold, draws, series] = await Promise.all([
+  const [revenue, threshold, series] = await Promise.all([
     pool.query(
       `SELECT COALESCE(SUM(transaction_amount),0) AS total_revenue,
-              COALESCE(AVG(transaction_amount),0) AS avg_purchase
+              COALESCE(AVG(transaction_amount),0) AS avg_purchase,
+              COUNT(transaction_amount) AS qualifying_receipts
        FROM ticket WHERE business_id=$1 AND ($2::int IS NULL OR location_id=$2) AND is_quarantined=FALSE
          AND activated_at >= $3 AND activated_at < $4`, [...a]),
     pool.query(`SELECT min_transaction_amount FROM business WHERE id=$1`, [businessId]),
-    // "Compared to Last Draw": qualifying sales of the two most recent draws this business ran in
-    // (newest first). Inherently draw-to-draw, so it ignores the [from,to) duration filter.
-    pool.query(
-      `SELECT COALESCE(SUM(t.transaction_amount),0) AS rev
-       FROM ticket t JOIN draw d ON d.id = t.draw_id
-       WHERE t.business_id=$1 AND ($2::int IS NULL OR t.location_id=$2) AND t.is_quarantined=FALSE
-       GROUP BY t.draw_id, d.draw_date
-       ORDER BY d.draw_date DESC
-       LIMIT 2`, [businessId, loc]),
     ticketSeries(businessId, loc, p.from, p.to, p.bucket === 'month' ? 'month' : 'day'),
   ]);
   const totalRevenue = r2(num(revenue.rows[0].total_revenue));
   const avgPurchase = r2(num(revenue.rows[0].avg_purchase));
   const thr = r2(num(threshold.rows[0]?.min_transaction_amount));
-  // current draw vs previous draw. null when the business has fewer than 2 draws, or the
-  // previous draw had no qualifying sales to compare against.
-  const curDraw = num(draws.rows[0]?.rev);
-  const prevDraw = num(draws.rows[1]?.rev);
-  const revenueChangePct = draws.rows.length >= 2 && prevDraw > 0 ? r2(((curDraw - prevDraw) / prevDraw) * 100) : null;
   return {
     total_qualifying_revenue: totalRevenue,
     threshold: thr,
     avg_purchase_amount: avgPurchase,
-    revenue_change_pct: revenueChangePct,
+    qualifying_receipts: num(revenue.rows[0].qualifying_receipts),
     series,
   };
 };
