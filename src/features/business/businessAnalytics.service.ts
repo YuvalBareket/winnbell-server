@@ -33,8 +33,10 @@ const pct = (part: number, whole: number): number => (whole > 0 ? Math.round((pa
 async function coreStats(businessId: number, loc: number | null, from: string, to: string) {
   const pool = getPool();
   const res = await pool.query(
-    `WITH firstpart AS (
-       SELECT activated_by_user_id AS uid, MIN(activated_at) AS first_at
+    `WITH lifetime AS (
+       -- total entries per customer at this business, all-time (not bounded by the range),
+       -- so First-Time (1 entry) vs Returning (2+) does not change with the selected window
+       SELECT activated_by_user_id AS uid, COUNT(*) AS lifetime_entries
        FROM ticket
        WHERE business_id=$1 AND ($2::int IS NULL OR location_id=$2) AND is_quarantined=FALSE AND activated_at IS NOT NULL
        GROUP BY activated_by_user_id
@@ -49,9 +51,9 @@ async function coreStats(businessId: number, loc: number | null, from: string, t
      SELECT
        COUNT(*)                                              AS total_participants,
        COALESCE(SUM(p.entries), 0)                           AS total_entries,
-       COUNT(*) FILTER (WHERE fp.first_at >= $3 AND fp.first_at < $4) AS new_participants,
-       COUNT(*) FILTER (WHERE fp.first_at <  $3)             AS returning_participants
-     FROM period p JOIN firstpart fp ON fp.uid = p.uid`,
+       COUNT(*) FILTER (WHERE l.lifetime_entries = 1)  AS new_participants,
+       COUNT(*) FILTER (WHERE l.lifetime_entries >= 2) AS returning_participants
+     FROM period p JOIN lifetime l ON l.uid = p.uid`,
     [businessId, loc, from, to],
   );
   const row = res.rows[0];
@@ -181,12 +183,12 @@ export const getAcquisitionAnalytics = async (
              AND ($2::int IS NULL OR v.location_id=$2) AND v.first_viewed_at <= t.activated_at
          )`, [...a]),
     pool.query(
-      `SELECT date_trunc($5, u.created_at) AS bucket, COUNT(*) AS new_users
+      `SELECT to_char(date_trunc($5, u.created_at), 'YYYY-MM-DD"T"HH24:MI:SS') AS bucket, COUNT(*) AS new_users
        FROM "user" u JOIN user_acquisition ua ON ua.user_id=u.id JOIN business_location bl ON bl.id=ua.location_id
        WHERE bl.business_id=$1 AND ($2::int IS NULL OR bl.id=$2) AND u.created_at >= $3 AND u.created_at < $4
        GROUP BY 1 ORDER BY 1`, [businessId, loc, p.from, p.to, bk]),
     pool.query(
-      `SELECT date_trunc($5, last_viewed_at) AS bucket, COUNT(DISTINCT user_id) AS profile_views
+      `SELECT to_char(date_trunc($5, last_viewed_at), 'YYYY-MM-DD"T"HH24:MI:SS') AS bucket, COUNT(DISTINCT user_id) AS profile_views
        FROM business_profile_view WHERE business_id=$1 AND ($2::int IS NULL OR location_id=$2) AND last_viewed_at >= $3 AND last_viewed_at < $4
        GROUP BY 1 ORDER BY 1`, [businessId, loc, p.from, p.to, bk]),
   ]);
