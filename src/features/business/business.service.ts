@@ -502,6 +502,8 @@ export const searchParticipatingLocationsService = async (query: string): Promis
       bl.id AS location_id,
       bl.name AS location_name,
       bl.address,
+      bl.latitude,
+      bl.longitude,
       b.id AS business_id,
       b.name AS business_name,
       b.sector,
