@@ -184,7 +184,7 @@ export const getAcquisitionAnalytics = async (
   const bk = p.bucket === 'month' ? 'month' : 'day';
   const pool = getPool();
 
-  const [acquired, discovery, views, participants, viewedThenEntered, acqNew, acqViews] = await Promise.all([
+  const [acquired, discovery, views, viewersConverted, acqNew, acqViews] = await Promise.all([
     pool.query(
       `SELECT COUNT(*) AS n FROM "user" u
        JOIN user_acquisition ua ON ua.user_id = u.id
@@ -206,20 +206,19 @@ export const getAcquisitionAnalytics = async (
     pool.query(
       `SELECT COUNT(DISTINCT user_id) AS n FROM business_profile_view
        WHERE business_id=$1 AND ($2::int IS NULL OR location_id=$2) AND last_viewed_at >= $3 AND last_viewed_at < $4`, [...a]),
+    // Conversion numerator: distinct users who VIEWED the profile in the period AND then submitted
+    // a receipt in the period at/after their first view. Anchored on the viewers (denominator =
+    // "views"), so it is always a subset of them and the rate can never exceed 100%.
     pool.query(
-      `SELECT COUNT(DISTINCT activated_by_user_id) AS n FROM ticket
-       WHERE business_id=$1 AND ($2::int IS NULL OR location_id=$2) AND is_quarantined=FALSE
-         AND activated_at >= $3 AND activated_at < $4`, [...a]),
-    // Conversion numerator: customers who entered in the period AND had viewed the profile BEFORE
-    // that entry. Subset of the participants above, so conversion is always <= 100%.
-    pool.query(
-      `SELECT COUNT(DISTINCT t.activated_by_user_id) AS n FROM ticket t
-       WHERE t.business_id=$1 AND ($2::int IS NULL OR t.location_id=$2) AND t.is_quarantined=FALSE
-         AND t.activated_at >= $3 AND t.activated_at < $4
+      `SELECT COUNT(DISTINCT v.user_id) AS n FROM business_profile_view v
+       WHERE v.business_id=$1 AND ($2::int IS NULL OR v.location_id=$2)
+         AND v.last_viewed_at >= $3 AND v.last_viewed_at < $4
          AND EXISTS (
-           SELECT 1 FROM business_profile_view v
-           WHERE v.user_id = t.activated_by_user_id AND v.business_id=$1
-             AND ($2::int IS NULL OR v.location_id=$2) AND v.first_viewed_at <= t.activated_at
+           SELECT 1 FROM ticket t
+           WHERE t.activated_by_user_id = v.user_id AND t.business_id=$1
+             AND ($2::int IS NULL OR t.location_id=$2) AND t.is_quarantined=FALSE
+             AND t.activated_at >= $3 AND t.activated_at < $4
+             AND t.activated_at >= v.first_viewed_at
          )`, [...a]),
     pool.query(
       `SELECT to_char(date_trunc($5, u.created_at), 'YYYY-MM-DD"T"HH24:MI:SS') AS bucket, COUNT(*) AS new_users
@@ -244,7 +243,7 @@ export const getAcquisitionAnalytics = async (
     new_users_acquired: num(acquired.rows[0].n),
     business_discovery: num(discovery.rows[0].n),
     profile_views: profileViews,
-    conversion_pct: pct(num(viewedThenEntered.rows[0].n), num(participants.rows[0].n)),
+    conversion_pct: pct(num(viewersConverted.rows[0].n), profileViews),
     acquisitionSeries: [...acqMap.values()].sort((x, y) => (x.bucket < y.bucket ? -1 : 1)),
   };
 };
