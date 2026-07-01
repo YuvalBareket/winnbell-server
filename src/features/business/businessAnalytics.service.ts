@@ -117,12 +117,15 @@ export const getOverviewAnalytics = async (
     // Per-draw capacity for every draw this business had activity in during the selected window.
     // used = the draw's total non-quarantined entries (its true capacity used); the window only
     // decides WHICH draws to include, so multi-draw ranges (3M+) show one bar per draw.
+    // cap_at_entry is the per-location cap snapshotted when the business enrolled in that draw, so
+    // closed draws keep the cap they actually had even if the live plan changes later.
     pool.query(
-      `SELECT d.id AS draw_id, d.name AS draw_name, d.status,
+      `SELECT d.id AS draw_id, d.name AS draw_name, d.status, de.cap_at_entry,
               (SELECT COUNT(*) FROM ticket t
                  WHERE t.draw_id=d.id AND t.business_id=$1 AND ($2::int IS NULL OR t.location_id=$2)
                    AND t.is_quarantined=FALSE) AS used
        FROM draw d
+       LEFT JOIN draw_entry de ON de.draw_id=d.id AND de.business_id=$1
        WHERE EXISTS (
          SELECT 1 FROM ticket t2
          WHERE t2.draw_id=d.id AND t2.business_id=$1 AND ($2::int IS NULL OR t2.location_id=$2)
@@ -138,14 +141,22 @@ export const getOverviewAnalytics = async (
   const locCount = num(capRes.rows[0]?.loc_count);
   const entryCap = perLoc != null ? perLoc * (loc ? 1 : Math.max(locCount, 1)) : null;
   const used = num(capRes.rows[0]?.used);
-  const drawCapacity = drawCapsRes.rows.map((r) => ({
-    draw_id: Number(r.draw_id),
-    label: String(r.draw_name),
-    status: String(r.status),
-    used: num(r.used),
-    cap: entryCap,
-    pct: pct(num(r.used), entryCap ?? 0),
-  }));
+  const drawCapacity = drawCapsRes.rows.map((r) => {
+    // Live subscription is the source of truth for the current OPEN draw; closed draws use the
+    // cap snapshotted at enrollment (cap_at_entry) so history stays stable across plan changes.
+    const perLocForDraw = r.status === 'Open'
+      ? perLoc
+      : (r.cap_at_entry != null ? Number(r.cap_at_entry) : perLoc);
+    const capForDraw = perLocForDraw != null ? perLocForDraw * (loc ? 1 : Math.max(locCount, 1)) : null;
+    return {
+      draw_id: Number(r.draw_id),
+      label: String(r.draw_name),
+      status: String(r.status),
+      used: num(r.used),
+      cap: capForDraw,
+      pct: pct(num(r.used), capForDraw ?? 0),
+    };
+  });
   const { total_participants, total_entries, new_participants, returning_participants } = core;
 
   return {

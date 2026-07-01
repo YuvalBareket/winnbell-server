@@ -225,6 +225,9 @@ CREATE TABLE draw_entry (
   -- NOT a prize contribution: the prize is set directly by the admin at draw creation,
   -- independent of any entry fees (there is no accumulated pool).
   fee_at_entry        NUMERIC(10, 2) NOT NULL DEFAULT 0,
+  -- Per-location entry cap (subscription.entries_per_location) snapshotted at enrolment time.
+  -- Read ONLY for historical per-draw capacity logs; live cap source of truth stays on subscription.
+  cap_at_entry        INTEGER NULL,
   created_at          TIMESTAMP NOT NULL DEFAULT NOW(),
   UNIQUE (draw_id, business_id)
 );
