@@ -143,7 +143,7 @@ export const getAcquisitionAnalytics = async (
   const bk = p.bucket === 'month' ? 'month' : 'day';
   const pool = getPool();
 
-  const [acquired, discovery, views, participants, acqNew, acqViews] = await Promise.all([
+  const [acquired, discovery, views, participants, viewedThenEntered, acqNew, acqViews] = await Promise.all([
     pool.query(
       `SELECT COUNT(*) AS n FROM "user" u
        JOIN user_acquisition ua ON ua.user_id = u.id
@@ -155,7 +155,13 @@ export const getAcquisitionAnalytics = async (
          WHERE business_id=$1 AND ($2::int IS NULL OR location_id=$2) AND is_quarantined=FALSE AND activated_at IS NOT NULL
          GROUP BY activated_by_user_id)
        SELECT COUNT(*) AS n FROM firstpart fp JOIN "user" u ON u.id = fp.uid
-       WHERE fp.first_at >= $3 AND fp.first_at < $4 AND u.created_at < fp.first_at`, [...a]),
+       WHERE fp.first_at >= $3 AND fp.first_at < $4 AND u.created_at < fp.first_at
+         -- exclude customers YOU brought to Winnbell (counted in "Joined Winnbell via You"),
+         -- so they are never also counted as an existing user "New to Your Shop"
+         AND NOT EXISTS (
+           SELECT 1 FROM user_acquisition ua JOIN business_location bl ON bl.id = ua.location_id
+           WHERE ua.user_id = u.id AND bl.business_id = $1 AND ($2::int IS NULL OR bl.id = $2)
+         )`, [...a]),
     pool.query(
       `SELECT COUNT(DISTINCT user_id) AS n FROM business_profile_view
        WHERE business_id=$1 AND ($2::int IS NULL OR location_id=$2) AND last_viewed_at >= $3 AND last_viewed_at < $4`, [...a]),
@@ -163,6 +169,17 @@ export const getAcquisitionAnalytics = async (
       `SELECT COUNT(DISTINCT activated_by_user_id) AS n FROM ticket
        WHERE business_id=$1 AND ($2::int IS NULL OR location_id=$2) AND is_quarantined=FALSE
          AND activated_at >= $3 AND activated_at < $4`, [...a]),
+    // Conversion numerator: customers who entered in the period AND had viewed the profile BEFORE
+    // that entry. Subset of the participants above, so conversion is always <= 100%.
+    pool.query(
+      `SELECT COUNT(DISTINCT t.activated_by_user_id) AS n FROM ticket t
+       WHERE t.business_id=$1 AND ($2::int IS NULL OR t.location_id=$2) AND t.is_quarantined=FALSE
+         AND t.activated_at >= $3 AND t.activated_at < $4
+         AND EXISTS (
+           SELECT 1 FROM business_profile_view v
+           WHERE v.user_id = t.activated_by_user_id AND v.business_id=$1
+             AND ($2::int IS NULL OR v.location_id=$2) AND v.first_viewed_at <= t.activated_at
+         )`, [...a]),
     pool.query(
       `SELECT date_trunc($5, u.created_at) AS bucket, COUNT(*) AS new_users
        FROM "user" u JOIN user_acquisition ua ON ua.user_id=u.id JOIN business_location bl ON bl.id=ua.location_id
@@ -186,7 +203,7 @@ export const getAcquisitionAnalytics = async (
     new_users_acquired: num(acquired.rows[0].n),
     business_discovery: num(discovery.rows[0].n),
     profile_views: profileViews,
-    conversion_pct: pct(num(participants.rows[0].n), profileViews),
+    conversion_pct: pct(num(viewedThenEntered.rows[0].n), num(participants.rows[0].n)),
     acquisitionSeries: [...acqMap.values()].sort((x, y) => (x.bucket < y.bucket ? -1 : 1)),
   };
 };
