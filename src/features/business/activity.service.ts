@@ -16,7 +16,6 @@ export interface CampaignEntry {
   transaction_amount: number | null;
   entry_source: string;
   status: 'active' | 'under_review';
-  reviewable: boolean;        // true only for business_review quarantines the business can approve
   created_at: string;
 }
 
@@ -45,7 +44,6 @@ export interface CampaignHeader {
   entries_used: number;        // campaign-total, quarantined excluded, respecting scope
   entry_cap: number | null;
   cap_reached: boolean;
-  needs_review_count: number;  // actionable (business_review) under-review entries in this campaign
 }
 
 // Customer display for the business feed: first name + last initial (e.g. "Jane D."). Never the
@@ -91,72 +89,6 @@ export async function resolveScope(
   return { businessId: row.id, scopedLocationId: filterLocationId ?? null };
 }
 
-/**
- * Business owner or location manager manually disqualifies (or restores) a receipt entry.
- *
- * Rules:
- *  - disqualify=true  → quarantine with reason 'business_review' (frees cap slot)
- *  - disqualify=false → only clears quarantine if reason is 'business_review';
- *                       system/admin quarantines are left untouched
- *  - Ownership: business owner matches via business_id; manager matches via location_id
- */
-export const setTicketQualification = async (
-  ticketId: number,
-  userId: number,
-  jwtLocationId: number | null | undefined,
-  disqualify: boolean,
-): Promise<void> => {
-  const pool = getPool();
-
-  // Verify the caller owns this ticket (owner via business, manager via location)
-  const authRes = await pool.query(
-    `SELECT t.id, t.quarantine_reason
-     FROM ticket t
-     JOIN business_location bl ON bl.id = t.location_id
-     JOIN business b ON b.id = bl.business_id
-     WHERE t.id = $1
-       AND (
-         b.user_id = $2
-         OR (bl.manager_user_id = $2 AND ($3::int IS NULL OR bl.id = $3))
-       )`,
-    [ticketId, userId, jwtLocationId ?? null],
-  );
-
-  if (authRes.rows.length === 0) {
-    throw Object.assign(new Error('Ticket not found or access denied'), { status: 403 });
-  }
-
-  const { quarantine_reason } = authRes.rows[0];
-
-  // Apply to all tickets from the same submission (primary + all secondary multi-entry rows).
-  // They share the same activated_by_user_id, business_id, draw_id, and activated_at.
-  const groupClause = `
-    WHERE activated_by_user_id = (SELECT activated_by_user_id FROM ticket WHERE id = $1)
-      AND business_id           = (SELECT business_id           FROM ticket WHERE id = $1)
-      AND draw_id               = (SELECT draw_id               FROM ticket WHERE id = $1)
-      AND activated_at          = (SELECT activated_at          FROM ticket WHERE id = $1)
-      AND entry_source = 'receipt'
-  `;
-
-  if (disqualify) {
-    await pool.query(
-      `UPDATE ticket SET is_quarantined = TRUE, quarantine_reason = 'business_review', quarantined_at = NOW()
-       ${groupClause}`,
-      [ticketId],
-    );
-  } else {
-    // Only restore tickets the business itself disqualified — never override system/admin quarantines
-    if (quarantine_reason !== 'business_review') {
-      throw Object.assign(new Error('This entry was flagged by the system and cannot be restored here.'), { status: 400 });
-    }
-    await pool.query(
-      `UPDATE ticket SET is_quarantined = FALSE, quarantine_reason = NULL, quarantined_at = NULL
-       ${groupClause} AND quarantine_reason = 'business_review'`,
-      [ticketId],
-    );
-  }
-};
-
 export const listBusinessCampaigns = async (
   userId: number,
   jwtLocationId: number | null | undefined,
@@ -190,7 +122,7 @@ export const getCampaignHeader = async (
   const pool = getPool();
   const empty: CampaignHeader = {
     has_campaign: false, status: 'Closed', campaign_name: null, prize_amount: null, draw_date: null,
-    days_remaining: null, entries_used: 0, entry_cap: null, cap_reached: false, needs_review_count: 0,
+    days_remaining: null, entries_used: 0, entry_cap: null, cap_reached: false,
   };
   const { businessId, scopedLocationId } = await resolveScope(userId, jwtLocationId, filterLocationId);
   if (businessId == null) return empty;
@@ -236,14 +168,6 @@ export const getCampaignHeader = async (
   const locCount = Number(capRes.rows[0]?.loc_count ?? 0);
   const entryCap = perLoc != null ? perLoc * (scopedLocationId ? 1 : Math.max(locCount, 1)) : null;
 
-  const nrParams: unknown[] = [businessId, draw.id];
-  const nrLoc = scopedLocationId ? (nrParams.push(scopedLocationId), ` AND location_id = $${nrParams.length}`) : '';
-  const nrRes = await pool.query(
-    `SELECT COUNT(*)::int AS n FROM ticket
-     WHERE business_id = $1 AND draw_id = $2 AND is_quarantined = TRUE AND quarantine_reason = 'business_review' ${nrLoc}`,
-    nrParams,
-  );
-
   const used = Number(usedRes.rows[0]?.used ?? 0);
   const drawDate = draw.draw_date instanceof Date ? draw.draw_date : new Date(draw.draw_date);
   const daysRemaining = draw.status === 'Open'
@@ -260,7 +184,6 @@ export const getCampaignHeader = async (
     entries_used: used,
     entry_cap: entryCap,
     cap_reached: entryCap != null && used >= entryCap,
-    needs_review_count: Number(nrRes.rows[0]?.n ?? 0),
   };
 };
 
@@ -313,7 +236,6 @@ export const getCampaignEntries = async (
   userId: number,
   jwtLocationId: number | null | undefined,
   filterLocationId: number | undefined,
-  needsReviewOnly = false,
   drawId?: number,
   cursor?: string,
   limit = 25,
@@ -343,7 +265,6 @@ export const getCampaignEntries = async (
   const params: unknown[] = [businessId, resolvedDrawId];
   const conditions: string[] = ['t.business_id = $1', 't.draw_id = $2'];
   if (scopedLocationId) { params.push(scopedLocationId); conditions.push(`t.location_id = $${params.length}`); }
-  if (needsReviewOnly) conditions.push(`t.is_quarantined = TRUE AND t.quarantine_reason = 'business_review'`);
   // Keyset on (created_at, id): the feed is ordered by date, and id only breaks ties, so paging
   // follows the exact same order. Cursor format is "<created_at ISO>|<id>".
   if (cursor) {
@@ -360,7 +281,7 @@ export const getCampaignEntries = async (
   const res = await pool.query(
     `SELECT t.id AS ticket_id, COALESCE(bl.name, bl.address) AS location_name,
             u.full_name AS customer_name, t.transaction_amount, t.entry_source,
-            t.is_quarantined, t.quarantine_reason, t.created_at
+            t.is_quarantined, t.created_at
      FROM ticket t
      JOIN business_location bl ON bl.id = t.location_id
      LEFT JOIN "user" u ON u.id = t.activated_by_user_id
@@ -380,7 +301,6 @@ export const getCampaignEntries = async (
     transaction_amount: r.transaction_amount != null ? parseFloat(r.transaction_amount) : null,
     entry_source: r.entry_source ?? 'receipt',
     status: r.is_quarantined ? 'under_review' : 'active',
-    reviewable: r.is_quarantined === true && r.quarantine_reason === 'business_review',
     created_at: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
   }));
   const last = items[items.length - 1];

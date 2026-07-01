@@ -12,6 +12,7 @@ import {
   getParticipating,
   getUploadUrl,
   getLocationProfileById,
+  getParticipatingLocationById,
   removeManager,
   searchParticipatingLocations,
   setupBusiness,
@@ -22,7 +23,7 @@ import {
 } from './business.controller.js';
 import { getStats } from './stats.controller.js';
 import { getBusinessAnalytics } from './businessAnalytics.controller.js';
-import { qualifyTicket, getCampaignHeaderController, getCampaignKpisController, getCampaignEntriesController, getCampaignsController } from './activity.controller.js';
+import { getCampaignHeaderController, getCampaignKpisController, getCampaignEntriesController, getCampaignsController } from './activity.controller.js';
 import { createCheckout, verifySession, getSubscription, cancelSub, resumeSub, getFoundingAvailability, updatePlan, getInvoices } from '../stripe/stripe.controller.js';
 
 const router = Router();
@@ -32,6 +33,7 @@ router.get('/nearby', getNearby);
 router.get('/participating', getParticipating);
 router.get('/participating/locations/search', searchParticipatingLocations);
 router.get('/locations/:locationId/profile', getLocationProfileById);
+router.get('/participating/locations/:locationId', getParticipatingLocationById);
 router.get('/mode', getEntryMode);
 // /address is handled by publicBusinessRouter in app.ts with rate limiter
 router.get('/subscription/founding-availability', getFoundingAvailability);
@@ -55,7 +57,6 @@ router.get('/campaign/list', requireRole('Business'), getCampaignsController);
 router.get('/campaign/header', requireRole('Business'), getCampaignHeaderController);
 router.get('/campaign/kpis', requireRole('Business'), getCampaignKpisController);
 router.get('/campaign/entries', requireRole('Business'), getCampaignEntriesController);
-router.patch('/tickets/:ticketId/qualify', requireRole('Business'), qualifyTicket);
 router.post('/subscription/checkout', requireRole('Business'), createCheckout);
 router.post('/subscription/verify-session', requireRole('Business'), verifySession);
 router.get('/subscription', requireRole('Business'), getSubscription);

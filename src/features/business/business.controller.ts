@@ -15,6 +15,7 @@ import {
   getNearbyBusinessesService,
   getParticipatingBusinessesService,
   getLocationProfileByIdService,
+  getParticipatingLocationByIdService,
   removeLocationManagerService,
   searchParticipatingLocationsService,
   updateBusinessLocation,
@@ -83,6 +84,21 @@ export const getLocationProfileById = async (req: AuthRequest, res: Response) =>
       logBusinessProfileViewService(req.user.id, location.business_id, location.location_id ?? null)
         .catch((err) => console.error('[profile-view]', err instanceof Error ? err.message : err));
     }
+    res.json(location);
+  } catch {
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
+// Gated variant for the submit / scan flow: returns the location only when it is currently
+// participating (active + subscribed + enrolled in the open draw), else 404. Not a profile view,
+// so it does not record analytics.
+export const getParticipatingLocationById = async (req: Request, res: Response) => {
+  const locationId = Number(req.params.locationId);
+  if (isNaN(locationId)) return res.status(400).json({ message: 'Invalid location ID' });
+  try {
+    const location = await getParticipatingLocationByIdService(locationId);
+    if (!location) return res.status(404).json({ message: 'Location not found' });
     res.json(location);
   } catch {
     res.status(500).json({ message: 'Server error' });

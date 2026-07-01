@@ -18,6 +18,7 @@ import {
   getNearby,
   getParticipating,
   getLocationProfileById,
+  getParticipatingLocationById,
   searchParticipatingLocations,
   getEntryMode,
   getAddressController,
@@ -125,6 +126,7 @@ publicBusinessRouter.get('/nearby', getNearby);
 publicBusinessRouter.get('/participating', getParticipating);
 publicBusinessRouter.get('/participating/locations/search', searchParticipatingLocations);
 publicBusinessRouter.get('/locations/:locationId/profile', optionalAuth, getLocationProfileById);
+publicBusinessRouter.get('/participating/locations/:locationId', getParticipatingLocationById);
 publicBusinessRouter.get('/mode', getEntryMode);
 publicBusinessRouter.post('/address', getAddressController);
 publicBusinessRouter.get('/address-coords', getAddressCoordsController);

@@ -537,10 +537,23 @@ export const searchParticipatingLocationsService = async (query: string): Promis
   return result.rows;
 };
 
-export const getLocationProfileByIdService = async (locationId: number): Promise<ParticipatingLocation | null> => {
-  const CACHE_KEY = `business:location:${locationId}`;
+// Shared fetch for a location's public profile. When `participatingOnly` is true it restores the
+// strict gating (active location + active subscription + enrolled in the current open draw) used by
+// the submit / scan flow so a receipt can only be started for a live, enrolled location. Without it
+// the profile is returned for ANY location (map popup + draw-history winner link).
+const fetchLocationProfile = async (
+  locationId: number,
+  participatingOnly: boolean,
+): Promise<ParticipatingLocation | null> => {
+  const CACHE_KEY = `business:location:${locationId}:${participatingOnly ? 'participating' : 'any'}`;
   const cached = publicCache.get<ParticipatingLocation | null>(CACHE_KEY);
   if (cached !== undefined) return cached;
+
+  const gate = participatingOnly
+    ? `AND bl.is_active
+       AND EXISTS (SELECT 1 FROM subscription s WHERE s.business_id = b.id AND s.status IN ('Active', 'Trialing'))
+       AND EXISTS (SELECT 1 FROM draw_entry de JOIN draw d ON d.id = de.draw_id WHERE de.business_id = b.id AND d.status = 'Open')`
+    : '';
 
   const pool = getPool();
   const result = await pool.query(
@@ -581,9 +594,8 @@ export const getLocationProfileByIdService = async (locationId: number): Promise
           ) AS cap_reached,
       (SELECT prize_pool FROM open_draw) AS draw_prize_amount,
       (SELECT draw_date FROM open_draw) AS draw_date,
-      -- Currently participating = active location + active subscription + enrolled in the open draw.
-      -- The location data is returned regardless; the client uses this to decide whether to show
-      -- the "Submit a Receipt" action (a non-participating winner profile shows info only).
+      -- active location + active subscription + enrolled in the open draw. On the unconditional
+      -- fetch this tells the client whether to show the "Submit a Receipt" action.
       (
         bl.is_active
         AND EXISTS (SELECT 1 FROM subscription s WHERE s.business_id = b.id AND s.status IN ('Active', 'Trialing'))
@@ -591,17 +603,24 @@ export const getLocationProfileByIdService = async (locationId: number): Promise
       ) AS is_participating
     FROM business_location bl
     JOIN business b ON bl.business_id = b.id
-    -- Fetch the location profile by id with NO participation / subscription / active gating.
-    -- The map controls its own visibility upstream (getNearby only shows markers for current
-    -- open-draw participants), and the draw-history winner link must be able to open ANY past
-    -- winner's location profile regardless of whether that business is still participating.
-    WHERE bl.id = $1`,
+    WHERE bl.id = $1
+      ${gate}`,
     [locationId],
   );
   const value = result.rows[0] ?? null;
   publicCache.set(CACHE_KEY, value, 15);
   return value;
 };
+
+// Unconditional: ANY location's profile (map popup + draw-history winner link). is_participating
+// tells the client whether the submit action applies.
+export const getLocationProfileByIdService = (locationId: number): Promise<ParticipatingLocation | null> =>
+  fetchLocationProfile(locationId, false);
+
+// Gated: only returns a location that is currently active + subscribed + enrolled in the open draw.
+// Used by the submit / scan flow so a receipt can only be started for a live, participating location.
+export const getParticipatingLocationByIdService = (locationId: number): Promise<ParticipatingLocation | null> =>
+  fetchLocationProfile(locationId, true);
 
 export const updateCampaignSettings = async (
   ownerUserId: number,
