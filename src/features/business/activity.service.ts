@@ -22,7 +22,7 @@ export interface CampaignEntry {
 
 export interface CampaignEntriesResult {
   items: CampaignEntry[];
-  next_cursor: number | null;
+  next_cursor: string | null;
 }
 
 export interface CampaignListItem {
@@ -315,7 +315,7 @@ export const getCampaignEntries = async (
   filterLocationId: number | undefined,
   needsReviewOnly = false,
   drawId?: number,
-  cursor?: number,
+  cursor?: string,
   limit = 25,
 ): Promise<CampaignEntriesResult> => {
   const pool = getPool();
@@ -344,7 +344,16 @@ export const getCampaignEntries = async (
   const conditions: string[] = ['t.business_id = $1', 't.draw_id = $2'];
   if (scopedLocationId) { params.push(scopedLocationId); conditions.push(`t.location_id = $${params.length}`); }
   if (needsReviewOnly) conditions.push(`t.is_quarantined = TRUE AND t.quarantine_reason = 'business_review'`);
-  if (cursor) { params.push(cursor); conditions.push(`t.id < $${params.length}`); }
+  // Keyset on (created_at, id): the feed is ordered by date, and id only breaks ties, so paging
+  // follows the exact same order. Cursor format is "<created_at ISO>|<id>".
+  if (cursor) {
+    const sep = cursor.lastIndexOf('|');
+    if (sep > 0) {
+      params.push(cursor.slice(0, sep)); const tsIdx = params.length;
+      params.push(parseInt(cursor.slice(sep + 1), 10)); const idIdx = params.length;
+      conditions.push(`(t.created_at, t.id) < ($${tsIdx}::timestamp, $${idIdx}::int)`);
+    }
+  }
   const safeLimit = Math.min(Math.max(1, limit), 50);
   params.push(safeLimit + 1);
 
@@ -357,7 +366,7 @@ export const getCampaignEntries = async (
      LEFT JOIN "user" u ON u.id = t.activated_by_user_id
      WHERE ${conditions.join(' AND ')}
        AND (t.entry_source != 'receipt' OR t.receipt_identifier IS NOT NULL)
-     ORDER BY t.id DESC LIMIT $${params.length}`,
+     ORDER BY t.created_at DESC, t.id DESC LIMIT $${params.length}`,
     params,
   );
 
@@ -374,5 +383,6 @@ export const getCampaignEntries = async (
     reviewable: r.is_quarantined === true && r.quarantine_reason === 'business_review',
     created_at: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
   }));
-  return { items, next_cursor: hasMore ? items[items.length - 1].ticket_id : null };
+  const last = items[items.length - 1];
+  return { items, next_cursor: hasMore && last ? `${last.created_at}|${last.ticket_id}` : null };
 };

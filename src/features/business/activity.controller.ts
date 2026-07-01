@@ -36,7 +36,7 @@ export const getCampaignKpisController = async (req: AuthRequest, res: Response)
 export const getCampaignEntriesController = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const needsReviewOnly = req.query.needs_review === 'true' || req.query.needs_review === '1';
-    const cursor = req.query.cursor ? parseInt(req.query.cursor as string, 10) : undefined;
+    const cursor = req.query.cursor ? (req.query.cursor as string) : undefined;
     const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 25;
     const data = await getCampaignEntries(req.user!.id, req.user!.location_id ?? null, parseLoc(req), needsReviewOnly, parseDrawId(req), cursor, limit);
     res.json(data);

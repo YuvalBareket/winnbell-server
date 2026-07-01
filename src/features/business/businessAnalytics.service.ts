@@ -95,13 +95,15 @@ export const getOverviewAnalytics = async (
   const empty = {
     total_participants: 0, total_entries: 0, avg_entries_per_participant: 0,
     new_participants: 0, returning_participants: 0, new_pct: 0, returning_pct: 0,
-    entry_cap: { used: 0, cap: null as number | null, pct: 0 }, series: [] as ReturnType<typeof num>[] & unknown[],
+    entry_cap: { used: 0, cap: null as number | null, pct: 0 },
+    draw_capacity: [] as { draw_id: number; label: string; status: string; used: number; cap: number | null; pct: number }[],
+    series: [] as ReturnType<typeof num>[] & unknown[],
   };
   if (businessId == null) return { ...empty, series: [] };
   const loc = scopedLocationId;
   const pool = getPool();
 
-  const [core, capRes, series] = await Promise.all([
+  const [core, capRes, drawCapsRes, series] = await Promise.all([
     coreStats(businessId, loc, p.from, p.to),
     pool.query(
       `SELECT
@@ -112,6 +114,23 @@ export const getOverviewAnalytics = async (
          (SELECT COUNT(*) FROM business_location WHERE business_id=$1 AND is_active=TRUE) AS loc_count`,
       [businessId, loc],
     ),
+    // Per-draw capacity for every draw this business had activity in during the selected window.
+    // used = the draw's total non-quarantined entries (its true capacity used); the window only
+    // decides WHICH draws to include, so multi-draw ranges (3M+) show one bar per draw.
+    pool.query(
+      `SELECT d.id AS draw_id, d.name AS draw_name, d.status,
+              (SELECT COUNT(*) FROM ticket t
+                 WHERE t.draw_id=d.id AND t.business_id=$1 AND ($2::int IS NULL OR t.location_id=$2)
+                   AND t.is_quarantined=FALSE) AS used
+       FROM draw d
+       WHERE EXISTS (
+         SELECT 1 FROM ticket t2
+         WHERE t2.draw_id=d.id AND t2.business_id=$1 AND ($2::int IS NULL OR t2.location_id=$2)
+           AND t2.is_quarantined=FALSE AND t2.activated_at >= $3 AND t2.activated_at < $4
+       )
+       ORDER BY d.draw_date ASC`,
+      [businessId, loc, p.from, p.to],
+    ),
     ticketSeries(businessId, loc, p.from, p.to, p.bucket === 'month' ? 'month' : 'day'),
   ]);
 
@@ -119,6 +138,14 @@ export const getOverviewAnalytics = async (
   const locCount = num(capRes.rows[0]?.loc_count);
   const entryCap = perLoc != null ? perLoc * (loc ? 1 : Math.max(locCount, 1)) : null;
   const used = num(capRes.rows[0]?.used);
+  const drawCapacity = drawCapsRes.rows.map((r) => ({
+    draw_id: Number(r.draw_id),
+    label: String(r.draw_name),
+    status: String(r.status),
+    used: num(r.used),
+    cap: entryCap,
+    pct: pct(num(r.used), entryCap ?? 0),
+  }));
   const { total_participants, total_entries, new_participants, returning_participants } = core;
 
   return {
@@ -128,6 +155,7 @@ export const getOverviewAnalytics = async (
     new_pct: pct(new_participants, new_participants + returning_participants),
     returning_pct: pct(returning_participants, new_participants + returning_participants),
     entry_cap: { used, cap: entryCap, pct: pct(used, entryCap ?? 0) },
+    draw_capacity: drawCapacity,
     series,
   };
 };
