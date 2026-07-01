@@ -1,5 +1,5 @@
 import { getPool } from '../../shared/db/db.js';
-import { publicCache, invalidatePublicBusinessData, getPlatformSettings, invalidateUserAuth } from '../../shared/cache/cache.js';
+import { publicCache, invalidatePublicBusinessData, invalidatePublicLocation, getPlatformSettings, invalidateUserAuth } from '../../shared/cache/cache.js';
 import type { PoolClient } from 'pg';
 import crypto from 'crypto';
 import {
@@ -381,7 +381,7 @@ export const updateBusinessLocation = async (
   if (result.rowCount === 0) throw new Error('UNAUTHORIZED_OR_INVALID_LOCATION');
 
   invalidatePublicBusinessData();
-  publicCache.del('business:location:' + locationId);
+  invalidatePublicLocation(locationId);
 };
 
 export const addBusinessLocation = async (ownerUserId: number, data: AddLocationInput): Promise<{ locationId: number }> => {
@@ -425,7 +425,7 @@ export const deleteBusinessLocation = async (locationId: number, ownerUserId: nu
     if (managerId) await demoteFormerManager(client, managerId);
     await client.query('COMMIT');
     invalidatePublicBusinessData();
-    publicCache.del('business:location:' + locationId);
+    invalidatePublicLocation(locationId);
     if (managerId) invalidateUserAuth(managerId);
   } catch (err) {
     await client.query('ROLLBACK');

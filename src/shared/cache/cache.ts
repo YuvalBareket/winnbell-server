@@ -56,12 +56,14 @@ export const invalidatePublicBusinessData = (): void => {
   if (keys.length) publicCache.del(keys);
 };
 
-/** Invalidate the cached participating-location payload for ONE location. A ticket
- *  write only changes that location's `cap_reached` count, so scope the flush to its
- *  key instead of wiping every public business/draws/founding cache (which kept the
- *  public cache from ever warming on a busy draw). */
+/** Invalidate the cached location-profile payload for ONE location. A ticket write only
+ *  changes that location's `cap_reached` count, so scope the flush to its keys instead of
+ *  wiping every public business/draws/founding cache (which kept the public cache from ever
+ *  warming on a busy draw). The profile is cached under two variants (unconditional `:any`
+ *  and gated `:participating`), so both must be cleared. This function is the single source
+ *  of truth for that key scheme — do not hand-roll these keys elsewhere. */
 export const invalidatePublicLocation = (locationId: number): void => {
-  publicCache.del(`business:location:${locationId}`);
+  publicCache.del([`business:location:${locationId}:any`, `business:location:${locationId}:participating`]);
 };
 
 /** Invalidate a user's cached auth state (is_active/is_phone_verified guard AND
