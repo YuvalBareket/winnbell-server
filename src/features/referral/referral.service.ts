@@ -87,13 +87,20 @@ export const grantPendingReferralBonus = async (
   // Shared per-user cap lock (same key the entry paths use) so the bonus can't overshoot 30.
   await client.query(`SELECT pg_advisory_xact_lock(10, hashtext('udcap:' || $1::text))`, [userId]);
 
-  // Referral attribution + reward state live in user_acquisition (1:1 with the user).
+  // Welcome-bonus attribution + reward state live in user_acquisition (1:1 with the user). Two
+  // eligible "fresh user invited in" channels, each grants ONE welcome entry (referral_rewarded_at
+  // guards both, so it's one-per-user regardless of channel):
+  //   - person referral: referred_by_user_id set
+  //   - location flyer/QR: source='location_flyer' with a location_id (the scanned location)
   const u = await client.query(
-    `SELECT referred_by_user_id, referral_rewarded_at FROM user_acquisition WHERE user_id = $1 FOR UPDATE`,
+    `SELECT referred_by_user_id, location_id, source, referral_rewarded_at FROM user_acquisition WHERE user_id = $1 FOR UPDATE`,
     [userId],
   );
   const row = u.rows[0];
-  if (!row || row.referred_by_user_id === null || row.referral_rewarded_at !== null) return false;
+  if (!row || row.referral_rewarded_at !== null) return false;
+  const fromReferral = row.referred_by_user_id !== null;
+  const fromLocation = row.source === 'location_flyer' && row.location_id !== null;
+  if (!fromReferral && !fromLocation) return false;
 
   const draw = await client.query(
     `SELECT id FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1`,
@@ -107,6 +114,9 @@ export const grantPendingReferralBonus = async (
   );
   if (cap.rows[0].c >= MAX_ENTRIES_PER_DRAW) return false; // already at cap — skip
 
+  // Personal welcome entry: business_id + location_id NULL so it NEVER counts toward any business's
+  // entries or cap. Both channels use entry_source='referral' (a welcome bonus), so the location
+  // welcome is exactly like the person referral, distinct from a self-claimed AMOE 'free' entry.
   const code = await generateGlobalUniqueCode(client);
   await client.query(
     `INSERT INTO ticket (code, status, entry_source, business_id, location_id, draw_id, activated_by_user_id, activated_at)

@@ -101,7 +101,7 @@ export const getUserTicketsService = async (userId: number, drawId: number) => {
       t.status,
       t.activated_at,
       CASE WHEN t.entry_source = 'promo' THEN 'Promotional Entry'
-           WHEN t.entry_source = 'referral' THEN 'Referral Entry'
+           WHEN t.entry_source = 'referral' THEN 'Invitation Entry'
            ELSE b.name END AS business_name,
       b.sector AS business_sector,
       b.logo_url,
