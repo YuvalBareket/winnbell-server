@@ -25,9 +25,19 @@ export interface CampaignEntriesResult {
   next_cursor: number | null;
 }
 
+export interface CampaignListItem {
+  draw_id: number;
+  name: string;
+  prize_amount: number;
+  draw_date: string;
+  status: string;      // 'Open' | 'Closed' | 'Upcoming'
+  is_current: boolean; // status === 'Open'
+}
+
 // Campaign Dashboard header (current-campaign monitoring, NOT period-scoped).
 export interface CampaignHeader {
   has_campaign: boolean;
+  status: string;
   campaign_name: string | null;
   prize_amount: number | null;
   draw_date: string | null;
@@ -147,27 +157,61 @@ export const setTicketQualification = async (
   }
 };
 
+export const listBusinessCampaigns = async (
+  userId: number,
+  jwtLocationId: number | null | undefined,
+): Promise<CampaignListItem[]> => {
+  const pool = getPool();
+  const { businessId } = await resolveScope(userId, jwtLocationId);
+  if (businessId == null) return [];
+  const res = await pool.query(
+    `SELECT DISTINCT d.id AS draw_id, d.name, d.prize_pool, d.draw_date, d.status
+     FROM draw d JOIN draw_entry de ON de.draw_id = d.id AND de.business_id = $1
+     ORDER BY d.draw_date DESC`,
+    [businessId],
+  );
+  return res.rows.map((r) => ({
+    draw_id: r.draw_id,
+    name: r.name,
+    prize_amount: Number(r.prize_pool),
+    draw_date: (r.draw_date instanceof Date ? r.draw_date : new Date(r.draw_date)).toISOString(),
+    status: r.status,
+    is_current: r.status === 'Open',
+  }));
+};
+
 // ── Campaign Dashboard: monitoring header (NOT period-scoped) ──────────────────
 export const getCampaignHeader = async (
   userId: number,
   jwtLocationId: number | null | undefined,
   filterLocationId?: number,
+  drawId?: number,
 ): Promise<CampaignHeader> => {
   const pool = getPool();
   const empty: CampaignHeader = {
-    has_campaign: false, campaign_name: null, prize_amount: null, draw_date: null,
+    has_campaign: false, status: 'Closed', campaign_name: null, prize_amount: null, draw_date: null,
     days_remaining: null, entries_used: 0, entry_cap: null, cap_reached: false, needs_review_count: 0,
   };
   const { businessId, scopedLocationId } = await resolveScope(userId, jwtLocationId, filterLocationId);
   if (businessId == null) return empty;
 
-  // Current campaign = the Open draw this business is enrolled in.
-  const drawRes = await pool.query(
-    `SELECT d.id, d.name, d.prize_pool, d.draw_date
-     FROM draw d JOIN draw_entry de ON de.draw_id = d.id AND de.business_id = $1
-     WHERE d.status = 'Open' ORDER BY d.draw_date ASC LIMIT 1`,
-    [businessId],
-  );
+  // Resolve the target draw: specific draw if drawId given, else the Open draw.
+  let drawRes;
+  if (drawId != null) {
+    drawRes = await pool.query(
+      `SELECT d.id, d.name, d.prize_pool, d.draw_date, d.status
+       FROM draw d JOIN draw_entry de ON de.draw_id = d.id AND de.business_id = $1
+       WHERE d.id = $2 LIMIT 1`,
+      [businessId, drawId],
+    );
+  } else {
+    drawRes = await pool.query(
+      `SELECT d.id, d.name, d.prize_pool, d.draw_date, d.status
+       FROM draw d JOIN draw_entry de ON de.draw_id = d.id AND de.business_id = $1
+       WHERE d.status = 'Open' ORDER BY d.draw_date ASC LIMIT 1`,
+      [businessId],
+    );
+  }
   const draw = drawRes.rows[0];
   if (!draw) return empty;
 
@@ -202,10 +246,13 @@ export const getCampaignHeader = async (
 
   const used = Number(usedRes.rows[0]?.used ?? 0);
   const drawDate = draw.draw_date instanceof Date ? draw.draw_date : new Date(draw.draw_date);
-  const daysRemaining = Math.max(0, Math.ceil((drawDate.getTime() - Date.now()) / 86400000));
+  const daysRemaining = draw.status === 'Open'
+    ? Math.max(0, Math.ceil((drawDate.getTime() - Date.now()) / 86400000))
+    : null;
 
   return {
     has_campaign: true,
+    status: draw.status,
     campaign_name: draw.name,
     prize_amount: Number(draw.prize_pool),
     draw_date: drawDate.toISOString(),
@@ -223,10 +270,26 @@ export const getCampaignKpis = async (
   jwtLocationId: number | null | undefined,
   filterLocationId: number | undefined,
   dateRange: DateRange = 'today',
+  drawId?: number,
 ): Promise<CampaignKpis> => {
   const pool = getPool();
   const { businessId, scopedLocationId } = await resolveScope(userId, jwtLocationId, filterLocationId);
   if (businessId == null) return { entries: 0, revenue: 0, customers: 0 };
+
+  if (drawId != null) {
+    const pDraw: unknown[] = [businessId, drawId];
+    const drawLocClause = scopedLocationId ? (pDraw.push(scopedLocationId), ` AND t.location_id = $${pDraw.length}`) : '';
+    const res = await pool.query(
+      `SELECT COUNT(*) AS entries, COALESCE(SUM(t.transaction_amount),0) AS revenue, COUNT(DISTINCT t.activated_by_user_id) AS customers
+       FROM ticket t WHERE t.business_id = $1 AND t.draw_id = $2 AND t.is_quarantined = FALSE ${drawLocClause}`,
+      pDraw,
+    );
+    return {
+      entries: Number(res.rows[0]?.entries ?? 0),
+      revenue: parseFloat(res.rows[0]?.revenue ?? '0'),
+      customers: Number(res.rows[0]?.customers ?? 0),
+    };
+  }
 
   const params: unknown[] = [businessId];
   const locClause = scopedLocationId ? (params.push(scopedLocationId), ` AND t.location_id = $${params.length}`) : '';
@@ -251,6 +314,7 @@ export const getCampaignEntries = async (
   jwtLocationId: number | null | undefined,
   filterLocationId: number | undefined,
   needsReviewOnly = false,
+  drawId?: number,
   cursor?: number,
   limit = 25,
 ): Promise<CampaignEntriesResult> => {
@@ -258,15 +322,25 @@ export const getCampaignEntries = async (
   const { businessId, scopedLocationId } = await resolveScope(userId, jwtLocationId, filterLocationId);
   if (businessId == null) return { items: [], next_cursor: null };
 
-  const drawRes = await pool.query(
-    `SELECT d.id FROM draw d JOIN draw_entry de ON de.draw_id = d.id AND de.business_id = $1
-     WHERE d.status = 'Open' ORDER BY d.draw_date ASC LIMIT 1`,
-    [businessId],
-  );
-  const drawId = drawRes.rows[0]?.id;
-  if (!drawId) return { items: [], next_cursor: null };
+  let resolvedDrawId: number | undefined;
+  if (drawId != null) {
+    const drawRes = await pool.query(
+      `SELECT d.id FROM draw d JOIN draw_entry de ON de.draw_id = d.id AND de.business_id = $1
+       WHERE d.id = $2 LIMIT 1`,
+      [businessId, drawId],
+    );
+    resolvedDrawId = drawRes.rows[0]?.id;
+  } else {
+    const drawRes = await pool.query(
+      `SELECT d.id FROM draw d JOIN draw_entry de ON de.draw_id = d.id AND de.business_id = $1
+       WHERE d.status = 'Open' ORDER BY d.draw_date ASC LIMIT 1`,
+      [businessId],
+    );
+    resolvedDrawId = drawRes.rows[0]?.id;
+  }
+  if (!resolvedDrawId) return { items: [], next_cursor: null };
 
-  const params: unknown[] = [businessId, drawId];
+  const params: unknown[] = [businessId, resolvedDrawId];
   const conditions: string[] = ['t.business_id = $1', 't.draw_id = $2'];
   if (scopedLocationId) { params.push(scopedLocationId); conditions.push(`t.location_id = $${params.length}`); }
   if (needsReviewOnly) conditions.push(`t.is_quarantined = TRUE AND t.quarantine_reason = 'business_review'`);
