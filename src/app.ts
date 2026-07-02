@@ -105,6 +105,22 @@ const otpLimiter = rateLimit({
   message: { message: 'Too many verification requests from this device. Please try again later.' },
 });
 
+// Authenticated business-area limiter. A single dashboard load fans out several reads
+// (my-business, subscription, campaign header/kpis/entries, analytics), so this is keyed
+// PER USER with a generous cap. It replaces the anonymous per-IP publicLimiter that the
+// authed /business routes used to inherit (publicBusinessRouter's router-level middleware
+// ran on every /business request before falling through), which made an owner — or several
+// staff behind one office IP — trip the 20/min public cap just by opening the dashboard.
+const businessLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 120,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: express.Request) => req.user?.id?.toString() ?? getClientIpKey(req),
+  store: makeRateLimitStore('business'),
+  message: { message: 'Too many requests, please slow down.' },
+});
+
 // Stripe webhook must receive raw body — register BEFORE express.json()
 app.use('/webhooks/stripe', express.raw({ type: 'application/json' }), stripeWebhookRoutes);
 
@@ -119,18 +135,22 @@ app.use(express.json());
 app.use('/auth/register', registrationLimiter);
 app.use('/auth', authLimiter, authRoutes);
 
-// Public business discovery endpoints — accessible without login (e.g. browsing the map)
+// Public business discovery endpoints — accessible without login (e.g. browsing the map).
+// publicLimiter is attached PER ROUTE (not via router.use) on purpose: an authenticated
+// /business/* request first enters this router and, finding no matching public route, falls
+// through to the authed businessRouter below. Router-level middleware would have metered that
+// fall-through against the anonymous 20/min public bucket. Per-route keeps the public map/
+// discovery budget intact while letting authed dashboard traffic use businessLimiter instead.
 const publicBusinessRouter = Router();
-publicBusinessRouter.use(publicLimiter);
-publicBusinessRouter.get('/nearby', getNearby);
-publicBusinessRouter.get('/participating', getParticipating);
-publicBusinessRouter.get('/participating/locations/search', searchParticipatingLocations);
-publicBusinessRouter.get('/locations/:locationId/profile', optionalAuth, getLocationProfileById);
-publicBusinessRouter.get('/participating/locations/:locationId', getParticipatingLocationById);
-publicBusinessRouter.get('/mode', getEntryMode);
-publicBusinessRouter.post('/address', getAddressController);
-publicBusinessRouter.get('/address-coords', getAddressCoordsController);
-publicBusinessRouter.get('/subscription/founding-availability', getFoundingAvailability);
+publicBusinessRouter.get('/nearby', publicLimiter, getNearby);
+publicBusinessRouter.get('/participating', publicLimiter, getParticipating);
+publicBusinessRouter.get('/participating/locations/search', publicLimiter, searchParticipatingLocations);
+publicBusinessRouter.get('/locations/:locationId/profile', publicLimiter, optionalAuth, getLocationProfileById);
+publicBusinessRouter.get('/participating/locations/:locationId', publicLimiter, getParticipatingLocationById);
+publicBusinessRouter.get('/mode', publicLimiter, getEntryMode);
+publicBusinessRouter.post('/address', publicLimiter, getAddressController);
+publicBusinessRouter.get('/address-coords', publicLimiter, getAddressCoordsController);
+publicBusinessRouter.get('/subscription/founding-availability', publicLimiter, getFoundingAvailability);
 app.use('/business', publicBusinessRouter);
 
 // Public draws endpoint — campaign info is public
@@ -150,7 +170,7 @@ app.use(authenticateToken);
 app.use('/admin', adminRoutes);
 app.use('/tickets', ticketsLimiter, ticketsRoutes);
 app.use('/draws', drawsRoutes);
-app.use('/business', businessRoutes);
+app.use('/business', businessLimiter, businessRoutes);
 app.use('/notifications', notificationRoutes);
 app.use('/phone/send-otp', otpLimiter);
 app.use('/phone', phoneRouter);

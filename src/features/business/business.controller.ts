@@ -122,12 +122,9 @@ export const getParticipatingLocationById = async (req: Request, res: Response) 
   }
 };
 
-export const getNearby = async (
-  req: Request<{}, {}, {}, INearbyQuery>,
-  res: Response,
-) => {
+export const getNearby = async (req: Request, res: Response) => {
   try {
-    const { minLat, maxLat, minLng, maxLng, sector, limit, name } = req.query;
+    const { minLat, maxLat, minLng, maxLng, sector, limit, name } = req.query as unknown as INearbyQuery;
 
     if (!minLat || !maxLat || !minLng || !maxLng) {
       return res.status(400).json({ message: 'Bounding box params required' });
