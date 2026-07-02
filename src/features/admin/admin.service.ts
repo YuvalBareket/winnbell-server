@@ -316,6 +316,11 @@ export const openDrawService = async (drawId: number): Promise<void> => {
   try {
     await client.query('BEGIN');
 
+    // Serialize ALL draw open/close operations so two draws can never be Open at once. A
+    // transaction-level advisory lock blocks any concurrent open/close until this one commits,
+    // so the "already Open?" check below cannot race under READ COMMITTED.
+    await client.query(`SELECT pg_advisory_xact_lock(hashtext('winnbell:draw_state_change'))`);
+
     // Lock the draw row first to prevent concurrent opens
     const check = await client.query(
       `SELECT id, status FROM draw WHERE id = $1 FOR UPDATE`,
@@ -324,8 +329,9 @@ export const openDrawService = async (drawId: number): Promise<void> => {
     if (check.rows.length === 0) throw new Error('Draw not found');
     if (check.rows[0].status.toUpperCase() !== 'UPCOMING') throw new Error('Only Upcoming draws can be opened');
 
-    // Atomically check for existing open draw
-    const openCheck = await client.query(`SELECT id FROM draw WHERE status = 'Open' FOR UPDATE SKIP LOCKED`);
+    // Existence check for an already-Open draw (plain FOR UPDATE, not SKIP LOCKED — SKIP LOCKED
+    // would hide a concurrently-locked Open row, the opposite of what a guard needs).
+    const openCheck = await client.query(`SELECT id FROM draw WHERE status = 'Open' FOR UPDATE`);
     if (openCheck.rows.length > 0) throw new Error('A draw is already Open. Close it before opening another.');
 
     await openDrawInTx(client, drawId);
@@ -344,6 +350,10 @@ export const closeDrawService = async (drawId: number): Promise<void> => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+
+    // Same lock as openDrawService: serialize open/close so an open and a close (which also opens
+    // the next Upcoming draw) can never interleave and leave zero or two Open draws.
+    await client.query(`SELECT pg_advisory_xact_lock(hashtext('winnbell:draw_state_change'))`);
 
     const check = await client.query(`SELECT id, status FROM draw WHERE id = $1 FOR UPDATE`, [drawId]);
 

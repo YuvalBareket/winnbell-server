@@ -333,6 +333,7 @@ describe('openDrawService — enrollment', () => {
   test('enrolls paid businesses at open, including Past_Due (grace), and gates founders by their prepaid year', async () => {
     setupClientQueries(
       { rows: [] },                               // BEGIN
+      { rows: [] },                               // pg_advisory_xact_lock
       { rows: [{ id: 5, status: 'Upcoming' }] },  // SELECT draw FOR UPDATE
       { rows: [] },                               // SELECT open draw (none open)
       { rows: [] },                               // UPDATE draw -> Open
@@ -360,6 +361,7 @@ describe('openDrawService — enrollment', () => {
   test('refuses to open a second draw while one is already Open', async () => {
     setupClientQueries(
       { rows: [] },                               // BEGIN
+      { rows: [] },                               // pg_advisory_xact_lock
       { rows: [{ id: 5, status: 'Upcoming' }] },  // SELECT draw FOR UPDATE
       { rows: [{ id: 9 }] },                      // an Open draw already exists
     );
@@ -374,7 +376,8 @@ describe('openDrawService — enrollment', () => {
 
   test('only Upcoming draws can be opened', async () => {
     setupClientQueries(
-      { rows: [] },
+      { rows: [] },                               // BEGIN
+      { rows: [] },                               // pg_advisory_xact_lock
       { rows: [{ id: 5, status: 'Open' }] },      // already Open
     );
     await expect(openDrawService(5)).rejects.toThrow(/Only Upcoming/);
@@ -388,6 +391,7 @@ describe('closeDrawService — draw-time paid check', () => {
   test('drops businesses whose payment never cleared (Past_Due/Incomplete) when the draw closes', async () => {
     setupClientQueries(
       { rows: [] },                            // BEGIN
+      { rows: [] },                            // pg_advisory_xact_lock
       { rows: [{ id: 5, status: 'Open' }] },   // SELECT draw FOR UPDATE
       { rows: [] },                            // UPDATE -> Closed
       { rows: [] },                            // logDrawAudit
