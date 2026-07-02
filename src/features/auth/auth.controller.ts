@@ -224,20 +224,30 @@ export const deleteAccount = async (req: Request, res: Response): Promise<void> 
     const userRow = await pool.query(`SELECT external_auth_id FROM "user" WHERE id = $1`, [userId]);
     const externalAuthId: string | null = userRow.rows[0]?.external_auth_id ?? null;
 
-    // Revoke all refresh tokens before anonymizing
-    await pool.query(`DELETE FROM refresh_token WHERE user_id = $1`, [userId]);
-
-    // Anonymize PII — preserve tickets/entries for draw integrity
-    await pool.query(
-      `UPDATE "user" SET
-         full_name    = 'Deleted User',
-         email        = 'deleted_' || id::text || '@winnbell.invalid',
-         phone_number = NULL,
-         is_active    = FALSE,
-         role         = 'User'
-       WHERE id = $1`,
-      [userId],
-    );
+    // Revoke refresh tokens AND anonymize PII atomically, so we can never end up with the tokens
+    // deleted but the account still active (or vice versa). Tickets/entries are preserved for
+    // draw integrity.
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+      await client.query(`DELETE FROM refresh_token WHERE user_id = $1`, [userId]);
+      await client.query(
+        `UPDATE "user" SET
+           full_name    = 'Deleted User',
+           email        = 'deleted_' || id::text || '@winnbell.invalid',
+           phone_number = NULL,
+           is_active    = FALSE,
+           role         = 'User'
+         WHERE id = $1`,
+        [userId],
+      );
+      await client.query('COMMIT');
+    } catch (txErr) {
+      await client.query('ROLLBACK');
+      throw txErr;
+    } finally {
+      client.release();
+    }
     invalidateUserAuth(userId);
 
     // Remove from Supabase so the email is free for re-registration

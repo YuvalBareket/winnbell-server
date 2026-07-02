@@ -110,7 +110,8 @@ export const listBusinessCampaigns = async (
   const res = await pool.query(
     `SELECT DISTINCT d.id AS draw_id, d.name, d.prize_pool, d.draw_date, d.status
      FROM draw d JOIN draw_entry de ON de.draw_id = d.id AND de.business_id = $1
-     ORDER BY d.draw_date DESC`,
+     ORDER BY d.draw_date DESC
+     LIMIT 60`,
     [businessId],
   );
   return res.rows.map((r) => ({

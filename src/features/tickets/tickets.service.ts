@@ -306,6 +306,9 @@ export const activateFreeTicket = async (userId: number, claimIp?: string): Prom
     `, [userId]);
 
     const lastUsage = eligibilityResult.rows[0];
+    // The query is anchored on the user row, so a missing row means the user no longer exists
+    // (e.g. deleted mid-session). Fail closed rather than skip the verification guards below.
+    if (!lastUsage) throw new Error('User not found.');
 
     // Rejected attempts are NOT recorded — the user just gets the error and can retry once
     // the reason is resolved. Only an approved claim is stored (one row per user, below).
