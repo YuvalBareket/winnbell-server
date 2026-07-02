@@ -139,6 +139,25 @@ export const getAllDrawsService = async () => {
   return result.rows;
 };
 
+// Returns the UTC Date for midnight America/New_York on the LAST day of the given month (1-indexed
+// month). Uses the actual NY offset for that date (EDT -4 in summer, EST -5 in winter) from the
+// built-in Intl, so month-end draw dates are correct year-round instead of a hardcoded +4h offset
+// (which was an hour early Nov-March under EST).
+function lastDayOfMonthNyMidnightUtc(year: number, month: number): Date {
+  // Date.UTC treats month as 0-indexed, so (month, day 0) = the last day of the 1-indexed month.
+  const lastDay = new Date(Date.UTC(year, month, 0));
+  const y = lastDay.getUTCFullYear();
+  const m = lastDay.getUTCMonth();
+  const d = lastDay.getUTCDate();
+  // Probe the NY offset at noon UTC on that day (well inside it; a month-end is never a DST switch day).
+  const probe = new Date(Date.UTC(y, m, d, 12));
+  const gmt = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', timeZoneName: 'shortOffset' })
+    .formatToParts(probe).find((p) => p.type === 'timeZoneName')?.value ?? 'GMT-5';
+  const offsetHours = Math.abs(parseInt(gmt.replace('GMT', ''), 10)) || 5; // 4 (EDT) or 5 (EST)
+  // Midnight NY on that day == offsetHours into UTC of the same calendar day.
+  return new Date(Date.UTC(y, m, d, offsetHours, 0, 0));
+}
+
 export const updateDrawService = async (
   drawId: number,
   data: { name?: string; prize_amount?: number; draw_date?: string },
@@ -177,7 +196,7 @@ export const updateDrawService = async (
       day: '2-digit',
     });
     const [month, , year] = nyDateStr.split('/').map(Number);
-    const lastDay = new Date(Date.UTC(year, month, 0, 4, 0, 0));
+    const lastDay = lastDayOfMonthNyMidnightUtc(year, month);
     updates.push(`draw_date = $${idx++}`);
     values.push(lastDay);
   }
@@ -212,9 +231,8 @@ export const createDrawService = async (data: {
   // Normalise the provided date to the last day of its month in NY timezone.
   const nyDateStr = new Date(data.draw_date).toLocaleDateString('en-US', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' });
   const [month, , year] = nyDateStr.split('/').map(Number);
-  // Last day of that month in NY time
-  const lastDay = new Date(Date.UTC(year, month, 0, 4, 0, 0)); // month=next month, day=0 → last day; +4h offset = midnight NY (UTC-4/UTC-5)
-  const drawDate = lastDay;
+  // Last day of that month at midnight NY time (offset resolved per-date: EDT summer / EST winter).
+  const drawDate = lastDayOfMonthNyMidnightUtc(year, month);
 
   const pool = getPool();
   const client = await pool.connect();
