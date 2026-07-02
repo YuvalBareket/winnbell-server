@@ -45,6 +45,8 @@ export const getBusinessAnalytics = async (req: AuthRequest, res: Response): Pro
     const from = parseDate(req.query.from, now - 30 * 864e5);
     const to = parseDate(req.query.to, now + 864e5);
     if (Date.parse(from) >= Date.parse(to)) { res.status(400).json({ message: 'from must be before to' }); return; }
+    // Cap the window so a caller can't drive a multi-decade ticket-table scan (pool exhaustion).
+    if (Date.parse(to) - Date.parse(from) > 366 * 864e5) { res.status(400).json({ message: 'Date range too large (max 366 days)' }); return; }
     const bucket = req.query.bucket === 'month' ? 'month' : 'day';
 
     const data = await handler(userId, jwtLocationId, filterLocationId, { from, to, bucket });

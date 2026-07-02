@@ -86,7 +86,18 @@ export async function resolveScope(
   const bizRes = await pool.query('SELECT id FROM business WHERE user_id = $1', [userId]);
   const row = bizRes.rows[0];
   if (!row) return { businessId: null, scopedLocationId: null };
-  return { businessId: row.id, scopedLocationId: filterLocationId ?? null };
+  // An owner-supplied location filter must belong to THIS business; a foreign/stale id is ignored
+  // (fall back to all-locations) so it can't skew the cap display. No data leak either way, since
+  // every downstream query also filters on business_id.
+  let scopedLocationId: number | null = null;
+  if (filterLocationId != null) {
+    const owns = await pool.query(
+      'SELECT 1 FROM business_location WHERE id = $1 AND business_id = $2',
+      [filterLocationId, row.id],
+    );
+    if (owns.rows.length > 0) scopedLocationId = filterLocationId;
+  }
+  return { businessId: row.id, scopedLocationId };
 }
 
 export const listBusinessCampaigns = async (
