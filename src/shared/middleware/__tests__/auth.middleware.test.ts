@@ -60,11 +60,12 @@ const makeNext = (): NextFunction => jest.fn();
 
 /**
  * Set up pool.query to return a DB role state for the stale-session check.
- * has_loc is what the DB returns for the EXISTS subquery.
+ * managed_location_ids = the active locations the user manages; the middleware validates the
+ * token's SPECIFIC location_id against this array (not just "manages anything").
  */
-const setupRoleState = (role: string, has_loc: boolean) => {
+const setupRoleState = (role: string, managedLocationIds: number[] = []) => {
   mockPoolQuery.mockResolvedValueOnce({
-    rows: [{ role, has_loc }],
+    rows: [{ role, managed_location_ids: managedLocationIds }],
   });
 };
 
@@ -111,7 +112,7 @@ describe('authenticateToken — User role (no DB lookup)', () => {
 
 describe('authenticateToken — Business owner token (valid)', () => {
   it('should pass when DB confirms role is still Business and no location_id in token', async () => {
-    setupRoleState('Business', false);
+    setupRoleState('Business', []);
 
     const token = makeToken({ id: 10, role: 'Business' });
     const req = makeReq(token);
@@ -132,7 +133,7 @@ describe('authenticateToken — Business owner token (valid)', () => {
 
 describe('authenticateToken — manager token (valid)', () => {
   it('should pass when DB confirms role is Business and user still actively manages a location', async () => {
-    setupRoleState('Business', true);
+    setupRoleState('Business', [7]);
 
     const token = makeToken({ id: 20, role: 'Business', location_id: 7 });
     const req = makeReq(token);
@@ -153,7 +154,7 @@ describe('authenticateToken — manager token (valid)', () => {
 describe('authenticateToken — stale elevated session rejection', () => {
   it('should reject with 401 when DB role no longer matches (Business token but user demoted to User)', async () => {
     // DB says 'User'; token says 'Business'
-    setupRoleState('User', false);
+    setupRoleState('User', []);
 
     const token = makeToken({ id: 30, role: 'Business' });
     const req = makeReq(token);
@@ -170,8 +171,8 @@ describe('authenticateToken — stale elevated session rejection', () => {
   });
 
   it('should reject with 401 when manager token has location_id but user no longer manages any active location', async () => {
-    // DB says role is still Business, but has_loc is false (removed from location)
-    setupRoleState('Business', false);
+    // DB says role is still Business, but the user manages no active locations (removed)
+    setupRoleState('Business', []);
 
     const token = makeToken({ id: 40, role: 'Business', location_id: 99 });
     const req = makeReq(token);
@@ -187,8 +188,23 @@ describe('authenticateToken — stale elevated session rejection', () => {
     expect(next).not.toHaveBeenCalled();
   });
 
+  it('should reject with 401 when the manager was reassigned to a DIFFERENT location than the token is scoped to (cross-tenant guard)', async () => {
+    // The S2 exploit: still manages SOME location (800), but not the token's location (500).
+    setupRoleState('Business', [800]);
+
+    const token = makeToken({ id: 45, role: 'Business', location_id: 500 });
+    const req = makeReq(token);
+    const res = makeRes();
+    const next = makeNext();
+
+    await authenticateToken(req, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(401);
+    expect(next).not.toHaveBeenCalled();
+  });
+
   it('should reject with 401 when both role and location are stale', async () => {
-    setupRoleState('User', false);
+    setupRoleState('User', []);
 
     const token = makeToken({ id: 50, role: 'Business', location_id: 12 });
     const req = makeReq(token);
@@ -244,7 +260,7 @@ describe('authenticateToken — fail open on DB error', () => {
 describe('authenticateToken — role-state cache', () => {
   it('should only query the DB once for the same user within the cache TTL', async () => {
     // First call — DB has the state
-    setupRoleState('Business', false);
+    setupRoleState('Business', []);
 
     const token = makeToken({ id: 70, role: 'Business' });
 
@@ -260,7 +276,7 @@ describe('authenticateToken — role-state cache', () => {
     const USER_ID = 80;
 
     // Seed the cache with an initial DB hit
-    setupRoleState('Business', false);
+    setupRoleState('Business', []);
     const token = makeToken({ id: USER_ID, role: 'Business' });
     await authenticateToken(makeReq(token), makeRes(), makeNext());
     expect(mockPoolQuery).toHaveBeenCalledTimes(1);
@@ -269,7 +285,7 @@ describe('authenticateToken — role-state cache', () => {
     invalidateUserAuth(USER_ID);
 
     // After invalidation, next call should hit DB again
-    setupRoleState('User', false); // DB now says demoted
+    setupRoleState('User', []); // DB now says demoted
     const res = makeRes();
     const next = makeNext();
     await authenticateToken(makeReq(token), res, next);
@@ -282,9 +298,9 @@ describe('authenticateToken — role-state cache', () => {
 
   it('should cache under the key user:role:<userId> so different users have independent cache entries', async () => {
     // User 90 — Business in DB
-    setupRoleState('Business', false);
+    setupRoleState('Business', []);
     // User 91 — User in DB
-    setupRoleState('User', false);
+    setupRoleState('User', []);
 
     const token90 = makeToken({ id: 90, role: 'Business' });
     const token91 = makeToken({ id: 91, role: 'Business' }); // claims Business but DB says User

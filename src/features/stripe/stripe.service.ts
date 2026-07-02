@@ -1231,7 +1231,12 @@ export const cancelSubscription = async (userId: number): Promise<CancelResult> 
  * the account's API version.
  */
 function getInvoiceSubscriptionId(invoice: Stripe.Invoice): string | null {
-  const inv = invoice as any;
+  // Structural cast (not `any`): models both API shapes without depending on which one the
+  // installed Stripe SDK types declare.
+  const inv = invoice as unknown as {
+    subscription?: string | { id?: string } | null;
+    parent?: { subscription_details?: { subscription?: string | { id?: string } | null } | null } | null;
+  };
   const direct = inv.subscription;
   if (typeof direct === 'string') return direct;
   if (direct && typeof direct.id === 'string') return direct.id;

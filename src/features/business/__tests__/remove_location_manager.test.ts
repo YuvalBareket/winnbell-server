@@ -43,10 +43,12 @@ jest.mock('../../../shared/db/db.js', () => ({
 // ── Mock cache — we want to spy on invalidateUserAuth ─────────────────────────
 const mockInvalidateUserAuth = jest.fn();
 const mockInvalidatePublicBusinessData = jest.fn();
+const mockInvalidatePublicLocation = jest.fn();
 
 jest.mock('../../../shared/cache/cache.js', () => ({
   publicCache: { del: jest.fn(), get: jest.fn().mockReturnValue(undefined), set: jest.fn() },
   invalidatePublicBusinessData: (...args: unknown[]) => mockInvalidatePublicBusinessData(...args),
+  invalidatePublicLocation: (...args: unknown[]) => mockInvalidatePublicLocation(...args),
   invalidateUserAuth: (...args: unknown[]) => mockInvalidateUserAuth(...args),
   getPlatformSettings: jest.fn().mockResolvedValue({}),
 }));
@@ -401,5 +403,7 @@ describe('deleteBusinessLocation', () => {
     await deleteBusinessLocation(10, 2);
 
     expect(mockInvalidatePublicBusinessData).toHaveBeenCalled();
+    // Location profile cache is cleared through the single source of truth (both key variants)
+    expect(mockInvalidatePublicLocation).toHaveBeenCalledWith(10);
   });
 });

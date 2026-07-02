@@ -713,7 +713,7 @@ export const submitReceiptEntryService = async (
       `SELECT code FROM ticket WHERE code = ANY($1::text[])`,
       [candidateCodes],
     );
-    const conflicting = new Set<string>(conflictRes.rows.map((r: any) => r.code as string));
+    const conflicting = new Set<string>(conflictRes.rows.map((r: { code: string }) => r.code));
     const uniqueCodes: string[] = [];
     for (const c of candidateCodes) {
       uniqueCodes.push(conflicting.has(c) ? await generateGlobalUniqueCode(client) : c);

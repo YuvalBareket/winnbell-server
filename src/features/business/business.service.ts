@@ -435,6 +435,9 @@ export const deleteBusinessLocation = async (locationId: number, ownerUserId: nu
   }
 };
 
+/** CONTRACT: `logo_url` stores the bare R2 file KEY (e.g. "abc123.webp"), NOT a full URL.
+ *  Every consumer must build the URL as `${R2_PUBLIC_URL}/business-logos/${logo_url}`.
+ *  (Unlike ticket.receipt_image_url, which stores a full validated URL.) */
 export const updateBusinessLogo = async (ownerUserId: number, logoUrl: string): Promise<void> => {
   const pool = getPool();
   const result = await pool.query(

@@ -1361,7 +1361,7 @@ export const getBusinessDetailService = async (businessId: number) => {
 
   if (!bizRes.rows[0]) return null;
 
-  const campaignSummary = campaignRes.rows.map((r: any) => ({
+  const campaignSummary = campaignRes.rows.map((r: { draw_id: number | null; draw_name: string; count: number; quarantined: number }) => ({
     draw_id: r.draw_id,
     draw_name: r.draw_name,
     count: r.count,

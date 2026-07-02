@@ -154,7 +154,8 @@ export const getNearby = async (
 };
 export const getAddressController = async (req: Request, res: Response) => {
   try {
-    const text = String(req.query.q || '').trim();
+    // Body-first (conventional for POST); query-string fallback keeps old callers working.
+    const text = String((req.body as { q?: unknown } | undefined)?.q ?? req.query.q ?? '').trim();
     if (text.length < 2) { res.json([]); return; }
     if (text.length > 200) { res.status(400).json({ message: 'Search query is too long.' }); return; }
     const data = await getAddress(text);
