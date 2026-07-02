@@ -100,7 +100,7 @@ async function getGuardData(userId: number, res: Response): Promise<GuardData | 
 // Cached current role + whether the user still actively manages a location.
 // Used to detect stale elevated sessions (e.g. a manager removed from a location
 // whose 1h JWT still claims Business + location_id).
-type RoleState = { role: string; hasActiveManagedLocation: boolean };
+type RoleState = { role: string; managedLocationIds: number[] };
 
 async function getRoleState(userId: number): Promise<RoleState | null> {
   const cacheKey = `user:role:${userId}`;
@@ -111,12 +111,19 @@ async function getRoleState(userId: number): Promise<RoleState | null> {
     const pool = getPool();
     const result = await pool.query(
       `SELECT u.role,
-              EXISTS (SELECT 1 FROM business_location WHERE manager_user_id = $1 AND is_active = TRUE) AS has_loc
+              COALESCE(
+                (SELECT array_agg(bl.id) FROM business_location bl
+                 WHERE bl.manager_user_id = $1 AND bl.is_active = TRUE),
+                '{}'
+              ) AS managed_location_ids
        FROM "user" u WHERE u.id = $1`,
       [userId],
     );
     if (result.rows.length === 0) return null;
-    const state: RoleState = { role: result.rows[0].role, hasActiveManagedLocation: result.rows[0].has_loc === true };
+    const state: RoleState = {
+      role: result.rows[0].role,
+      managedLocationIds: (result.rows[0].managed_location_ids ?? []).map(Number),
+    };
     userCache.set(cacheKey, state);
     return state;
   } catch {
@@ -162,9 +169,12 @@ export const authenticateToken = async (
       const fresh = await getRoleState(decoded.id);
       if (fresh) {
         const roleMatches = fresh.role === decoded.role;
-        const locationStillValid = decoded.location_id == null || fresh.hasActiveManagedLocation;
+        // Must still manage the SPECIFIC location the token was scoped to — not just "any" location.
+        // Prevents a manager reassigned to another business from reading their old business's data
+        // with a stale token (they'd still manage some location, which the old "any" check allowed).
+        const locationStillValid = decoded.location_id == null || fresh.managedLocationIds.includes(decoded.location_id);
         if (!roleMatches || !locationStillValid) {
-          console.info(`[auth] stale elevated session rejected: userId=${decoded.id} tokenRole=${decoded.role} dbRole=${fresh.role} tokenLoc=${decoded.location_id ?? 'none'} hasLoc=${fresh.hasActiveManagedLocation}`);
+          console.info(`[auth] stale elevated session rejected: userId=${decoded.id} tokenRole=${decoded.role} dbRole=${fresh.role} tokenLoc=${decoded.location_id ?? 'none'} managedLocs=[${fresh.managedLocationIds.join(',')}]`);
           res.status(401).json({ message: 'Session no longer valid. Please sign in again.' });
           return;
         }
