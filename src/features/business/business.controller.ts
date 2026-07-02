@@ -39,6 +39,23 @@ const validateCoords = (lat: unknown, lon: unknown): string | null => {
   return null;
 };
 
+// Reject a non-http(s) website URL so a javascript:/data: value can never be stored and later
+// rendered as a link in a customer's browser. Empty is allowed (the field is optional).
+const validateWebsiteUrl = (url: unknown): string | null => {
+  const s = typeof url === 'string' ? url.trim() : '';
+  if (!s) return null;
+  // An explicit scheme that isn't http(s) is rejected outright (javascript:, data:, vbscript:, ...).
+  const hasScheme = /^[a-z][a-z0-9+.-]*:/i.test(s);
+  if (hasScheme && !/^https?:\/\//i.test(s)) return 'Website URL must start with http:// or https://';
+  try {
+    const u = new URL(/^https?:\/\//i.test(s) ? s : `https://${s}`);
+    if (u.protocol !== 'http:' && u.protocol !== 'https:') return 'Website URL must be http or https';
+    return null;
+  } catch {
+    return 'Website URL is not a valid URL';
+  }
+};
+
 export const getEntryMode = async (_req: Request, res: Response) => {
   try {
     const result = await getEntryModeService();
@@ -171,6 +188,8 @@ export const setupBusiness = async (req: AuthRequest, res: Response): Promise<vo
       ['Website URL', website_url, 500],
     ]);
     if (lenErr) { res.status(400).json({ message: lenErr }); return; }
+    const urlErr = validateWebsiteUrl(website_url);
+    if (urlErr) { res.status(400).json({ message: urlErr }); return; }
 
     // Validate location names/addresses/coordinates inside the locations array
     const locations: Array<{ name?: string; address?: string; lat?: unknown; lon?: unknown }> = req.body.locations ?? [];
@@ -231,6 +250,8 @@ export const updateBusiness = async (req: AuthRequest, res: Response): Promise<v
       ['Website URL', website_url, 500],
     ]);
     if (lenErr) { res.status(400).json({ message: lenErr }); return; }
+    const urlErr = validateWebsiteUrl(website_url);
+    if (urlErr) { res.status(400).json({ message: urlErr }); return; }
 
     await updateBusinessProfile(req.user!.id, { businessSector, description, terms_text, phone, website_url });
     res.status(204).send();
