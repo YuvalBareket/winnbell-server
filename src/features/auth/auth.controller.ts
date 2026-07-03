@@ -290,9 +290,21 @@ export const refreshTokenController = async (req: Request, res: Response): Promi
     const pool = getPool();
     const hash = crypto.createHash('sha256').update(refreshToken).digest('hex');
 
-    // Atomic consume: DELETE...RETURNING prevents race conditions on concurrent refresh
+    // Consume with a grace window instead of hard-deleting. Rotation is single-use in
+    // spirit, but multiple app contexts (second tab, installed PWA window, restored mobile
+    // webview) share ONE persisted refresh token and race to refresh at access-token expiry.
+    // Hard delete made every racer after the first fail with 401 -> client dropped the
+    // account -> user kicked mid-session. Accepting a consumed token again within a short
+    // grace period lets every racer walk away with its own fresh pair, while a stolen token
+    // replayed later than the grace window is still rejected. COALESCE keeps the FIRST
+    // consume time so the window cannot be extended by repeated reuse; the UPDATE re-checks
+    // its predicate on the locked row, so concurrent consumers serialize safely.
     const result = await pool.query(
-      `DELETE FROM refresh_token WHERE token_hash = $1 AND expires_at > NOW() RETURNING id, user_id`,
+      `UPDATE refresh_token
+       SET consumed_at = COALESCE(consumed_at, NOW())
+       WHERE token_hash = $1 AND expires_at > NOW()
+         AND (consumed_at IS NULL OR consumed_at > NOW() - interval '60 seconds')
+       RETURNING id, user_id`,
       [hash],
     );
     const row = result.rows[0];

@@ -59,6 +59,23 @@ const authLimiter = rateLimit({
   keyGenerator: getClientIpKey,
   store: makeRateLimitStore('auth'),
   message: { message: 'Too many requests, please try again later.' },
+  // /auth/refresh has its own, more generous limiter below. Session refreshes are routine
+  // (every access-token expiry, from every signed-in user) and MUST NOT compete with
+  // login/sync attempts for the strict per-IP budget - on shared IPs (offices, mobile
+  // CGNAT) a 429 here used to log users out mid-session.
+  skip: (req) => req.path === '/refresh',
+});
+
+// Refresh-token endpoint limiter. Generous: it only needs to stop hammering, not guessing -
+// tokens are 80 hex chars, so brute force via this endpoint is not a realistic threat.
+const refreshLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 300,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: getClientIpKey,
+  store: makeRateLimitStore('refresh'),
+  message: { message: 'Too many requests, please try again later.' },
 });
 
 // Stricter limiter applied only to account registration — prevents bot farms
@@ -133,6 +150,7 @@ app.use(express.json());
 //   if (process.env.NODE_ENV !== 'production') app.post('/auth/test-setup', testSetup);
 // Registration gets its own tighter limiter stacked on top of the general auth limiter
 app.use('/auth/register', registrationLimiter);
+app.use('/auth/refresh', refreshLimiter); // authLimiter skips /refresh (see limiter defs)
 app.use('/auth', authLimiter, authRoutes);
 
 // Public business discovery endpoints — accessible without login (e.g. browsing the map).

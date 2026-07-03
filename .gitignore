@@ -16,6 +16,8 @@ migrate_*.mjs
 *.swo
 gettoken.js
 setup-test-accounts.cjs
+scripts/gen-auth-fixture.cjs
+scripts/test-refresh-grace.cjs
 screens/
 src/features/tickets/__tests__/multi_entry.test.ts
 src/features/tickets/__tests__/tickets.service.test.ts

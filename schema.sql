@@ -357,6 +357,10 @@ CREATE TABLE refresh_token (
   user_id      INTEGER NOT NULL REFERENCES "user"(id) ON DELETE CASCADE,
   token_hash   VARCHAR(64) NOT NULL UNIQUE,
   expires_at   TIMESTAMP NOT NULL,
+  -- Rotation grace window: set on first use instead of hard-deleting the row. A consumed
+  -- token is accepted again for a short grace period (concurrent tabs / PWA windows race
+  -- to refresh with the same single-use token); cleanup purges rows consumed beyond grace.
+  consumed_at  TIMESTAMP,
   created_at   TIMESTAMP NOT NULL DEFAULT NOW()
 );
 

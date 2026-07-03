@@ -33,11 +33,17 @@ export const insertRefreshTokenCapped = async (
     `INSERT INTO refresh_token (user_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
     [userId, tokenHash, expiresAt],
   );
+  // Keep the N newest LIVE tokens (unconsumed, or consumed within the rotation grace
+  // window - those are still redeemable by a racing tab). Everything else goes: consumed
+  // rows past grace and live-token overflow beyond the cap.
   await exec.query(
     `DELETE FROM refresh_token
      WHERE user_id = $1
        AND id NOT IN (
-         SELECT id FROM refresh_token WHERE user_id = $1 ORDER BY id DESC LIMIT $2
+         SELECT id FROM refresh_token
+         WHERE user_id = $1
+           AND (consumed_at IS NULL OR consumed_at > NOW() - interval '60 seconds')
+         ORDER BY id DESC LIMIT $2
        )`,
     [userId, MAX_REFRESH_TOKENS_PER_USER],
   );
@@ -597,5 +603,9 @@ export const syncExternalUser = async (
 
 export const cleanupExpiredRefreshTokens = async (): Promise<void> => {
   const pool = getPool();
-  await pool.query('DELETE FROM refresh_token WHERE expires_at < NOW()');
+  await pool.query(
+    `DELETE FROM refresh_token
+     WHERE expires_at < NOW()
+        OR consumed_at < NOW() - interval '60 seconds'`,
+  );
 };
