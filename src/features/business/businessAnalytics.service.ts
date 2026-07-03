@@ -69,13 +69,25 @@ async function coreStats(businessId: number, loc: number | null, from: string, t
 async function ticketSeries(businessId: number, loc: number | null, from: string, to: string, bk: 'day' | 'month') {
   const pool = getPool();
   const res = await pool.query(
-    `SELECT date_trunc($5, activated_at) AS bucket,
+    // lifetime = all-time entries per customer (same basis as coreStats), so the per-bucket
+    // First-Time (1 entry ever) vs Returning (2+) split matches the whole-period pie exactly -
+    // the bars just break that same split out by month instead of summing it.
+    `WITH lifetime AS (
+       SELECT activated_by_user_id AS uid, COUNT(*) AS lifetime_entries
+       FROM ticket
+       WHERE business_id=$1 AND ($2::int IS NULL OR location_id=$2) AND is_quarantined=FALSE AND activated_at IS NOT NULL
+       GROUP BY activated_by_user_id
+     )
+     SELECT date_trunc($5, t.activated_at) AS bucket,
             COUNT(*) AS entries,
-            COUNT(DISTINCT activated_by_user_id) AS participants,
-            COALESCE(SUM(transaction_amount),0) AS revenue
-     FROM ticket
-     WHERE business_id=$1 AND ($2::int IS NULL OR location_id=$2) AND is_quarantined=FALSE
-       AND activated_at >= $3 AND activated_at < $4
+            COUNT(DISTINCT t.activated_by_user_id) AS participants,
+            COALESCE(SUM(t.transaction_amount),0) AS revenue,
+            COUNT(DISTINCT t.activated_by_user_id) FILTER (WHERE l.lifetime_entries = 1)  AS new_participants,
+            COUNT(DISTINCT t.activated_by_user_id) FILTER (WHERE l.lifetime_entries >= 2) AS returning_participants
+     FROM ticket t
+     JOIN lifetime l ON l.uid = t.activated_by_user_id
+     WHERE t.business_id=$1 AND ($2::int IS NULL OR t.location_id=$2) AND t.is_quarantined=FALSE
+       AND t.activated_at >= $3 AND t.activated_at < $4
      GROUP BY 1 ORDER BY 1`,
     [businessId, loc, from, to, bk],
   );
@@ -84,6 +96,8 @@ async function ticketSeries(businessId: number, loc: number | null, from: string
     entries: num(r.entries),
     participants: num(r.participants),
     revenue: r2(num(r.revenue)),
+    new_participants: num(r.new_participants),
+    returning_participants: num(r.returning_participants),
   }));
 }
 
