@@ -66,13 +66,40 @@ async function coreStats(businessId: number, loc: number | null, from: string, t
   };
 }
 
-// entries / participants / revenue time-series (Overview, Engagement, Revenue)
-async function ticketSeries(businessId: number, loc: number | null, from: string, to: string, bk: 'day' | 'month') {
+export type SeriesBucket = 'day' | 'week' | 'month';
+
+// Pick the time-series granularity from the ACTUAL data span in the window, not the selected
+// window length - so a sparse window (e.g. one month of data viewed at 6M) still spreads across
+// many points instead of collapsing to 1-2 lonely dots.
+function granularityForSpanDays(days: number): SeriesBucket {
+  if (days <= 31) return 'day';
+  if (days <= 182) return 'week';
+  return 'month';
+}
+
+// Days between the first and last matching row in [from,to]; drives the bucket choice.
+async function dataSpanDays(businessId: number, loc: number | null, from: string, to: string): Promise<number> {
   const pool = getPool();
+  const res = await pool.query(
+    `SELECT MIN(created_at) AS lo, MAX(created_at) AS hi FROM ticket
+     WHERE business_id=$1 AND ($2::int IS NULL OR location_id=$2) AND is_quarantined=FALSE
+       AND activated_by_user_id IS NOT NULL AND created_at >= $3 AND created_at < $4`,
+    [businessId, loc, from, to],
+  );
+  const { lo, hi } = res.rows[0] ?? {};
+  if (!lo || !hi) return 0;
+  return (new Date(hi).getTime() - new Date(lo).getTime()) / 86400000;
+}
+
+// entries / participants / revenue time-series (Overview, Engagement, Revenue). Returns the
+// auto-chosen bucket so the client labels the axis at the same granularity.
+async function ticketSeries(businessId: number, loc: number | null, from: string, to: string) {
+  const pool = getPool();
+  const bk = granularityForSpanDays(await dataSpanDays(businessId, loc, from, to));
   const res = await pool.query(
     // lifetime = all-time entries per customer (same basis as coreStats), so the per-bucket
     // First-Time (1 entry ever) vs Returning (2+) split matches the whole-period pie exactly -
-    // the bars just break that same split out by month instead of summing it.
+    // the bars just break that same split out by bucket instead of summing it.
     `WITH lifetime AS (
        SELECT activated_by_user_id AS uid, COUNT(*) AS lifetime_entries
        FROM ticket
@@ -92,14 +119,17 @@ async function ticketSeries(businessId: number, loc: number | null, from: string
      GROUP BY 1 ORDER BY 1`,
     [businessId, loc, from, to, bk],
   );
-  return res.rows.map((r) => ({
-    bucket: r.bucket as string,
-    entries: num(r.entries),
-    participants: num(r.participants),
-    revenue: r2(num(r.revenue)),
-    new_participants: num(r.new_participants),
-    returning_participants: num(r.returning_participants),
-  }));
+  return {
+    bucket: bk,
+    series: res.rows.map((r) => ({
+      bucket: r.bucket as string,
+      entries: num(r.entries),
+      participants: num(r.participants),
+      revenue: r2(num(r.revenue)),
+      new_participants: num(r.new_participants),
+      returning_participants: num(r.returning_participants),
+    })),
+  };
 }
 
 // ── 1. OVERVIEW ───────────────────────────────────────────────────────────────
@@ -113,12 +143,13 @@ export const getOverviewAnalytics = async (
     entry_cap: { used: 0, cap: null as number | null, pct: 0 },
     draw_capacity: [] as { draw_id: number; label: string; status: string; used: number; cap: number | null; pct: number }[],
     series: [] as ReturnType<typeof num>[] & unknown[],
+    bucket: 'day' as SeriesBucket,
   };
   if (businessId == null) return { ...empty, series: [] };
   const loc = scopedLocationId;
   const pool = getPool();
 
-  const [core, capRes, drawCapsRes, series] = await Promise.all([
+  const [core, capRes, drawCapsRes, seriesRes] = await Promise.all([
     coreStats(businessId, loc, p.from, p.to),
     pool.query(
       `SELECT
@@ -150,7 +181,7 @@ export const getOverviewAnalytics = async (
        ORDER BY d.draw_date ASC`,
       [businessId, loc, p.from, p.to],
     ),
-    ticketSeries(businessId, loc, p.from, p.to, p.bucket === 'month' ? 'month' : 'day'),
+    ticketSeries(businessId, loc, p.from, p.to),
   ]);
 
   const perLoc = capRes.rows[0]?.per_loc != null ? Number(capRes.rows[0].per_loc) : null;
@@ -183,9 +214,29 @@ export const getOverviewAnalytics = async (
     returning_pct: pct(returning_participants, new_participants + returning_participants),
     entry_cap: { used, cap: entryCap, pct: pct(used, entryCap ?? 0) },
     draw_capacity: drawCapacity,
-    series,
+    series: seriesRes.series,
+    bucket: seriesRes.bucket,
   };
 };
+
+// Span of acquisition activity (signups + profile views) in [from,to], for granularity choice.
+async function acqSpanDays(businessId: number, loc: number | null, from: string, to: string): Promise<number> {
+  const pool = getPool();
+  const res = await pool.query(
+    `SELECT MIN(ts) AS lo, MAX(ts) AS hi FROM (
+       SELECT u.created_at AS ts FROM "user" u
+         JOIN user_acquisition ua ON ua.user_id=u.id JOIN business_location bl ON bl.id=ua.location_id
+         WHERE bl.business_id=$1 AND ($2::int IS NULL OR bl.id=$2) AND u.created_at >= $3 AND u.created_at < $4
+       UNION ALL
+       SELECT last_viewed_at FROM business_profile_view
+         WHERE business_id=$1 AND ($2::int IS NULL OR location_id=$2) AND last_viewed_at >= $3 AND last_viewed_at < $4
+     ) s`,
+    [businessId, loc, from, to],
+  );
+  const { lo, hi } = res.rows[0] ?? {};
+  if (!lo || !hi) return 0;
+  return (new Date(hi).getTime() - new Date(lo).getTime()) / 86400000;
+}
 
 // ── 2. ACQUISITION ────────────────────────────────────────────────────────────
 export const getAcquisitionAnalytics = async (
@@ -193,11 +244,11 @@ export const getAcquisitionAnalytics = async (
 ) => {
   const { businessId, scopedLocationId } = await resolveScope(userId, jwtLocationId, filterLocationId);
   if (businessId == null) {
-    return { new_users_acquired: 0, business_discovery: 0, profile_views: 0, conversion_pct: 0, acquisitionSeries: [] };
+    return { new_users_acquired: 0, business_discovery: 0, profile_views: 0, conversion_pct: 0, acquisitionSeries: [], bucket: 'day' as SeriesBucket };
   }
   const loc = scopedLocationId;
   const a = [businessId, loc, p.from, p.to] as const;
-  const bk = p.bucket === 'month' ? 'month' : 'day';
+  const bk = granularityForSpanDays(await acqSpanDays(businessId, loc, p.from, p.to));
   const pool = getPool();
 
   const [acquired, discovery, views, viewersConverted, acqNew, acqViews] = await Promise.all([
@@ -262,6 +313,7 @@ export const getAcquisitionAnalytics = async (
     profile_views: profileViews,
     conversion_pct: pct(num(viewersConverted.rows[0].n), profileViews),
     acquisitionSeries: [...acqMap.values()].sort((x, y) => (x.bucket < y.bucket ? -1 : 1)),
+    bucket: bk,
   };
 };
 
@@ -271,11 +323,11 @@ export const getEngagementAnalytics = async (
 ) => {
   const { businessId, scopedLocationId } = await resolveScope(userId, jwtLocationId, filterLocationId);
   if (businessId == null) {
-    return { repeat_participation_pct: 0, avg_entries_per_user: 0, returning_participant_count: 0, loyal_customers: 0, series: [] };
+    return { repeat_participation_pct: 0, avg_entries_per_user: 0, returning_participant_count: 0, loyal_customers: 0, series: [], bucket: 'day' as SeriesBucket };
   }
   const loc = scopedLocationId;
   const pool = getPool();
-  const [core, loyal, series] = await Promise.all([
+  const [core, loyal, seriesRes] = await Promise.all([
     coreStats(businessId, loc, p.from, p.to),
     // "Regulars" is a rolling current-loyalty snapshot: 2+ visits in the last 60 days as of now.
     // It intentionally ignores the selected range (p.from/p.to) - the tile is labeled as such - so
@@ -286,7 +338,7 @@ export const getEngagementAnalytics = async (
          WHERE business_id=$1 AND ($2::int IS NULL OR location_id=$2) AND is_quarantined=FALSE
            AND created_at >= (NOW() - INTERVAL '60 days')
          GROUP BY activated_by_user_id HAVING COUNT(*) >= 2) x`, [businessId, loc]),
-    ticketSeries(businessId, loc, p.from, p.to, p.bucket === 'month' ? 'month' : 'day'),
+    ticketSeries(businessId, loc, p.from, p.to),
   ]);
   const { total_participants, total_entries, returning_participants } = core;
   return {
@@ -294,7 +346,8 @@ export const getEngagementAnalytics = async (
     avg_entries_per_user: total_participants > 0 ? r2(total_entries / total_participants) : 0,
     returning_participant_count: returning_participants,
     loyal_customers: num(loyal.rows[0].n),
-    series,
+    series: seriesRes.series,
+    bucket: seriesRes.bucket,
   };
 };
 
@@ -304,12 +357,12 @@ export const getRevenueAnalytics = async (
 ) => {
   const { businessId, scopedLocationId } = await resolveScope(userId, jwtLocationId, filterLocationId);
   if (businessId == null) {
-    return { total_qualifying_revenue: 0, threshold: 0, avg_purchase_amount: 0, qualifying_receipts: 0, series: [] };
+    return { total_qualifying_revenue: 0, threshold: 0, avg_purchase_amount: 0, qualifying_receipts: 0, series: [], bucket: 'day' as SeriesBucket, drawBreakdown: [] };
   }
   const loc = scopedLocationId;
   const a = [businessId, loc, p.from, p.to] as const;
   const pool = getPool();
-  const [revenue, threshold, series] = await Promise.all([
+  const [revenue, threshold, seriesRes, drawBreakdownRes] = await Promise.all([
     pool.query(
       `SELECT COALESCE(SUM(transaction_amount),0) AS total_revenue,
               COALESCE(AVG(transaction_amount),0) AS avg_purchase,
@@ -317,16 +370,42 @@ export const getRevenueAnalytics = async (
        FROM ticket WHERE business_id=$1 AND ($2::int IS NULL OR location_id=$2) AND is_quarantined=FALSE
          AND created_at >= $3 AND created_at < $4`, [...a]),
     pool.query(`SELECT min_transaction_amount FROM business WHERE id=$1`, [businessId]),
-    ticketSeries(businessId, loc, p.from, p.to, p.bucket === 'month' ? 'month' : 'day'),
+    ticketSeries(businessId, loc, p.from, p.to),
+    // Per-draw breakdown (multi-draw / 3M+ views): average qualifying purchase against that draw's
+    // own threshold snapshot, so the "entry minimum" line steps as it changed between draws.
+    pool.query(
+      `SELECT d.id AS draw_id, d.name AS draw_name,
+              COALESCE(de.min_transaction_at_entry, (SELECT min_transaction_amount FROM business WHERE id=$1)) AS threshold,
+              COALESCE(AVG(t.transaction_amount), 0) AS avg_purchase
+       FROM draw d
+       JOIN draw_entry de ON de.draw_id = d.id AND de.business_id = $1
+       JOIN ticket t ON t.draw_id = d.id AND t.business_id = $1 AND ($2::int IS NULL OR t.location_id = $2)
+         AND t.is_quarantined = FALSE AND t.activated_by_user_id IS NOT NULL AND t.transaction_amount IS NOT NULL
+         AND t.created_at >= $3 AND t.created_at < $4
+       GROUP BY d.id, d.name, d.draw_date, de.min_transaction_at_entry
+       ORDER BY d.draw_date ASC`, [...a]),
   ]);
   const totalRevenue = r2(num(revenue.rows[0].total_revenue));
   const avgPurchase = r2(num(revenue.rows[0].avg_purchase));
   const thr = r2(num(threshold.rows[0]?.min_transaction_amount));
+  const drawBreakdown = drawBreakdownRes.rows.map((row) => {
+    const t = r2(num(row.threshold));
+    const avg = r2(num(row.avg_purchase));
+    return {
+      draw_id: Number(row.draw_id),
+      label: String(row.draw_name),
+      avg_purchase: avg,
+      threshold: t,
+      avg_above_threshold: r2(Math.max(0, avg - t)),
+    };
+  });
   return {
     total_qualifying_revenue: totalRevenue,
     threshold: thr,
     avg_purchase_amount: avgPurchase,
     qualifying_receipts: num(revenue.rows[0].qualifying_receipts),
-    series,
+    series: seriesRes.series,
+    bucket: seriesRes.bucket,
+    drawBreakdown,
   };
 };

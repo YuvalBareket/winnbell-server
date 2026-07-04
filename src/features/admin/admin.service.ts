@@ -316,8 +316,8 @@ export const getDrawBusinessesService = async (
 const openDrawInTx = async (client: import('pg').PoolClient, drawId: number): Promise<void> => {
   await client.query(`UPDATE draw SET status = 'Open', opened_at = NOW() WHERE id = $1`, [drawId]);
   await client.query(`
-    INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, cap_at_entry)
-    SELECT d.id, b.id, COALESCE(s.fee_at_entry, 0), s.entries_per_location
+    INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, cap_at_entry, min_transaction_at_entry)
+    SELECT d.id, b.id, COALESCE(s.fee_at_entry, 0), s.entries_per_location, b.min_transaction_amount
     FROM draw d
     JOIN subscription s ON s.status IN ('Active', 'Trialing', 'Past_Due')
     JOIN business b ON b.id = s.business_id
@@ -1265,17 +1265,20 @@ export const addBusinessToDrawService = async (drawId: number, businessId: numbe
   if (drawStatus !== 'Upcoming' && drawStatus !== 'Open') throw new Error('Can only add businesses to Upcoming or Open draws');
 
   const subCheck = await pool.query(
-    `SELECT s.fee_at_entry, s.entries_per_location FROM subscription s WHERE s.business_id = $1 AND s.status IN ('Active', 'Trialing') LIMIT 1`,
+    `SELECT s.fee_at_entry, s.entries_per_location, b.min_transaction_amount
+     FROM business b LEFT JOIN subscription s ON s.business_id = b.id AND s.status IN ('Active', 'Trialing')
+     WHERE b.id = $1 LIMIT 1`,
     [businessId],
   );
   const feeAtEntry = subCheck.rows[0]?.fee_at_entry ?? 0;
   const capAtEntry = subCheck.rows[0]?.entries_per_location ?? null;
+  const minTxAtEntry = subCheck.rows[0]?.min_transaction_amount ?? null;
 
   await pool.query(
-    `INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, cap_at_entry)
-     VALUES ($1, $2, $3, $4)
+    `INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, cap_at_entry, min_transaction_at_entry)
+     VALUES ($1, $2, $3, $4, $5)
      ON CONFLICT (draw_id, business_id) DO NOTHING`,
-    [drawId, businessId, feeAtEntry, capAtEntry],
+    [drawId, businessId, feeAtEntry, capAtEntry, minTxAtEntry],
   );
   invalidatePublicBusinessData();
 };

@@ -228,6 +228,9 @@ CREATE TABLE draw_entry (
   -- Per-location entry cap (subscription.entries_per_location) snapshotted at enrolment time.
   -- Read ONLY for historical per-draw capacity logs; live cap source of truth stays on subscription.
   cap_at_entry        INTEGER NULL,
+  -- Receipt threshold (business.min_transaction_amount) snapshotted at enrolment time, so a draw's
+  -- historical "entry minimum" survives later threshold changes. NULL on legacy rows (backfilled).
+  min_transaction_at_entry NUMERIC(10, 2) NULL,
   created_at          TIMESTAMP NOT NULL DEFAULT NOW(),
   UNIQUE (draw_id, business_id)
 );
