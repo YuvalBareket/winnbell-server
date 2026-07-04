@@ -3,10 +3,11 @@ import { getPool } from '../../shared/db/db.js';
 // =============================================================================
 // Growth / North-Star analytics (admin dashboard, requirements §1,3,4,5,6,7,9,11,12,13).
 //
-// DEFINITION OF "ACTIVE USER": a user (role 'User') who activated at least one
-// ticket (entry) in the window. The ticket table's activated_at is the only
-// first-class activity signal we have — there is no session/login event log — so
-// every MAU/WAU/DAU/retention/engagement figure here is entry-activity based.
+// DEFINITION OF "ACTIVE USER": a user (role 'User') who made at least one entry
+// (non-quarantined, owned ticket) in the window, bucketed by created_at. There is no
+// session/login event log, so every MAU/WAU/DAU/retention/engagement figure here is
+// entry-activity based. Quarantined (shadow-banned) entries are excluded everywhere;
+// the legacy ticket.status enum and nullable activated_at are dead and not used.
 //
 // All counts are computed from existing tables. Metrics that would need historical
 // event logs we do not keep (true month-over-month churn, subscription upgrades)
@@ -55,11 +56,11 @@ export const getGrowthAnalyticsService = async () => {
     // ── §3 MAU / WAU / DAU (entry-activity based) ──────────────────────────────
     pool.query(`
       SELECT
-        COUNT(DISTINCT activated_by_user_id) FILTER (WHERE activated_at >= NOW() - INTERVAL '1 day')   AS dau,
-        COUNT(DISTINCT activated_by_user_id) FILTER (WHERE activated_at >= NOW() - INTERVAL '7 days')  AS wau,
-        COUNT(DISTINCT activated_by_user_id) FILTER (WHERE activated_at >= NOW() - INTERVAL '30 days') AS mau
+        COUNT(DISTINCT activated_by_user_id) FILTER (WHERE created_at >= NOW() - INTERVAL '1 day')   AS dau,
+        COUNT(DISTINCT activated_by_user_id) FILTER (WHERE created_at >= NOW() - INTERVAL '7 days')  AS wau,
+        COUNT(DISTINCT activated_by_user_id) FILTER (WHERE created_at >= NOW() - INTERVAL '30 days') AS mau
       FROM ticket
-      WHERE status = 'Activated' AND activated_at IS NOT NULL AND activated_by_user_id IS NOT NULL
+      WHERE is_quarantined = FALSE AND activated_by_user_id IS NOT NULL
     `),
 
     // ── §1 business growth ─────────────────────────────────────────────────────
@@ -130,8 +131,8 @@ export const getGrowthAnalyticsService = async () => {
                COUNT(DISTINCT business_id) AS biz,
                COUNT(*) FILTER (WHERE entry_source IN ('receipt','code')) AS purchase_entries
         FROM ticket
-        WHERE status = 'Activated' AND activated_by_user_id IS NOT NULL
-          AND activated_at >= DATE_TRUNC('month', NOW())
+        WHERE is_quarantined = FALSE AND activated_by_user_id IS NOT NULL
+          AND created_at >= DATE_TRUNC('month', NOW())
         GROUP BY activated_by_user_id
       )
       SELECT
@@ -158,9 +159,9 @@ export const getGrowthAnalyticsService = async () => {
         FROM "user" WHERE role = 'User'
       ),
       activity AS (
-        SELECT DISTINCT activated_by_user_id AS uid, DATE_TRUNC('month', activated_at) AS active_month
+        SELECT DISTINCT activated_by_user_id AS uid, DATE_TRUNC('month', created_at) AS active_month
         FROM ticket
-        WHERE status = 'Activated' AND activated_at IS NOT NULL AND activated_by_user_id IS NOT NULL
+        WHERE is_quarantined = FALSE AND activated_by_user_id IS NOT NULL
       )
       SELECT
         COUNT(*) FILTER (WHERE cohort_month <= DATE_TRUNC('month', NOW()) - INTERVAL '1 month') AS eligible_m1,
@@ -188,7 +189,8 @@ export const getGrowthAnalyticsService = async () => {
         (SELECT COUNT(*) FROM receipt_threshold_attempt)                                           AS threshold_probes,
         (SELECT COUNT(*) FROM phone_otp WHERE created_at >= DATE_TRUNC('month', NOW()))            AS verifications_this_month,
         (SELECT COUNT(*) FROM ticket
-           WHERE status = 'Activated' AND activated_at >= DATE_TRUNC('month', NOW()))             AS entries_this_month
+           WHERE is_quarantined = FALSE AND activated_by_user_id IS NOT NULL
+             AND created_at >= DATE_TRUNC('month', NOW()))                                        AS entries_this_month
     `),
 
     // ── §9 geography (from IP-derived state + city, no user-typed field) ────────

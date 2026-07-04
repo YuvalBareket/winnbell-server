@@ -6,11 +6,12 @@ import { resolveScope } from './activity.service.js';
 // Categories: overview · acquisition · engagement · revenue.
 //
 // Entry-counting rule = the CAP rule the business already knows: an entry counts when it is
-// NOT rejected (is_quarantined = FALSE). Quarantined = "under review", excluded from the cap and
-// from every metric here. We never surface the risk/quarantine system to the business, and the
-// status enum ('Issued' vs 'Activated') is irrelevant: receipt/free entries are born Activated and
-// unclaimed 'Issued' codes have a NULL activated_at, so the activated_at range already excludes them.
-// This matches the Campaign Dashboard (activity.service.ts) exactly.
+// NOT quarantined (is_quarantined = FALSE). Quarantined = "under review", excluded from the cap and
+// from every metric here. We never surface the risk/quarantine system to the business.
+// Time filtering + bucketing use created_at (when the entry was made). The legacy 'Issued'/'Activated'
+// status and the nullable activated_at are dead: every real entry is a receipt entry, born valid and
+// owned, so we key off created_at exactly like the Campaign Dashboard (activity.service.ts).
+// Participant metrics group by the entry's owner (activated_by_user_id).
 //
 // Respects location ($2 NULL = all of this business) and period [from,to). bucket = day|month.
 // =============================================================================
@@ -38,14 +39,14 @@ async function coreStats(businessId: number, loc: number | null, from: string, t
        -- so First-Time (1 entry) vs Returning (2+) does not change with the selected window
        SELECT activated_by_user_id AS uid, COUNT(*) AS lifetime_entries
        FROM ticket
-       WHERE business_id=$1 AND ($2::int IS NULL OR location_id=$2) AND is_quarantined=FALSE AND activated_at IS NOT NULL
+       WHERE business_id=$1 AND ($2::int IS NULL OR location_id=$2) AND is_quarantined=FALSE
        GROUP BY activated_by_user_id
      ),
      period AS (
        SELECT activated_by_user_id AS uid, COUNT(*) AS entries
        FROM ticket
        WHERE business_id=$1 AND ($2::int IS NULL OR location_id=$2) AND is_quarantined=FALSE
-         AND activated_at >= $3 AND activated_at < $4
+         AND created_at >= $3 AND created_at < $4
        GROUP BY activated_by_user_id
      )
      SELECT
@@ -75,10 +76,10 @@ async function ticketSeries(businessId: number, loc: number | null, from: string
     `WITH lifetime AS (
        SELECT activated_by_user_id AS uid, COUNT(*) AS lifetime_entries
        FROM ticket
-       WHERE business_id=$1 AND ($2::int IS NULL OR location_id=$2) AND is_quarantined=FALSE AND activated_at IS NOT NULL
+       WHERE business_id=$1 AND ($2::int IS NULL OR location_id=$2) AND is_quarantined=FALSE
        GROUP BY activated_by_user_id
      )
-     SELECT date_trunc($5, t.activated_at) AS bucket,
+     SELECT date_trunc($5, t.created_at) AS bucket,
             COUNT(*) AS entries,
             COUNT(DISTINCT t.activated_by_user_id) AS participants,
             COALESCE(SUM(t.transaction_amount),0) AS revenue,
@@ -87,7 +88,7 @@ async function ticketSeries(businessId: number, loc: number | null, from: string
      FROM ticket t
      JOIN lifetime l ON l.uid = t.activated_by_user_id
      WHERE t.business_id=$1 AND ($2::int IS NULL OR t.location_id=$2) AND t.is_quarantined=FALSE
-       AND t.activated_at >= $3 AND t.activated_at < $4
+       AND t.created_at >= $3 AND t.created_at < $4
      GROUP BY 1 ORDER BY 1`,
     [businessId, loc, from, to, bk],
   );
@@ -123,6 +124,7 @@ export const getOverviewAnalytics = async (
       `SELECT
          (SELECT COUNT(*) FROM ticket t
             WHERE t.business_id=$1 AND ($2::int IS NULL OR t.location_id=$2) AND t.is_quarantined=FALSE
+              AND t.activated_by_user_id IS NOT NULL
               AND t.draw_id=(SELECT id FROM draw WHERE status='Open' ORDER BY draw_date ASC LIMIT 1)) AS used,
          (SELECT s.entries_per_location FROM subscription s WHERE s.business_id=$1) AS per_loc,
          (SELECT COUNT(*) FROM business_location WHERE business_id=$1 AND is_active=TRUE) AS loc_count`,
@@ -137,13 +139,13 @@ export const getOverviewAnalytics = async (
       `SELECT d.id AS draw_id, d.name AS draw_name, d.status, de.cap_at_entry,
               (SELECT COUNT(*) FROM ticket t
                  WHERE t.draw_id=d.id AND t.business_id=$1 AND ($2::int IS NULL OR t.location_id=$2)
-                   AND t.is_quarantined=FALSE) AS used
+                   AND t.is_quarantined=FALSE AND t.activated_by_user_id IS NOT NULL) AS used
        FROM draw d
        LEFT JOIN draw_entry de ON de.draw_id=d.id AND de.business_id=$1
        WHERE EXISTS (
          SELECT 1 FROM ticket t2
          WHERE t2.draw_id=d.id AND t2.business_id=$1 AND ($2::int IS NULL OR t2.location_id=$2)
-           AND t2.is_quarantined=FALSE AND t2.activated_at >= $3 AND t2.activated_at < $4
+           AND t2.is_quarantined=FALSE AND t2.created_at >= $3 AND t2.created_at < $4
        )
        ORDER BY d.draw_date ASC`,
       [businessId, loc, p.from, p.to],
@@ -206,8 +208,9 @@ export const getAcquisitionAnalytics = async (
        WHERE bl.business_id=$1 AND ($2::int IS NULL OR bl.id=$2) AND u.created_at >= $3 AND u.created_at < $4`, [...a]),
     pool.query(
       `WITH firstpart AS (
-         SELECT activated_by_user_id AS uid, MIN(activated_at) AS first_at FROM ticket
-         WHERE business_id=$1 AND ($2::int IS NULL OR location_id=$2) AND is_quarantined=FALSE AND activated_at IS NOT NULL
+         SELECT activated_by_user_id AS uid, MIN(created_at) AS first_at FROM ticket
+         WHERE business_id=$1 AND ($2::int IS NULL OR location_id=$2) AND is_quarantined=FALSE
+           AND activated_by_user_id IS NOT NULL
          GROUP BY activated_by_user_id)
        SELECT COUNT(*) AS n FROM firstpart fp JOIN "user" u ON u.id = fp.uid
        WHERE fp.first_at >= $3 AND fp.first_at < $4 AND u.created_at < fp.first_at
@@ -231,8 +234,8 @@ export const getAcquisitionAnalytics = async (
            SELECT 1 FROM ticket t
            WHERE t.activated_by_user_id = v.user_id AND t.business_id=$1
              AND ($2::int IS NULL OR t.location_id=$2) AND t.is_quarantined=FALSE
-             AND t.activated_at >= $3 AND t.activated_at < $4
-             AND t.activated_at >= v.first_viewed_at
+             AND t.created_at >= $3 AND t.created_at < $4
+             AND t.created_at >= v.first_viewed_at
          )`, [...a]),
     pool.query(
       `SELECT to_char(date_trunc($5, u.created_at), 'YYYY-MM-DD"T"HH24:MI:SS') AS bucket, COUNT(*) AS new_users
@@ -274,12 +277,15 @@ export const getEngagementAnalytics = async (
   const pool = getPool();
   const [core, loyal, series] = await Promise.all([
     coreStats(businessId, loc, p.from, p.to),
+    // "Regulars" is a rolling current-loyalty snapshot: 2+ visits in the last 60 days as of now.
+    // It intentionally ignores the selected range (p.from/p.to) - the tile is labeled as such - so
+    // it stays a stable "who are my regulars right now" number rather than warping on short windows.
     pool.query(
       `SELECT COUNT(*) AS n FROM (
          SELECT activated_by_user_id FROM ticket
          WHERE business_id=$1 AND ($2::int IS NULL OR location_id=$2) AND is_quarantined=FALSE
-           AND activated_at >= ($3::timestamp - INTERVAL '60 days') AND activated_at < $3::timestamp
-         GROUP BY activated_by_user_id HAVING COUNT(*) >= 2) x`, [businessId, loc, p.to]),
+           AND created_at >= (NOW() - INTERVAL '60 days')
+         GROUP BY activated_by_user_id HAVING COUNT(*) >= 2) x`, [businessId, loc]),
     ticketSeries(businessId, loc, p.from, p.to, p.bucket === 'month' ? 'month' : 'day'),
   ]);
   const { total_participants, total_entries, returning_participants } = core;
@@ -309,7 +315,7 @@ export const getRevenueAnalytics = async (
               COALESCE(AVG(transaction_amount),0) AS avg_purchase,
               COUNT(transaction_amount) AS qualifying_receipts
        FROM ticket WHERE business_id=$1 AND ($2::int IS NULL OR location_id=$2) AND is_quarantined=FALSE
-         AND activated_at >= $3 AND activated_at < $4`, [...a]),
+         AND created_at >= $3 AND created_at < $4`, [...a]),
     pool.query(`SELECT min_transaction_amount FROM business WHERE id=$1`, [businessId]),
     ticketSeries(businessId, loc, p.from, p.to, p.bucket === 'month' ? 'month' : 'day'),
   ]);

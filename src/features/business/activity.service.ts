@@ -163,7 +163,8 @@ export const getCampaignHeader = async (
   const usedLoc = scopedLocationId ? (usedParams.push(scopedLocationId), ` AND location_id = $${usedParams.length}`) : '';
   const usedRes = await pool.query(
     `SELECT COUNT(*)::int AS used FROM ticket
-     WHERE business_id = $1 AND draw_id = $2 AND is_quarantined = FALSE ${usedLoc}`,
+     WHERE business_id = $1 AND draw_id = $2 AND is_quarantined = FALSE
+       AND activated_by_user_id IS NOT NULL ${usedLoc}`,
     usedParams,
   );
 
@@ -216,7 +217,8 @@ export const getCampaignKpis = async (
     const drawLocClause = scopedLocationId ? (pDraw.push(scopedLocationId), ` AND t.location_id = $${pDraw.length}`) : '';
     const res = await pool.query(
       `SELECT COUNT(*) AS entries, COALESCE(SUM(t.transaction_amount),0) AS revenue, COUNT(DISTINCT t.activated_by_user_id) AS customers
-       FROM ticket t WHERE t.business_id = $1 AND t.draw_id = $2 AND t.is_quarantined = FALSE ${drawLocClause}`,
+       FROM ticket t WHERE t.business_id = $1 AND t.draw_id = $2 AND t.is_quarantined = FALSE
+         AND t.activated_by_user_id IS NOT NULL ${drawLocClause}`,
       pDraw,
     );
     return {
@@ -233,7 +235,8 @@ export const getCampaignKpis = async (
             COALESCE(SUM(t.transaction_amount), 0) AS revenue,
             COUNT(DISTINCT t.activated_by_user_id) AS customers
      FROM ticket t
-     WHERE t.business_id = $1 AND ${periodPredicate(dateRange)} AND t.is_quarantined = FALSE ${locClause}`,
+     WHERE t.business_id = $1 AND ${periodPredicate(dateRange)} AND t.is_quarantined = FALSE
+       AND t.activated_by_user_id IS NOT NULL ${locClause}`,
     params,
   );
   return {

@@ -49,7 +49,7 @@ export const getBusinessesWithStats = async (params: {
         s.current_period_end,
         s.fee_at_entry,
         COALESCE(loc.location_count, 0) AS location_count,
-        (SELECT COUNT(*)::int FROM ticket WHERE business_id = b.id AND status = 'Activated') AS total_activated
+        (SELECT COUNT(*)::int FROM ticket WHERE business_id = b.id AND is_quarantined = FALSE AND activated_by_user_id IS NOT NULL) AS total_activated
       FROM business b
       LEFT JOIN "user" u ON b.user_id = u.id
       LEFT JOIN subscription s ON s.business_id = b.id
@@ -132,7 +132,7 @@ export const getAllDrawsService = async () => {
       d.winner_ticket_id,
       d.winner_confirmed,
       array_length(d.rejected_ticket_ids, 1) AS rejected_count,
-      (SELECT COUNT(*)::int FROM ticket WHERE draw_id = d.id AND status = 'Activated') AS entry_count
+      (SELECT COUNT(*)::int FROM ticket WHERE draw_id = d.id AND is_quarantined = FALSE AND activated_by_user_id IS NOT NULL) AS entry_count
     FROM draw d
     ORDER BY d.draw_date DESC
   `);
@@ -754,7 +754,7 @@ export const getAdminOverviewService = async () => {
     pool.query(`SELECT COUNT(DISTINCT b.id) AS total, COUNT(DISTINCT s.business_id) AS active FROM business b LEFT JOIN subscription s ON s.business_id = b.id AND s.status IN ('Active', 'Trialing')`),
     pool.query(`SELECT COUNT(*) AS active_subs, COALESCE(SUM(fee_at_entry), 0) AS total_fees FROM subscription WHERE status = 'Active'`),
     pool.query(`SELECT id, name, prize_pool, draw_date FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1`),
-    pool.query(`SELECT COUNT(*) AS total_tickets, SUM(CASE WHEN status = 'Activated' THEN 1 ELSE 0 END) AS activated FROM ticket WHERE draw_id=(SELECT id FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1)`),
+    pool.query(`SELECT COUNT(*) AS total_tickets, SUM(CASE WHEN is_quarantined = FALSE AND activated_by_user_id IS NOT NULL THEN 1 ELSE 0 END) AS activated FROM ticket WHERE draw_id=(SELECT id FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1)`),
     pool.query(`SELECT COUNT(*) AS flagged_users FROM "user" WHERE risk_score >= 20 AND role != 'Admin'`),
   ]);
 
@@ -811,7 +811,7 @@ export const getAllUsersService = async (params: {
       `SELECT u.id, u.full_name, u.email, u.role, u.is_active, u.is_email_verified, u.created_at,
           u.risk_score, u.risk_last_flagged_at,
           b.id AS business_id, b.name AS business_name, (s2.status IN ('Active', 'Trialing')) AS business_active,
-          (SELECT COUNT(*) FROM ticket t WHERE t.activated_by_user_id = u.id AND t.status = 'Activated'
+          (SELECT COUNT(*) FROM ticket t WHERE t.activated_by_user_id = u.id AND t.is_quarantined = FALSE
            AND t.draw_id = (SELECT id FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1)
           ) AS entry_count,
           (SELECT MAX(t2.activated_at) FROM ticket t2 WHERE t2.activated_by_user_id = u.id) AS last_active_at
@@ -985,7 +985,8 @@ export const getAdminAnalyticsService = async (businessId?: number, drawId?: num
     pool.query(
       `SELECT entry_source, COUNT(*) AS count
        FROM ticket
-       WHERE ($1::int IS NULL OR business_id = $1)
+       WHERE is_quarantined = FALSE AND activated_by_user_id IS NOT NULL
+         AND ($1::int IS NULL OR business_id = $1)
          AND ($2::int IS NULL OR draw_id = $2)
        GROUP BY entry_source`,
       [biz, draw],
@@ -1011,7 +1012,7 @@ export const getAdminAnalyticsService = async (businessId?: number, drawId?: num
     pool.query(
       `SELECT
          SUM(CASE WHEN is_quarantined = TRUE THEN 1 ELSE 0 END) AS quarantined,
-         SUM(CASE WHEN is_quarantined = FALSE AND status = 'Activated' THEN 1 ELSE 0 END) AS accepted,
+         SUM(CASE WHEN is_quarantined = FALSE AND activated_by_user_id IS NOT NULL THEN 1 ELSE 0 END) AS accepted,
          COUNT(*) AS total
        FROM ticket
        WHERE ($1::int IS NULL OR business_id = $1)
@@ -1039,7 +1040,7 @@ export const getAdminAnalyticsService = async (businessId?: number, drawId?: num
                 COUNT(*) AS submission_count,
                 COUNT(DISTINCT business_id) AS business_count
          FROM ticket
-         WHERE status = 'Activated' AND activated_by_user_id IS NOT NULL
+         WHERE is_quarantined = FALSE AND activated_by_user_id IS NOT NULL
            AND ($1::int IS NULL OR business_id = $1)
            AND ($2::int IS NULL OR draw_id = $2)
          GROUP BY activated_by_user_id
@@ -1075,6 +1076,7 @@ export const getAdminAnalyticsService = async (businessId?: number, drawId?: num
       receipt: entrySrcMap['receipt'] ?? 0,
       free: entrySrcMap['free'] ?? 0,
       promo: entrySrcMap['promo'] ?? 0,
+      referral: entrySrcMap['referral'] ?? 0,
       total: entryTotal,
     },
     fraud: {
@@ -1111,15 +1113,15 @@ export const getEntryVolumeService = async (drawId?: number, businessId?: number
   const biz = businessId ?? null;
   const result = await pool.query(
     `SELECT
-       DATE_TRUNC('day', activated_at)::date AS date,
+       DATE_TRUNC('day', created_at)::date AS date,
        COUNT(*) AS count
      FROM ticket
-     WHERE status = 'Activated'
-       AND activated_at IS NOT NULL
+     WHERE is_quarantined = FALSE
+       AND activated_by_user_id IS NOT NULL
        AND ($1::int IS NULL OR draw_id = $1)
        AND ($2::int IS NULL OR business_id = $2)
-     GROUP BY DATE_TRUNC('day', activated_at)
-     ORDER BY DATE_TRUNC('day', activated_at) ASC`,
+     GROUP BY DATE_TRUNC('day', created_at)
+     ORDER BY DATE_TRUNC('day', created_at) ASC`,
     [draw, biz],
   );
   return result.rows.map((r) => ({
@@ -1137,7 +1139,7 @@ export const getCampaignComparisonService = async () => {
       d.status,
       d.prize_pool AS prize_amount,
       d.draw_date,
-      (SELECT COUNT(*)::int FROM ticket WHERE draw_id = d.id AND status = 'Activated') AS total_entries,
+      (SELECT COUNT(*)::int FROM ticket WHERE draw_id = d.id AND is_quarantined = FALSE AND activated_by_user_id IS NOT NULL) AS total_entries,
       (SELECT COUNT(*)::int FROM ticket WHERE draw_id = d.id AND is_quarantined = TRUE) AS quarantined,
       COALESCE(de.business_count, 0) AS business_count
     FROM draw d
@@ -1196,7 +1198,7 @@ export const getLocationBreakdownService = async (params: {
          COALESCE(bl.name, 'Main Location') AS location_name,
          bl.address,
          COUNT(t.id) AS total_tickets,
-         SUM(CASE WHEN t.status = 'Activated' THEN 1 ELSE 0 END) AS activated,
+         SUM(CASE WHEN t.is_quarantined = FALSE AND t.activated_by_user_id IS NOT NULL THEN 1 ELSE 0 END) AS activated,
          SUM(CASE WHEN t.is_quarantined = TRUE THEN 1 ELSE 0 END) AS quarantined,
          SUM(CASE WHEN t.entry_source = 'receipt' THEN 1 ELSE 0 END) AS receipt_tickets,
          SUM(CASE WHEN t.entry_source = 'code' THEN 1 ELSE 0 END) AS code_tickets,

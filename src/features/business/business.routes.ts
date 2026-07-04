@@ -21,7 +21,6 @@ import {
   updateLocation,
   updateLogo,
 } from './business.controller.js';
-import { getStats } from './stats.controller.js';
 import { getBusinessAnalytics } from './businessAnalytics.controller.js';
 import { getCampaignHeaderController, getCampaignKpisController, getCampaignEntriesController, getCampaignsController } from './activity.controller.js';
 import { createCheckout, verifySession, getSubscription, cancelSub, resumeSub, getFoundingAvailability, updatePlan, getInvoices } from '../stripe/stripe.controller.js';
@@ -51,7 +50,6 @@ router.patch('/locations/:locationId', requireRole('Business'), updateLocation);
 router.delete('/locations/:locationId', requireRole('Business'), deleteLocation);
 router.post('/locations/:locationId/invite', requireRole('Business'), createInviteLink);
 router.delete('/locations/:locationId/manager', requireRole('Business'), removeManager);
-router.get('/stats', requireRole('Business'), getStats);
 router.get('/analytics/:category', requireRole('Business'), getBusinessAnalytics);
 router.get('/campaign/list', requireRole('Business'), getCampaignsController);
 router.get('/campaign/header', requireRole('Business'), getCampaignHeaderController);
