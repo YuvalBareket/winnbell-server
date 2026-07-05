@@ -106,7 +106,6 @@ CREATE TABLE business (
   min_transaction_amount          NUMERIC(10, 2) NOT NULL DEFAULT 50 CHECK (min_transaction_amount > 0),
   pending_min_transaction_amount  NUMERIC(10, 2) NULL CHECK (pending_min_transaction_amount IS NULL OR pending_min_transaction_amount > 0),
   website_url                     TEXT,
-  phone                           TEXT,
   created_at                      TIMESTAMP NOT NULL DEFAULT NOW(),
   updated_at                      TIMESTAMP NOT NULL DEFAULT NOW()
 );
@@ -119,6 +118,10 @@ CREATE TABLE business_location (
   business_id      INTEGER NOT NULL REFERENCES business(id) ON DELETE CASCADE,
   name             TEXT,
   address          TEXT,
+  -- Optional suite / unit line captured at setup (not part of the geocoded address string).
+  suite            TEXT NULL,
+  -- Per-location contact phone (each branch can have its own number).
+  phone            TEXT NULL,
   latitude         DECIMAL(10, 8),
   longitude        DECIMAL(11, 8),
   is_active        BOOLEAN NOT NULL DEFAULT TRUE,

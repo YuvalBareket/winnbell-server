@@ -176,25 +176,27 @@ export const getAddressCoordsController = async (req: Request, res: Response) =>
 export const setupBusiness = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const userId = req.user!.id;
-    const { businessName, businessSector, description, terms_text, phone, website_url } = req.body;
+    const { businessName, businessSector, description, terms_text, logo_url, website_url } = req.body;
     const lenErr = validateLengths([
       ['Business name', businessName, 150],
       ['Sector', businessSector, 50],
       ['Description', description, 2000],
       ['Terms', terms_text, 5000],
-      ['Phone', phone, 20],
+      ['Logo URL', logo_url, 500],
       ['Website URL', website_url, 500],
     ]);
     if (lenErr) { res.status(400).json({ message: lenErr }); return; }
     const urlErr = validateWebsiteUrl(website_url);
     if (urlErr) { res.status(400).json({ message: urlErr }); return; }
 
-    // Validate location names/addresses/coordinates inside the locations array
-    const locations: Array<{ name?: string; address?: string; lat?: unknown; lon?: unknown }> = req.body.locations ?? [];
+    // Validate each location (phone is now per-location, not per-business).
+    const locations: Array<{ name?: string; address?: string; suite?: string; phone?: string; lat?: unknown; lon?: unknown }> = req.body.locations ?? [];
     for (const loc of locations) {
       const locErr = validateLengths([
         ['Location name', loc.name, 200],
         ['Location address', loc.address, 500],
+        ['Location suite', loc.suite, 100],
+        ['Location phone', loc.phone, 20],
       ]);
       if (locErr) { res.status(400).json({ message: locErr }); return; }
       const coordErr = validateCoords(loc.lat, loc.lon);
@@ -232,11 +234,10 @@ export const getMyBusiness = async (req: AuthRequest, res: Response): Promise<vo
 
 export const updateBusiness = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const { businessSector, description, terms_text, phone, website_url } = req.body as {
+    const { businessSector, description, terms_text, website_url } = req.body as {
       businessSector: string;
       description: string;
       terms_text: string;
-      phone?: string;
       website_url?: string;
     };
 
@@ -244,14 +245,13 @@ export const updateBusiness = async (req: AuthRequest, res: Response): Promise<v
       ['Sector', businessSector, 50],
       ['Description', description, 2000],
       ['Terms', terms_text, 5000],
-      ['Phone', phone, 20],
       ['Website URL', website_url, 500],
     ]);
     if (lenErr) { res.status(400).json({ message: lenErr }); return; }
     const urlErr = validateWebsiteUrl(website_url);
     if (urlErr) { res.status(400).json({ message: urlErr }); return; }
 
-    await updateBusinessProfile(req.user!.id, { businessSector, description, terms_text, phone, website_url });
+    await updateBusinessProfile(req.user!.id, { businessSector, description, terms_text, website_url });
     res.status(204).send();
   } catch (error: unknown) {
     if (error instanceof Error && error.message === 'BUSINESS_NOT_FOUND') {
@@ -306,14 +306,16 @@ export const updateCampaignSettingsController = async (req: AuthRequest, res: Re
 export const updateLocation = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { locationId } = req.params;
-    const { name, address, lat, lon } = req.body as {
+    const { name, address, lat, lon, suite, phone } = req.body as {
       name: string;
       address: string;
       lat: number;
       lon: number;
+      suite?: string;
+      phone?: string;
     };
 
-    const lenErr = validateLengths([['Location name', name, 200], ['Address', address, 500]]);
+    const lenErr = validateLengths([['Location name', name, 200], ['Address', address, 500], ['Suite', suite, 100], ['Phone', phone, 20]]);
     if (lenErr) { res.status(400).json({ message: lenErr }); return; }
     const coordErr = validateCoords(lat, lon);
     if (coordErr) { res.status(400).json({ message: coordErr }); return; }
@@ -323,6 +325,8 @@ export const updateLocation = async (req: AuthRequest, res: Response): Promise<v
       address,
       lat,
       lon,
+      suite: suite ?? null,
+      phone: phone ?? null,
     });
 
     res.status(204).send();
@@ -337,14 +341,16 @@ export const updateLocation = async (req: AuthRequest, res: Response): Promise<v
 
 export const addLocation = async (req: AuthRequest, res: Response): Promise<void> => {
   const userId = req.user!.id;
-  const { name, address, lat, lon } = req.body as {
+  const { name, address, lat, lon, suite, phone } = req.body as {
     name: string;
     address: string;
     lat: number;
     lon: number;
+    suite?: string;
+    phone?: string;
   };
 
-  const lenErr = validateLengths([['Location name', name, 200], ['Address', address, 500]]);
+  const lenErr = validateLengths([['Location name', name, 200], ['Address', address, 500], ['Suite', suite, 100], ['Phone', phone, 20]]);
   if (lenErr) { res.status(400).json({ message: lenErr }); return; }
   const coordErr = validateCoords(lat, lon);
   if (coordErr) { res.status(400).json({ message: coordErr }); return; }
@@ -373,7 +379,7 @@ export const addLocation = async (req: AuthRequest, res: Response): Promise<void
       }
     }
 
-    const result = await addBusinessLocation(userId, { name, address, lat, lon });
+    const result = await addBusinessLocation(userId, { name, address, lat, lon, suite: suite ?? null, phone: phone ?? null });
     locationId = result.locationId;
 
     // Get new active location count and sync Stripe quantity

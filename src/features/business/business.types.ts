@@ -126,12 +126,16 @@ export interface LocationInput {
   address: string;
   lat: number | null;
   lon: number | null;
+  suite?: string;
+  phone?: string;
 }
 
 export interface BusinessSetupInput {
   businessName: string;
   businessSector: string;
   description: string;
+  website_url?: string;
+  logo_url?: string;
   locations: LocationInput[];
   min_transaction_amount: number | null;
 }
@@ -141,6 +145,8 @@ export interface UpdateLocationInput {
   address: string;
   lat: number;
   lon: number;
+  suite?: string | null;
+  phone?: string | null;
 }
 
 export interface UpdateBusinessInput {
@@ -148,7 +154,6 @@ export interface UpdateBusinessInput {
   description: string;
   terms_text: string;
   website_url?: string | null;
-  phone?: string | null;
 }
 
 export interface AddLocationInput {
@@ -156,4 +161,6 @@ export interface AddLocationInput {
   address: string;
   lat: number;
   lon: number;
+  suite?: string | null;
+  phone?: string | null;
 }

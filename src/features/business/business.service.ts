@@ -145,19 +145,19 @@ export const createFullBusinessProfile = async (userId: number, data: BusinessSe
     await client.query('BEGIN');
 
     const businessResult = await client.query(
-      `INSERT INTO business (user_id, name, sector, description, min_transaction_amount)
-       VALUES ($1, $2, $3, $4, $5)
+      `INSERT INTO business (user_id, name, sector, description, website_url, logo_url, min_transaction_amount)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING id`,
       // A specific minimum is mandatory; default to $50 when the setup form omits one.
-      [userId, data.businessName, data.businessSector, data.description, data.min_transaction_amount ?? 50],
+      [userId, data.businessName, data.businessSector, data.description, data.website_url || null, data.logo_url || null, data.min_transaction_amount ?? 50],
     );
     const businessId = businessResult.rows[0].id;
 
     for (const loc of data.locations) {
       await client.query(
-        `INSERT INTO business_location (business_id, name, address, latitude, longitude, is_active)
-         VALUES ($1, $2, $3, $4, $5, true)`,
-        [businessId, loc.name || 'Main Branch', loc.address, loc.lat, loc.lon],
+        `INSERT INTO business_location (business_id, name, address, suite, phone, latitude, longitude, is_active)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, true)`,
+        [businessId, loc.name || 'Main Branch', loc.address, loc.suite || null, loc.phone || null, loc.lat, loc.lon],
       );
     }
 
@@ -189,7 +189,6 @@ export const getMyBusinessData = async (userId: number, managedLocationId?: numb
         b.min_transaction_amount,
         b.pending_min_transaction_amount,
         b.website_url,
-        b.phone,
         (s.status IN ('Active', 'Trialing')) AS is_subscribed,
         s.status AS subscription_status,
         s.current_period_end,
@@ -204,7 +203,9 @@ export const getMyBusinessData = async (userId: number, managedLocationId?: numb
             'longitude', bl.longitude,
             'manager_id', bl.manager_user_id,
             'manager_name', u.full_name,
-            'is_active', bl.is_active
+            'is_active', bl.is_active,
+            'suite', bl.suite,
+            'phone', bl.phone
           )), '[]'::json)
           FROM business_location bl
           LEFT JOIN "user" u ON bl.manager_user_id = u.id
@@ -353,9 +354,9 @@ export const updateBusinessProfile = async (ownerUserId: number, data: UpdateBus
 
   const result = await pool.query(`
     UPDATE business
-    SET sector = $1, description = $2, terms_text = $3, website_url = $4, phone = $5
-    WHERE user_id = $6
-  `, [data.businessSector, data.description, data.terms_text, data.website_url ?? null, data.phone ?? null, ownerUserId]);
+    SET sector = $1, description = $2, terms_text = $3, website_url = $4
+    WHERE user_id = $5
+  `, [data.businessSector, data.description, data.terms_text, data.website_url ?? null, ownerUserId]);
 
   if (result.rowCount === 0) throw new Error('BUSINESS_NOT_FOUND');
 
@@ -371,12 +372,12 @@ export const updateBusinessLocation = async (
 
   const result = await pool.query(`
     UPDATE business_location
-    SET name = $1, address = $2, latitude = $3, longitude = $4
+    SET name = $1, address = $2, latitude = $3, longitude = $4, suite = $5, phone = $6
     FROM business
     WHERE business_location.business_id = business.id
-      AND business_location.id = $5
-      AND business.user_id = $6
-  `, [data.name, data.address, data.lat, data.lon, locationId, ownerUserId]);
+      AND business_location.id = $7
+      AND business.user_id = $8
+  `, [data.name, data.address, data.lat, data.lon, data.suite ?? null, data.phone ?? null, locationId, ownerUserId]);
 
   if (result.rowCount === 0) throw new Error('UNAUTHORIZED_OR_INVALID_LOCATION');
 
@@ -393,10 +394,10 @@ export const addBusinessLocation = async (ownerUserId: number, data: AddLocation
   const businessId = ownerCheck.rows[0].id;
 
   const result = await pool.query(`
-    INSERT INTO business_location (business_id, name, address, latitude, longitude, is_active)
-    VALUES ($1, $2, $3, $4, $5, true)
+    INSERT INTO business_location (business_id, name, address, suite, phone, latitude, longitude, is_active)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, true)
     RETURNING id
-  `, [businessId, data.name, data.address, data.lat, data.lon]);
+  `, [businessId, data.name, data.address, data.suite ?? null, data.phone ?? null, data.lat, data.lon]);
 
   invalidatePublicBusinessData();
   return { locationId: result.rows[0].id };
@@ -580,7 +581,7 @@ const fetchLocationProfile = async (
       b.receipt_example_image_url,
       b.description,
       b.terms_text,
-      b.phone,
+      bl.phone,
       b.website_url,
       (
         SELECT COALESCE(json_agg(json_build_object('id', bl2.id, 'name', bl2.name, 'address', bl2.address) ORDER BY bl2.id), '[]'::json)

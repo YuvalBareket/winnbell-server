@@ -137,7 +137,7 @@ describe('getNearbyBusinessesService', () => {
 // updateBusinessProfile
 // ─────────────────────────────────────────────────────────────────────────────
 describe('updateBusinessProfile', () => {
-  it('should pass website_url and phone as parameters in the UPDATE query', async () => {
+  it('should pass website_url as a parameter in the UPDATE query', async () => {
     setupPoolQueries({ rows: [], rowCount: 1 });
 
     await updateBusinessProfile(42, {
@@ -145,16 +145,14 @@ describe('updateBusinessProfile', () => {
       description: 'Great food',
       terms_text: 'Standard terms',
       website_url: 'https://example.com',
-      phone: '555-0000',
     });
 
     expect(mockQuery).toHaveBeenCalledTimes(1);
     const [, params] = mockQuery.mock.calls[0] as [string, unknown[]];
     expect(params).toContain('https://example.com');
-    expect(params).toContain('555-0000');
   });
 
-  it('should accept null website_url and null phone without throwing', async () => {
+  it('should accept null website_url without throwing', async () => {
     setupPoolQueries({ rows: [], rowCount: 1 });
 
     await expect(
@@ -163,14 +161,12 @@ describe('updateBusinessProfile', () => {
         description: 'A shop',
         terms_text: 'Standard terms',
         website_url: null,
-        phone: null,
       }),
     ).resolves.toBeUndefined();
 
     const [, params] = mockQuery.mock.calls[0] as [string, unknown[]];
-    // Both null slots must be present in the param list
     const nullCount = params.filter((p) => p === null).length;
-    expect(nullCount).toBeGreaterThanOrEqual(2);
+    expect(nullCount).toBeGreaterThanOrEqual(1);
   });
 
   it('should throw an error containing BUSINESS_NOT_FOUND when rowCount is 0', async () => {
@@ -182,7 +178,6 @@ describe('updateBusinessProfile', () => {
         description: 'No match',
         terms_text: '',
         website_url: null,
-        phone: null,
       }),
     ).rejects.toThrow('BUSINESS_NOT_FOUND');
   });
