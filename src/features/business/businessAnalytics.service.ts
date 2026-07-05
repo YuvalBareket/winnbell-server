@@ -374,7 +374,7 @@ export const getRevenueAnalytics = async (
     // Per-draw breakdown (multi-draw / 3M+ views): average qualifying purchase against that draw's
     // own threshold snapshot, so the "entry minimum" line steps as it changed between draws.
     pool.query(
-      `SELECT d.id AS draw_id, d.name AS draw_name,
+      `SELECT d.id AS draw_id, d.name AS draw_name, TO_CHAR(d.draw_date, 'YYYY-MM') AS draw_month,
               COALESCE(de.min_transaction_at_entry, (SELECT min_transaction_amount FROM business WHERE id=$1)) AS threshold,
               COALESCE(AVG(t.transaction_amount), 0) AS avg_purchase
        FROM draw d
@@ -394,6 +394,7 @@ export const getRevenueAnalytics = async (
     return {
       draw_id: Number(row.draw_id),
       label: String(row.draw_name),
+      month: String(row.draw_month),
       avg_purchase: avg,
       threshold: t,
       avg_above_threshold: r2(Math.max(0, avg - t)),
