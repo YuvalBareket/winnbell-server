@@ -196,6 +196,14 @@ app.use('/referral', referralRoutes);
 
 // Global error handler — prevents stack traces and file paths from leaking to clients
 app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  // Malformed request bodies (express.json SyntaxError, oversized payloads) are client errors,
+  // not server faults - answer 400 and skip Sentry.
+  const status = (err as { status?: number; type?: string }).status;
+  if ((err as { type?: string }).type === 'entity.parse.failed' || err instanceof SyntaxError
+      || (typeof status === 'number' && status >= 400 && status < 500)) {
+    res.status(typeof status === 'number' ? status : 400).json({ message: 'Invalid request body.' });
+    return;
+  }
   console.error(err);
   // Report to Sentry with request context (no-op unless SENTRY_DSN is set)
   captureError(err, { method: req.method, url: req.originalUrl, userId: req.user?.id });

@@ -429,6 +429,9 @@ export const reopenDrawService = async (drawId: number): Promise<void> => {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    // Serialize with open/close: without this lock a concurrent openDrawService can slip in after
+    // the swap's revert step and leave TWO Open draws.
+    await client.query(`SELECT pg_advisory_xact_lock(hashtext('winnbell:draw_state_change'))`);
 
     const check = await client.query(
       `SELECT id, status, winner_confirmed FROM draw WHERE id = $1 FOR UPDATE`,
@@ -1341,7 +1344,7 @@ export const getBusinessDetailService = async (businessId: number) => {
         bl.latitude,
         bl.longitude,
         bl.is_active,
-        COUNT(t.id) FILTER (WHERE UPPER(t.status::text) = 'ACTIVATED') AS activated_tickets,
+        COUNT(t.id) FILTER (WHERE t.is_quarantined = FALSE AND t.activated_by_user_id IS NOT NULL) AS activated_tickets,
         COUNT(t.id) FILTER (WHERE t.is_quarantined = true) AS quarantined_tickets
       FROM business_location bl
       LEFT JOIN ticket t ON t.location_id = bl.id
@@ -1483,10 +1486,13 @@ export const adminImageDecisionService = async (
        WHERE id = $1`,
       [ticketId, ticketDeltaChange],
     );
+    // Siblings may have quarantine_reason=NULL if a prior APPROVE un-quarantined them; a later
+    // reject must still pull them back out of the draw pool, so match on the anchor alone.
     await pool.query(
       `UPDATE ticket
        SET is_quarantined = TRUE, quarantine_reason = 'ocr_validation_failed', quarantined_at = NOW()
-       WHERE anchor_ticket_id = $1 AND quarantine_reason = 'ocr_pending'`,
+       WHERE anchor_ticket_id = $1
+         AND (quarantine_reason = 'ocr_pending' OR is_quarantined = FALSE)`,
       [ticketId],
     );
     await updateUserRiskScore(userId, userDelta, undefined, []);

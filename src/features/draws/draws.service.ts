@@ -42,7 +42,7 @@ export const getDrawHistoryService = async () => {
     LEFT JOIN "user" u ON wt.activated_by_user_id = u.id
     LEFT JOIN business b ON wt.business_id = b.id
     LEFT JOIN business_location bl ON wt.location_id = bl.id
-    LEFT JOIN ticket t ON t.draw_id = d.id
+    LEFT JOIN ticket t ON t.draw_id = d.id AND t.is_quarantined = FALSE AND t.activated_by_user_id IS NOT NULL
     GROUP BY d.id, wt.id, u.id, b.id, bl.id
     ORDER BY d.draw_date DESC
     LIMIT 50

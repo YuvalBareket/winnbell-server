@@ -1011,63 +1011,66 @@ export const getSubscriptionInvoices = async (userId: number): Promise<Subscript
   // Founding members pay once via PaymentIntent — Stripe never creates invoices for
   // one-time payments, and founding_member is wiped on cancel. The founding_payment
   // ledger is the source of truth for history.
+  // Founding payments are one-time PaymentIntents (no Stripe invoices). A business that later
+  // resubscribes to a regular plan keeps its founding_payment ledger rows, so we must show BOTH
+  // the founding history AND any recurring Stripe invoices - merged, newest first - not one or the other.
   const foundingRows = result.rows.filter(r => r.stripe_payment_intent_id);
-  if (foundingRows.length > 0) {
-    return foundingRows.map((row): SubscriptionInvoice => {
-        const grossDollars = Number(row.amount);
-        const refundedDollars = Number(row.refunded_amount);
-        const netPaidDollars = Math.max(0, grossDollars - refundedDollars);
-        const createdTs = Math.floor(new Date(row.created_at).getTime() / 1000);
+  const foundingInvoices: SubscriptionInvoice[] = foundingRows.map((row) => {
+    const grossDollars = Number(row.amount);
+    const refundedDollars = Number(row.refunded_amount);
+    const netPaidDollars = Math.max(0, grossDollars - refundedDollars);
+    const createdTs = Math.floor(new Date(row.created_at).getTime() / 1000);
 
-        const isFullRefund = refundedDollars > 0 && netPaidDollars === 0;
-        const isPartialRefund = refundedDollars > 0 && netPaidDollars > 0;
-        const status = isFullRefund ? 'void' : 'paid';
-        const lineDesc = isFullRefund
-          ? 'Founding Partner - Winnbell (refunded)'
-          : isPartialRefund
-            ? `Founding Partner - Winnbell (partial refund -$${refundedDollars.toFixed(2)})`
-            : 'Founding Partner - Winnbell';
+    const isFullRefund = refundedDollars > 0 && netPaidDollars === 0;
+    const isPartialRefund = refundedDollars > 0 && netPaidDollars > 0;
+    const status = isFullRefund ? 'void' : 'paid';
+    const lineDesc = isFullRefund
+      ? 'Founding Partner - Winnbell (refunded)'
+      : isPartialRefund
+        ? `Founding Partner - Winnbell (partial refund -$${refundedDollars.toFixed(2)})`
+        : 'Founding Partner - Winnbell';
 
-        return {
-          id: row.stripe_payment_intent_id,
-          date: createdTs,
-          amount_paid: netPaidDollars,
-          amount_due: grossDollars,
-          status,
-          invoice_description: null,
-          description: [{ description: lineDesc, quantity: 1, amount: grossDollars, period_start: undefined, period_end: undefined }],
-          invoice_pdf: null,
-          hosted_invoice_url: null,
-          kind: 'founding',
-        };
-      });
-  }
-
-  if (!stripeCustomerId) return [];
-
-  const invoiceList = await stripe.invoices.list({
-    customer: stripeCustomerId,
-    limit: 24,
-    expand: ['data.lines'],
+    return {
+      id: row.stripe_payment_intent_id,
+      date: createdTs,
+      amount_paid: netPaidDollars,
+      amount_due: grossDollars,
+      status,
+      invoice_description: null,
+      description: [{ description: lineDesc, quantity: 1, amount: grossDollars, period_start: undefined, period_end: undefined }],
+      invoice_pdf: null,
+      hosted_invoice_url: null,
+      kind: 'founding',
+    };
   });
 
-  return invoiceList.data.map((invoice): SubscriptionInvoice => ({
-    id: invoice.id,
-    date: invoice.created,
-    amount_paid: invoice.amount_paid / 100,
-    amount_due: invoice.amount_due / 100,
-    status: invoice.status,
-    invoice_description: invoice.description ?? null,
-    description: invoice.lines.data.map(line => ({
-      description: line.description,
-      quantity: line.quantity ?? null,
-      amount: line.amount / 100,
-      period_start: line.period?.start,
-      period_end: line.period?.end,
-    })),
-    invoice_pdf: invoice.invoice_pdf ?? null,
-    hosted_invoice_url: invoice.hosted_invoice_url ?? null,
-  }));
+  let stripeInvoices: SubscriptionInvoice[] = [];
+  if (stripeCustomerId) {
+    const invoiceList = await stripe.invoices.list({
+      customer: stripeCustomerId,
+      limit: 24,
+      expand: ['data.lines'],
+    });
+    stripeInvoices = invoiceList.data.map((invoice): SubscriptionInvoice => ({
+      id: invoice.id,
+      date: invoice.created,
+      amount_paid: invoice.amount_paid / 100,
+      amount_due: invoice.amount_due / 100,
+      status: invoice.status,
+      invoice_description: invoice.description ?? null,
+      description: invoice.lines.data.map(line => ({
+        description: line.description,
+        quantity: line.quantity ?? null,
+        amount: line.amount / 100,
+        period_start: line.period?.start,
+        period_end: line.period?.end,
+      })),
+      invoice_pdf: invoice.invoice_pdf ?? null,
+      hosted_invoice_url: invoice.hosted_invoice_url ?? null,
+    }));
+  }
+
+  return [...foundingInvoices, ...stripeInvoices].sort((a, b) => b.date - a.date);
 };
 
 // ─── Get Subscription Details ─────────────────────────────────────────────────

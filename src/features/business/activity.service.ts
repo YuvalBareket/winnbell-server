@@ -298,7 +298,7 @@ export const getCampaignEntries = async (
             u.full_name AS customer_name, t.transaction_amount, t.entry_source,
             t.is_quarantined, t.created_at
      FROM ticket t
-     JOIN business_location bl ON bl.id = t.location_id
+     LEFT JOIN business_location bl ON bl.id = t.location_id
      LEFT JOIN "user" u ON u.id = t.activated_by_user_id
      WHERE ${conditions.join(' AND ')}
        AND (t.entry_source != 'receipt' OR t.receipt_identifier IS NOT NULL)
@@ -311,7 +311,7 @@ export const getCampaignEntries = async (
   if (hasMore) rows.pop();
   const items: CampaignEntry[] = rows.map(r => ({
     ticket_id: Number(r.ticket_id),
-    location_name: String(r.location_name),
+    location_name: r.location_name ? String(r.location_name) : 'Unknown location',
     customer_masked: maskCustomer(r.customer_name),
     transaction_amount: r.transaction_amount != null ? parseFloat(r.transaction_amount) : null,
     entry_source: r.entry_source ?? 'receipt',

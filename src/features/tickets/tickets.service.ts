@@ -45,9 +45,9 @@ export const activateTicket = async (code: string, userId: number) => {
     const ownerCheck = await client.query(`
       SELECT 1 FROM business WHERE id = $1 AND user_id = $2
       UNION ALL
-      SELECT 1 FROM business_location WHERE id = $3 AND manager_user_id = $2
+      SELECT 1 FROM business_location WHERE business_id = $1 AND manager_user_id = $2
       LIMIT 1
-    `, [ticket.business_id, userId, ticket.location_id]);
+    `, [ticket.business_id, userId]);
     if (ownerCheck.rows.length > 0) {
       throw new Error('Business owners and managers cannot activate tickets for their own business.');
     }
@@ -102,6 +102,7 @@ export const getUserTicketsService = async (userId: number, drawId: number) => {
       t.activated_at,
       CASE WHEN t.entry_source = 'promo' THEN 'Promotional Entry'
            WHEN t.entry_source = 'referral' THEN 'Invitation Entry'
+           WHEN t.entry_source = 'free' THEN 'Free Weekly Entry'
            ELSE b.name END AS business_name,
       b.sector AS business_sector,
       b.logo_url,
@@ -449,10 +450,14 @@ export const submitReceiptEntryService = async (
         (SELECT global_entry_cap FROM platform_settings WHERE id = 1)        AS global_entry_cap,
         (SELECT s.entries_per_location FROM subscription s WHERE s.business_id = (SELECT business_id FROM biz)) AS entries_per_location,
         EXISTS (
+          -- Conflict if the submitter owns the business OR manages ANY of its locations
+          -- (employees cannot enter their own employer's draw, not just at their own branch).
           SELECT 1 FROM business bx
-          LEFT JOIN business_location blx ON blx.business_id = bx.id AND blx.id = $2
           WHERE bx.id = (SELECT business_id FROM biz)
-            AND (bx.user_id = $1 OR blx.manager_user_id = $1)
+            AND (
+              bx.user_id = $1
+              OR EXISTS (SELECT 1 FROM business_location blx WHERE blx.business_id = bx.id AND blx.manager_user_id = $1)
+            )
         )                                                                     AS has_conflict,
         (
           SELECT COUNT(DISTINCT receipt_identifier)::int FROM ticket
