@@ -1,7 +1,7 @@
 import Stripe from 'stripe';
 import { Pool } from 'pg';
 import { getPool } from '../../shared/db/db.js';
-import { sendSubscriptionConfirmationEmail, sendPaymentFailedEmail } from '../../shared/email/email.service.js';
+import { sendSubscriptionConfirmationEmail, sendPaymentFailedEmail, sendFoundingWelcomeEmail, sendDisputeAlertEmail } from '../../shared/email/email.service.js';
 import { getPlatformSettings, publicCache, invalidatePublicBusinessData } from '../../shared/cache/cache.js';
 import { nextCampaignOpensNy, lastChargeAtNy, CHARGE_DAY_OF_MONTH } from '../../shared/dates.js';
 
@@ -213,6 +213,17 @@ export const createFoundingMemberCheckoutSession = async (
     [businessId],
   );
   if (existing.rows.length > 0) throw new Error('This business already has an active subscription');
+
+  // Founding covers up to 3 locations for the flat price. The client hides the offer for
+  // larger businesses, but money rules live on the SERVER: same next-campaign count the
+  // add-location limit uses, checked at purchase time.
+  const locCount = await pool.query(
+    `SELECT COUNT(*)::int AS cnt FROM business_location
+     WHERE business_id = $1
+       AND ((is_active = TRUE AND deactivate_at_open = FALSE) OR activate_at_open = TRUE)`,
+    [businessId],
+  );
+  if (Number(locCount.rows[0]?.cnt ?? 0) > 3) throw new Error('FOUNDING_LOCATION_LIMIT');
 
   const baseUrl = process.env.FRONTEND_URL || 'http://localhost:8081';
 
@@ -635,6 +646,15 @@ async function processStripeEvent(event: Stripe.Event, pool: Pool): Promise<void
           console.log(`[Stripe] Webhook created subscription for business ${businessId}`);
         }
       } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : '';
+        // Sold-out founding payment: the refund is ALREADY issued and the outcome is
+        // final. Swallow (keep the claim) so Stripe stops redelivering - a rethrow would
+        // release the claim and retry a refund that already happened, forever. The
+        // success-page verify path still throws this to show the refunded message.
+        if (msg.includes('A full refund has been issued')) {
+          console.log('[Stripe] checkout.session.completed: sold-out founding payment refunded - event settled, no retry.');
+          break;
+        }
         console.error('[Stripe] ERROR in checkout.session.completed:', err instanceof Error ? err.message : err);
         throw err;
       }
@@ -651,11 +671,18 @@ async function processStripeEvent(event: Stripe.Event, pool: Pool): Promise<void
         const currentPeriodEnd = extractPeriodEnd(subscription);
         const cancelAtPeriodEnd = subscription.cancel_at_period_end;
 
+        // Two guards against out-of-order/stale events (Stripe does not guarantee order):
+        //  - stripe_subscription_id must MATCH the row: a leftover event from an old,
+        //    replaced subscription must never overwrite the business's new one.
+        //  - status <> 'Cancelled': a stale "updated" arriving after the "deleted" event
+        //    must never resurrect a dead subscription (same guard the invoice handlers use).
         await pool.query(`
           UPDATE subscription
           SET status = $1, current_period_end = $2, cancel_at_period_end = $3, updated_at = NOW()
           WHERE business_id = $4
-        `, [status, currentPeriodEnd, cancelAtPeriodEnd, businessId]);
+            AND stripe_subscription_id = $5
+            AND status <> 'Cancelled'
+        `, [status, currentPeriodEnd, cancelAtPeriodEnd, businessId, subscription.id]);
 
         // No draw enrollment here. Enrollment happens only when a campaign is
         // opened; this handler just keeps our subscription row in sync with Stripe.
@@ -684,6 +711,67 @@ async function processStripeEvent(event: Stripe.Event, pool: Pool): Promise<void
         console.log(`[Stripe] Business ${businessId} deactivated`);
       } catch (err: unknown) {
         console.error('[Stripe] ERROR in customer.subscription.deleted:', err instanceof Error ? err.message : err);
+        throw err;
+      }
+      break;
+    }
+
+    case 'charge.dispute.created': {
+      try {
+        // A chargeback: the bank clawed the money back. Policy: NOTIFY ONLY - a human
+        // reviews it in Stripe and decides what happens to the account. Identify the
+        // business by payment intent: founding payments are on our ledger; recurring
+        // payments resolve through Stripe (payment intent -> invoice -> subscription).
+        const dispute = event.data.object as Stripe.Dispute;
+        const piId = typeof dispute.payment_intent === 'string' ? dispute.payment_intent : dispute.payment_intent?.id ?? null;
+
+        let businessId: number | null = null;
+        let businessName = 'Unknown business';
+        if (piId) {
+          const founding = await pool.query(
+            `SELECT b.id, b.name FROM founding_payment fp JOIN business b ON b.id = fp.business_id
+             WHERE fp.stripe_payment_intent_id = $1`,
+            [piId],
+          );
+          if (founding.rows[0]) {
+            businessId = founding.rows[0].id;
+            businessName = founding.rows[0].name;
+          } else {
+            try {
+              const pi = await stripe.paymentIntents.retrieve(piId, { expand: ['invoice'] });
+              const invoice = (pi as unknown as { invoice?: Stripe.Invoice | string | null }).invoice;
+              const subId = invoice && typeof invoice !== 'string' ? getInvoiceSubscriptionId(invoice) : null;
+              if (subId) {
+                const row = await pool.query(
+                  `SELECT b.id, b.name FROM subscription s JOIN business b ON b.id = s.business_id
+                   WHERE s.stripe_subscription_id = $1`,
+                  [subId],
+                );
+                if (row.rows[0]) { businessId = row.rows[0].id; businessName = row.rows[0].name; }
+              }
+            } catch (lookupErr: unknown) {
+              console.error('[Stripe] dispute business lookup via Stripe failed:', lookupErr instanceof Error ? lookupErr.message : lookupErr);
+            }
+          }
+        }
+
+        console.error(
+          `[Stripe] DISPUTE OPENED: $${(dispute.amount / 100).toFixed(2)} by "${businessName}" (business ${businessId ?? '?'}), ` +
+          `dispute ${dispute.id}, reason: ${dispute.reason}. NO automatic action taken - review in Stripe.`,
+        );
+        try {
+          await sendDisputeAlertEmail({
+            businessName,
+            businessId,
+            amountDollars: dispute.amount / 100,
+            disputeId: dispute.id,
+            reason: dispute.reason ?? 'unknown',
+          });
+        } catch (mailErr: unknown) {
+          console.error('[Stripe] dispute alert email failed (non-fatal):', mailErr instanceof Error ? mailErr.message : mailErr);
+        }
+      } catch (err: unknown) {
+        console.error('[Stripe] ERROR in charge.dispute.created:', err instanceof Error ? err.message : err);
         throw err;
       }
       break;
@@ -930,22 +1018,27 @@ async function activateFoundingMember(
   // Enrollment happens when the admin opens the next campaign — founding members
   // are Active and within their prepaid year, so they get enrolled like anyone else.
 
-  // Confirmation email — non-fatal
+  // Welcome email — non-fatal (activation is already committed)
   try {
     const bizResult = await pool.query(`
-      SELECT b.name, u.email, fm.seat_number,
+      SELECT b.name, u.email, fm.seat_number, s.current_period_end,
              (SELECT founding_member_cap FROM platform_settings WHERE id = 1) AS cap
       FROM business b
       JOIN "user" u ON u.id = b.user_id
       JOIN founding_member fm ON fm.business_id = b.id
+      JOIN subscription s ON s.business_id = b.id
       WHERE b.id = $1
     `, [businessId]);
     const biz = bizResult.rows[0];
     if (biz?.email) {
-      console.log(`[Founding] Business ${businessId} "${biz.name}" activated as Founding Partner #${biz.seat_number} of ${biz.cap} — email: ${biz.email}`);
+      await sendFoundingWelcomeEmail(biz.email, biz.name, {
+        seatNumber: Number(biz.seat_number),
+        cap: Number(biz.cap ?? 30),
+        termEnd: new Date(biz.current_period_end),
+      });
     }
   } catch (err: unknown) {
-    console.error(`[Founding] Email lookup failed for business ${businessId} (non-fatal):`, err instanceof Error ? err.message : err);
+    console.error(`[Founding] Welcome email failed for business ${businessId} (non-fatal):`, err instanceof Error ? err.message : err);
   }
 }
 
@@ -1597,12 +1690,6 @@ export const getSubscriptionDetails = async (userId: number) => {
        WHERE business_id = b.id
          AND ((is_active = TRUE AND deactivate_at_open = FALSE) OR activate_at_open = TRUE)
       ) AS next_campaign_location_count,
-      (
-        SELECT COUNT(*)::int
-        FROM draw_entry de3
-        JOIN draw d3 ON d3.id = de3.draw_id
-        WHERE de3.business_id = b.id AND d3.status = 'Upcoming'
-      ) AS founding_draws_remaining,
       nd.id         AS next_campaign_id,
       nd.name       AS next_campaign_name,
       nd.draw_date  AS next_campaign_date,

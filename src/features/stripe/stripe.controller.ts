@@ -69,6 +69,10 @@ export const createCheckout = async (req: Request, res: Response) => {
       res.status(409).json({ error: 'All founding partner spots have been claimed.' });
       return;
     }
+    if (msg === 'FOUNDING_LOCATION_LIMIT') {
+      res.status(403).json({ error: 'The founding partner plan covers up to 3 locations. Please choose a regular plan for more locations.' });
+      return;
+    }
     console.error('[stripe.createCheckout]', err);
     res.status(500).json({ error: 'Subscription setup failed. Please try again.' });
   }
@@ -86,6 +90,13 @@ export const verifySession = async (req: Request, res: Response) => {
     await verifyAndActivateSession(sessionId, userId);
     res.json({ activated: true });
   } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : '';
+    // Sold-out founding payment was already auto-refunded — the client must tell the
+    // truth ("your money is back") instead of a generic "contact support" failure.
+    if (msg.includes('A full refund has been issued')) {
+      res.status(409).json({ error: msg, code: 'FOUNDING_SOLD_OUT_REFUNDED' });
+      return;
+    }
     console.error('[stripe.verifySession]', err);
     res.status(400).json({ error: 'Session verification failed. Please try again.' });
   }

@@ -47,8 +47,12 @@ jest.mock('stripe', () => {
   }));
 });
 
+const mockSendFoundingWelcomeEmail = jest.fn();
 jest.mock('../../../shared/email/email.service.js', () => ({
   sendSubscriptionConfirmationEmail: jest.fn(),
+  sendPaymentFailedEmail: jest.fn(),
+  sendDisputeAlertEmail: jest.fn(),
+  sendFoundingWelcomeEmail: (...args: unknown[]) => mockSendFoundingWelcomeEmail(...args),
 }));
 
 const mockQuery = jest.fn();
@@ -73,7 +77,8 @@ process.env.STRIPE_PRICE_ID_250 = 'price_test_250';
 process.env.STRIPE_PRICE_ID_500 = 'price_test_500';
 process.env.STRIPE_PRICE_ID_1000 = 'price_test_1000';
 
-import { createCheckoutSession, cancelSubscription, verifyAndActivateSession, resumeSubscription, resolveMonthlyFee, isFoundingTransitionWindow, updateSubscriptionPlan } from '../stripe.service';
+import { createCheckoutSession, createFoundingMemberCheckoutSession, cancelSubscription, verifyAndActivateSession, resumeSubscription, resolveMonthlyFee, isFoundingTransitionWindow, updateSubscriptionPlan } from '../stripe.service';
+import { invalidatePlatformSettings } from '../../../shared/cache/cache';
 
 // ─────────────────────────────────────────────
 // resolveMonthlyFee — fee_at_entry single source of truth (TIER_PRICE_MAP) + drift guard
@@ -679,7 +684,9 @@ describe('verifyAndActivateSession — founding activation guards', () => {
     mockQuery
       .mockResolvedValueOnce({ rows: [{ id: 42 }] })                                     // business lookup
       .mockResolvedValueOnce({ rows: [] })                                               // guard: no founding rows
-      .mockResolvedValueOnce({ rows: [{ stripe_subscription_id: 'sub_live' }] });        // live regular sub to supersede
+      .mockResolvedValueOnce({ rows: [{ stripe_subscription_id: 'sub_live' }] })         // live regular sub to supersede
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })                                  // change-log insert
+      .mockResolvedValueOnce({ rows: [{ name: 'Cafe One', email: 'owner@cafe.com', seat_number: 3, cap: 30, current_period_end: new RealDate('2027-07-06T00:00:00.000Z') }] }); // welcome email lookup
     mockClientQuery.mockImplementation((sql: string) => {
       if (typeof sql === 'string' && sql.includes('INSERT INTO founding_member')) {
         return Promise.resolve({ rows: [{ seat_number: 3 }], rowCount: 1 });             // seat claim
@@ -697,6 +704,26 @@ describe('verifyAndActivateSession — founding activation guards', () => {
       ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO founding_member'),
     );
     expect(claim).toBeDefined();
+    // And the founding partner gets a REAL welcome email (not just a log line).
+    expect(mockSendFoundingWelcomeEmail).toHaveBeenCalledWith('owner@cafe.com', 'Cafe One',
+      expect.objectContaining({ seatNumber: 3, cap: 30 }));
+  });
+});
+
+// ─────────────────────────────────────────────
+// createFoundingMemberCheckoutSession — server-side location limit
+// ─────────────────────────────────────────────
+describe('createFoundingMemberCheckoutSession — location limit', () => {
+  it('rejects founding checkout for a business with more than 3 locations', async () => {
+    invalidatePlatformSettings(); // force the settings read through the mocked pool
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ founding_phase_active: true, founding_member_cap: 30 }] }) // platform settings
+      .mockResolvedValueOnce({ rows: [{ taken: 5 }] })                                             // seats taken
+      .mockResolvedValueOnce({ rows: [] })                                                         // no existing subscription
+      .mockResolvedValueOnce({ rows: [{ cnt: 4 }] });                                              // 4 locations
+
+    await expect(createFoundingMemberCheckoutSession(42, 'owner@test.com')).rejects.toThrow('FOUNDING_LOCATION_LIMIT');
+    expect(mockSessionsCreate).not.toHaveBeenCalled();
   });
 });
 

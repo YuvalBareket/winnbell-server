@@ -20,9 +20,12 @@ jest.mock('stripe', () => {
 });
 
 const mockSendPaymentFailedEmail = jest.fn();
+const mockSendDisputeAlertEmail = jest.fn();
 jest.mock('../../../shared/email/email.service.js', () => ({
   sendSubscriptionConfirmationEmail: jest.fn(),
+  sendFoundingWelcomeEmail: jest.fn(),
   sendPaymentFailedEmail: (...args: unknown[]) => mockSendPaymentFailedEmail(...args),
+  sendDisputeAlertEmail: (...args: unknown[]) => mockSendDisputeAlertEmail(...args),
 }));
 
 const mockQuery = jest.fn();
@@ -250,6 +253,71 @@ describe('handleStripeWebhook — invoice.payment_succeeded', () => {
     );
     expect(activated).toBeUndefined(); // no UPDATE issued
     expect(mockQuery).toHaveBeenCalledTimes(1); // only the claim
+  });
+});
+
+// ─────────────────────────────────────────────
+// customer.subscription.updated — stale/out-of-order event guards
+// ─────────────────────────────────────────────
+describe('handleStripeWebhook — customer.subscription.updated', () => {
+  it('scopes the write to the matching subscription id and never resurrects a Cancelled row', async () => {
+    mockConstructEvent.mockReturnValue({
+      id: 'evt_upd',
+      type: 'customer.subscription.updated',
+      data: {
+        object: {
+          id: 'sub_123',
+          status: 'active',
+          cancel_at_period_end: false,
+          current_period_end: 1790000000,
+          metadata: { business_id: '42' },
+        },
+      },
+    });
+    mockQuery.mockResolvedValueOnce({ rows: [{ event_id: 'evt_upd' }], rowCount: 1 }); // claim
+
+    await handleStripeWebhook(Buffer.from('{}'), 'sig');
+
+    const upd = mockQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('SET status = $1'),
+    );
+    expect(upd).toBeDefined();
+    // A stale event from an old, replaced subscription must not touch the new row...
+    expect(upd![0]).toMatch(/stripe_subscription_id = \$5/);
+    // ...and a late "updated" must never resurrect a subscription the "deleted" event killed.
+    expect(upd![0]).toMatch(/status <> 'Cancelled'/);
+    expect(upd![1]).toEqual(['Active', expect.any(Date), false, 42, 'sub_123']);
+  });
+});
+
+// ─────────────────────────────────────────────
+// charge.dispute.created — notify only, never act
+// ─────────────────────────────────────────────
+describe('handleStripeWebhook — charge.dispute.created', () => {
+  it('identifies the business and sends an alert without changing any data', async () => {
+    mockConstructEvent.mockReturnValue({
+      id: 'evt_disp',
+      type: 'charge.dispute.created',
+      data: { object: { id: 'dp_1', amount: 120000, reason: 'fraudulent', payment_intent: 'pi_founding' } },
+    });
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ event_id: 'evt_disp' }], rowCount: 1 })  // claim
+      .mockResolvedValueOnce({ rows: [{ id: 42, name: 'Cafe One' }] });          // founding_payment lookup
+
+    await handleStripeWebhook(Buffer.from('{}'), 'sig');
+
+    expect(mockSendDisputeAlertEmail).toHaveBeenCalledWith(expect.objectContaining({
+      businessId: 42,
+      businessName: 'Cafe One',
+      amountDollars: 1200,
+      disputeId: 'dp_1',
+      reason: 'fraudulent',
+    }));
+    // Notify ONLY: no subscription/draw mutation of any kind.
+    const mutation = mockQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && (sql.includes('UPDATE subscription') || sql.includes('DELETE FROM draw_entry')),
+    );
+    expect(mutation).toBeUndefined();
   });
 });
 
