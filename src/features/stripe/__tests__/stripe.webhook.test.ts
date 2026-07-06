@@ -19,8 +19,10 @@ jest.mock('stripe', () => {
   }));
 });
 
+const mockSendPaymentFailedEmail = jest.fn();
 jest.mock('../../../shared/email/email.service.js', () => ({
   sendSubscriptionConfirmationEmail: jest.fn(),
+  sendPaymentFailedEmail: (...args: unknown[]) => mockSendPaymentFailedEmail(...args),
 }));
 
 const mockQuery = jest.fn();
@@ -55,6 +57,9 @@ const claimDeleteCall = () =>
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // Default response for follow-up queries (email lookups, recovery enrolls, etc.).
+  // Tests override the calls they care about with mockResolvedValueOnce.
+  mockQuery.mockResolvedValue({ rows: [], rowCount: 0 });
 });
 
 // ─────────────────────────────────────────────
@@ -149,7 +154,7 @@ describe('handleStripeWebhook — customer.subscription.deleted', () => {
 });
 
 // ─────────────────────────────────────────────
-// invoice.payment_succeeded — clears Past_Due (status only), never resurrects Cancelled
+// invoice.payment_succeeded — clears Past_Due, recovers + enrolls, never resurrects Cancelled
 // ─────────────────────────────────────────────
 describe('handleStripeWebhook — invoice.payment_succeeded', () => {
   it("flips the subscription to Active with a 'status <> Cancelled' guard, and does NOT touch current_period_end", async () => {
@@ -160,20 +165,74 @@ describe('handleStripeWebhook — invoice.payment_succeeded', () => {
     });
     mockQuery
       .mockResolvedValueOnce({ rows: [{ event_id: 'evt_paid' }], rowCount: 1 }) // claim
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 });                        // UPDATE -> Active
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 });                        // SELECT prior — no row
 
     await handleStripeWebhook(Buffer.from('{}'), 'sig');
 
     const activated = mockQuery.mock.calls.find(
-      ([sql]: [string]) => typeof sql === 'string' && sql.includes("status = 'Active'"),
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes("status = 'Active'") && sql.includes('stripe_subscription_id'),
     );
     expect(activated).toBeDefined();
     // Best-practice guards: never resurrect a Cancelled sub; scope to this subscription.
     expect(activated![0]).toMatch(/status <> 'Cancelled'/);
     expect(activated![0]).toMatch(/WHERE stripe_subscription_id = \$1/);
-    // Proration invoices fire this event too — period must NOT be written here.
+    // Settlement/one-off invoices fire this event too — period must NOT be written here.
     expect(activated![0]).not.toMatch(/current_period_end/);
     expect(activated![1]).toEqual(['sub_123']);
+  });
+
+  it('RECOVERS a Past_Due business: flips Active and enrolls it into the Open campaign it paid for', async () => {
+    mockConstructEvent.mockReturnValue({
+      id: 'evt_recover',
+      type: 'invoice.payment_succeeded',
+      data: { object: { subscription: 'sub_123' } },
+    });
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ event_id: 'evt_recover' }], rowCount: 1 }) // claim
+      .mockResolvedValueOnce({ rows: [{ business_id: 42 }], rowCount: 1 })         // SELECT prior
+      .mockResolvedValueOnce({ rows: [{ business_id: 42 }], rowCount: 1 });        // recovery flip RETURNING → was Past_Due/Incomplete
+
+    await handleStripeWebhook(Buffer.from('{}'), 'sig');
+
+    const enroll = mockQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO draw_entry'),
+    );
+    expect(enroll).toBeDefined();
+    expect(enroll![0]).toMatch(/d\.status = 'Open'/);
+    expect(enroll![0]).toMatch(/current_period_end >= NOW\(\)/);
+    expect(enroll![1]).toEqual([42]);
+  });
+
+  it('does NOT enroll when the business was fine all along (no recovery)', async () => {
+    mockConstructEvent.mockReturnValue({
+      id: 'evt_normal',
+      type: 'invoice.payment_succeeded',
+      data: { object: { subscription: 'sub_123' } },
+    });
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ event_id: 'evt_normal' }], rowCount: 1 }) // claim
+      .mockResolvedValueOnce({ rows: [{ business_id: 42 }], rowCount: 1 })        // SELECT prior
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 });                          // recovery flip → no Past_Due/Incomplete row
+
+    await handleStripeWebhook(Buffer.from('{}'), 'sig');
+
+    const enroll = mockQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO draw_entry'),
+    );
+    expect(enroll).toBeUndefined();
+  });
+
+  it('ignores settlement invoices entirely (change differences, not campaign payments)', async () => {
+    mockConstructEvent.mockReturnValue({
+      id: 'evt_settle_ok',
+      type: 'invoice.payment_succeeded',
+      data: { object: { subscription: 'sub_123', metadata: { winnbell_kind: 'settlement' } } },
+    });
+    mockQuery.mockResolvedValueOnce({ rows: [{ event_id: 'evt_settle_ok' }], rowCount: 1 }); // claim only
+
+    await handleStripeWebhook(Buffer.from('{}'), 'sig');
+
+    expect(mockQuery).toHaveBeenCalledTimes(1); // only the claim
   });
 
   it('ignores invoices with no subscription (one-time / founding payments)', async () => {
@@ -191,5 +250,62 @@ describe('handleStripeWebhook — invoice.payment_succeeded', () => {
     );
     expect(activated).toBeUndefined(); // no UPDATE issued
     expect(mockQuery).toHaveBeenCalledTimes(1); // only the claim
+  });
+});
+
+// ─────────────────────────────────────────────
+// invoice.payment_failed — Past_Due + first-attempt email, settlements ignored
+// ─────────────────────────────────────────────
+describe('handleStripeWebhook — invoice.payment_failed', () => {
+  it('marks Past_Due and emails the business on the FIRST failed attempt', async () => {
+    mockConstructEvent.mockReturnValue({
+      id: 'evt_fail1',
+      type: 'invoice.payment_failed',
+      data: { object: { subscription: 'sub_123', attempt_count: 1, amount_due: 92000 } },
+    });
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ event_id: 'evt_fail1' }], rowCount: 1 })          // claim
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })                                    // UPDATE -> Past_Due
+      .mockResolvedValueOnce({ rows: [{ name: 'Cafe One', email: 'owner@cafe.com' }] });   // email lookup
+
+    await handleStripeWebhook(Buffer.from('{}'), 'sig');
+
+    const pastDue = mockQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes("status = 'Past_Due'"),
+    );
+    expect(pastDue).toBeDefined();
+    expect(mockSendPaymentFailedEmail).toHaveBeenCalledWith('owner@cafe.com', 'Cafe One', 920);
+  });
+
+  it('does NOT re-email on later retry attempts (banner persists in-app)', async () => {
+    mockConstructEvent.mockReturnValue({
+      id: 'evt_fail3',
+      type: 'invoice.payment_failed',
+      data: { object: { subscription: 'sub_123', attempt_count: 3, amount_due: 92000 } },
+    });
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ event_id: 'evt_fail3' }], rowCount: 1 })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 });
+
+    await handleStripeWebhook(Buffer.from('{}'), 'sig');
+
+    expect(mockSendPaymentFailedEmail).not.toHaveBeenCalled();
+  });
+
+  it('ignores failed SETTLEMENT invoices — the change was rolled back, the campaign payment is fine', async () => {
+    mockConstructEvent.mockReturnValue({
+      id: 'evt_settle_fail',
+      type: 'invoice.payment_failed',
+      data: { object: { subscription: 'sub_123', attempt_count: 1, metadata: { winnbell_kind: 'settlement' } } },
+    });
+    mockQuery.mockResolvedValueOnce({ rows: [{ event_id: 'evt_settle_fail' }], rowCount: 1 }); // claim only
+
+    await handleStripeWebhook(Buffer.from('{}'), 'sig');
+
+    const pastDue = mockQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes("status = 'Past_Due'"),
+    );
+    expect(pastDue).toBeUndefined();
+    expect(mockSendPaymentFailedEmail).not.toHaveBeenCalled();
   });
 });

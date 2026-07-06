@@ -425,6 +425,10 @@ export const addLocation = async (req: AuthRequest, res: Response): Promise<void
       res.status(404).json({ message: 'Business not found' });
       return;
     }
+    if (error instanceof Error && error.message === 'PAYMENT_ISSUE') {
+      res.status(402).json({ message: 'Please update your payment method before changing locations.' });
+      return;
+    }
     if (error instanceof Error && error.message === 'CHARGE_FAILED') {
       res.status(402).json({ message: 'We could not charge your card for the added location, so it was not added. Please try again.' });
       return;
@@ -511,6 +515,10 @@ export const deleteLocation = async (req: AuthRequest, res: Response): Promise<v
   } catch (error: unknown) {
     if (error instanceof Error && error.message === 'UNAUTHORIZED_OR_INVALID_LOCATION') {
       res.status(403).json({ message: 'Forbidden' });
+      return;
+    }
+    if (error instanceof Error && error.message === 'PAYMENT_ISSUE') {
+      res.status(402).json({ message: 'Please update your payment method before changing locations.' });
       return;
     }
     if (error instanceof Error && error.message.startsWith('REFUND_INCOMPLETE')) {

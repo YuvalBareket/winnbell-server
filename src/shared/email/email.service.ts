@@ -126,6 +126,94 @@ export const sendSubscriptionConfirmationEmail = async (
   console.log(`[Email] Subscription confirmation sent to ${toEmail}`);
 };
 
+// ─── Payment Failed ───────────────────────────────────────────────────────────
+// Sent on the FIRST failed attempt of a subscription invoice (Stripe retries follow).
+// The business has until the end of the month to fix the card and stay in the next
+// campaign - the charge on the 24th pays for the campaign opening on the 1st.
+
+export const sendPaymentFailedEmail = async (
+  toEmail: string,
+  businessName: string,
+  amountDollars: number,
+): Promise<void> => {
+  if (!process.env.SMTP_HOST) {
+    console.warn('[Email] SMTP_HOST not configured — skipping payment failed email');
+    return;
+  }
+
+  const subject = `Action needed: payment could not be processed — ${businessName}`;
+  const manageUrl = `${process.env.FRONTEND_URL ?? 'https://winnbell.com'}/subscription/manage`;
+
+  const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+</head>
+<body style="margin:0;padding:0;background:#f8fafc;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;">
+  <table width="100%" cellpadding="0" cellspacing="0" style="background:#f8fafc;padding:40px 0;">
+    <tr>
+      <td align="center">
+        <table width="600" cellpadding="0" cellspacing="0" style="max-width:600px;width:100%;">
+
+          <!-- Header -->
+          <tr>
+            <td style="background:linear-gradient(135deg,#f59e0b 0%,#d97706 100%);border-radius:12px 12px 0 0;padding:36px 40px;text-align:center;">
+              <p style="margin:0;font-size:28px;font-family:'Georgia',serif;color:white;letter-spacing:-0.5px;">Winnbell</p>
+              <p style="margin:8px 0 0;color:rgba(255,255,255,0.85);font-size:14px;">Payment update needed</p>
+            </td>
+          </tr>
+
+          <!-- Body -->
+          <tr>
+            <td style="background:#ffffff;padding:36px 40px;">
+              <p style="margin:0 0 8px;font-size:22px;font-weight:700;color:#1e293b;">
+                We could not process your payment
+              </p>
+              <p style="margin:0 0 20px;color:#64748b;font-size:15px;line-height:1.6;">
+                The charge of <strong style="color:#1e293b;">$${amountDollars.toFixed(2)}</strong> for ${businessName}'s next campaign did not go through.
+                We will retry automatically over the next few days, but the fastest fix is updating your payment method.
+              </p>
+              <p style="margin:0 0 28px;color:#64748b;font-size:15px;line-height:1.6;">
+                Update your card before the end of the month and your business stays in the next campaign without missing a day.
+              </p>
+
+              <table cellpadding="0" cellspacing="0">
+                <tr>
+                  <td style="background:#195de6;border-radius:8px;padding:12px 24px;">
+                    <a href="${manageUrl}"
+                       style="color:white;text-decoration:none;font-weight:700;font-size:14px;">
+                      Update payment method →
+                    </a>
+                  </td>
+                </tr>
+              </table>
+            </td>
+          </tr>
+
+          <!-- Footer -->
+          <tr>
+            <td style="background:#f8fafc;border-radius:0 0 12px 12px;padding:24px 40px;text-align:center;border-top:1px solid #e2e8f0;">
+              <p style="margin:0;color:#94a3b8;font-size:12px;line-height:1.6;">
+                Winnbell · Campaign marketing for local businesses<br/>
+                Questions? Reply to this email or contact us at <a href="mailto:support@winnbell.com" style="color:#195de6;">support@winnbell.com</a>
+              </p>
+            </td>
+          </tr>
+
+        </table>
+      </td>
+    </tr>
+  </table>
+</body>
+</html>
+  `.trim();
+
+  await transporter.sendMail({ from: FROM, to: toEmail, subject, html });
+  console.log(`[Email] Payment failed notice sent to ${toEmail}`);
+};
+
 // ─── Founding Partner: Final Included Campaign ────────────────────────────────
 // Sent when a campaign opens and it is the LAST one covered by the founding year.
 // The subscribe-by date is the end of the current campaign: starting a regular plan

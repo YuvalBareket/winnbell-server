@@ -13,6 +13,7 @@ import {
   updateSubscriptionPlan,
   getSubscriptionInvoices,
   setSkipNextCampaign,
+  createUpdatePaymentMethodSession,
 } from './stripe.service.js';
 
 // GET /business/subscription/founding-availability  (public — no auth)
@@ -145,6 +146,10 @@ export const updatePlan = async (req: Request, res: Response) => {
     res.json({ success: true });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : '';
+    if (msg === 'PAYMENT_ISSUE') {
+      res.status(402).json({ error: 'Please update your payment method before changing your plan.' });
+      return;
+    }
     if (msg === 'CHARGE_FAILED') {
       res.status(402).json({ error: 'We could not charge your card for the plan difference, so nothing was changed. Please try again.' });
       return;
@@ -195,6 +200,29 @@ export const getInvoices = async (req: Request, res: Response) => {
   } catch (err: unknown) {
     console.error('[stripe.getInvoices]', err);
     res.status(500).json({ error: 'Failed to retrieve invoices.' });
+  }
+};
+
+// POST /business/subscription/update-payment-method
+// Opens a Stripe setup session on the existing customer to save a new card. On completion
+// the card becomes the default and outstanding invoices are retried with it immediately.
+export const updatePaymentMethod = async (req: Request, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const result = await createUpdatePaymentMethodSession(userId);
+    res.json(result);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : '';
+    if (msg === 'SUBSCRIPTION_CANCELLED') {
+      res.status(409).json({ error: 'Your subscription has ended. Start a new plan instead.' });
+      return;
+    }
+    if (msg === 'No billing account found') {
+      res.status(404).json({ error: 'No billing account found.' });
+      return;
+    }
+    console.error('[stripe.updatePaymentMethod]', err);
+    res.status(500).json({ error: 'Could not open the payment update page. Please try again.' });
   }
 };
 

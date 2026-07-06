@@ -1,7 +1,7 @@
 import Stripe from 'stripe';
 import { Pool } from 'pg';
 import { getPool } from '../../shared/db/db.js';
-import { sendSubscriptionConfirmationEmail } from '../../shared/email/email.service.js';
+import { sendSubscriptionConfirmationEmail, sendPaymentFailedEmail } from '../../shared/email/email.service.js';
 import { getPlatformSettings, publicCache, invalidatePublicBusinessData } from '../../shared/cache/cache.js';
 import { nextCampaignOpensNy, lastChargeAtNy, CHARGE_DAY_OF_MONTH } from '../../shared/dates.js';
 
@@ -104,19 +104,28 @@ export async function isChargedNotOpenedWindow(pool: Pool): Promise<boolean> {
 // subscription so renewal webhooks (payment_succeeded / payment_failed) map it back to the
 // business. Returns true if paid. Idempotency keys make the webhook + verify-page double
 // call safe: Stripe returns the same invoice instead of charging twice.
+//
+// `kind` is stamped on the invoice metadata and drives the failure semantics:
+//  - 'signup_charge' (voidOnFailure=false): the invoice stays open and Stripe retries it;
+//    invoice.payment_succeeded later flips the business Active (recovery path).
+//  - 'settlement' (voidOnFailure=true): a failed plan/location change is aborted entirely,
+//    so the invoice is VOIDED - no retries, and invoice.payment_failed ignores it (the
+//    business's campaign payment is fine; only the change was rejected).
 async function chargeNow(
   customerId: string,
   subscriptionId: string,
   amountDollars: number,
   description: string,
   idempotencyTag: string,
+  kind: 'signup_charge' | 'settlement',
 ): Promise<boolean> {
+  const voidOnFailure = kind === 'settlement';
   await stripe.invoiceItems.create(
     { customer: customerId, amount: Math.round(amountDollars * 100), currency: 'usd', description },
     { idempotencyKey: `winnbell_item_${idempotencyTag}` },
   );
   const draft = await stripe.invoices.create(
-    { customer: customerId, subscription: subscriptionId, description, auto_advance: true },
+    { customer: customerId, subscription: subscriptionId, description, auto_advance: !voidOnFailure, metadata: { winnbell_kind: kind } },
     { idempotencyKey: `winnbell_inv_${idempotencyTag}` },
   );
   if (!draft.id) throw new Error('Stripe did not return an invoice id');
@@ -132,9 +141,14 @@ async function chargeNow(
     } catch (err: unknown) {
       const code = (err as { code?: string })?.code;
       if (code === 'invoice_already_paid') return true;
-      // Card declined: leave the invoice open — auto_advance lets Stripe retry per its
-      // dunning schedule, and invoice.payment_succeeded flips the business Active later.
       console.error(`[Stripe] immediate charge not paid (${description}):`, err instanceof Error ? err.message : err);
+      if (voidOnFailure) {
+        try {
+          await stripe.invoices.voidInvoice(draft.id);
+        } catch (voidErr: unknown) {
+          console.error(`[Stripe] failed to void settlement invoice ${draft.id}:`, voidErr instanceof Error ? voidErr.message : voidErr);
+        }
+      }
       return false;
     }
   }
@@ -342,6 +356,13 @@ export const verifyAndActivateSession = async (sessionId: string, userId: number
     return;
   }
 
+  // ── Update payment method branch (setup mode with an existing customer) ─────
+  if (session.mode === 'setup' && session.metadata?.purpose === 'update_payment_method') {
+    if (session.status !== 'complete') throw new Error('Setup not completed');
+    await handleUpdatePaymentMethodSession(pool, session);
+    return;
+  }
+
   // ── Recurring subscription branch (setup mode → server-created sub) ─────────
   if (session.mode === 'setup') {
     if (session.status !== 'complete') throw new Error('Setup not completed');
@@ -351,6 +372,109 @@ export const verifyAndActivateSession = async (sessionId: string, userId: number
 
   throw new Error('Unrecognized checkout session');
 };
+
+// ─── Update Payment Method ────────────────────────────────────────────────────
+// Self-serve card fix: a setup-mode Checkout on the EXISTING customer. On completion the
+// new card becomes the default everywhere and any outstanding invoices are retried with
+// it immediately — recovering a Past_Due/Incomplete business on the spot.
+
+export const createUpdatePaymentMethodSession = async (userId: number): Promise<{ url: string }> => {
+  const pool = getPool();
+  const result = await pool.query(`
+    SELECT b.id AS business_id, s.stripe_customer_id, s.status
+    FROM business b
+    JOIN subscription s ON s.business_id = b.id
+    WHERE b.user_id = $1
+  `, [userId]);
+  const sub = result.rows[0];
+  if (!sub?.stripe_customer_id) throw new Error('No billing account found');
+  if (sub.status === 'Cancelled') throw new Error('SUBSCRIPTION_CANCELLED');
+
+  const baseUrl = process.env.FRONTEND_URL || 'http://localhost:8081';
+  const meta = { business_id: String(sub.business_id), purpose: 'update_payment_method' };
+  const session = await stripe.checkout.sessions.create({
+    mode: 'setup',
+    payment_method_types: ['card'],
+    customer: sub.stripe_customer_id,
+    metadata: meta,
+    setup_intent_data: { metadata: meta },
+    success_url: `${baseUrl}/subscription/success?session_id={CHECKOUT_SESSION_ID}&purpose=upm`,
+    cancel_url: `${baseUrl}/subscription/manage`,
+  });
+  return { url: session.url as string };
+};
+
+// If a payment just recovered this business (Past_Due/Incomplete -> paid), flip it Active
+// and enroll it into the currently Open campaign it paid for. Shared by the
+// invoice.payment_succeeded webhook and the update-payment-method verify path (dev
+// environments without webhook forwarding still recover instantly).
+async function recoverBusinessAfterPayment(pool: Pool, businessId: number): Promise<void> {
+  const flipped = await pool.query(
+    `UPDATE subscription SET status = 'Active', updated_at = NOW()
+     WHERE business_id = $1 AND status IN ('Past_Due', 'Incomplete')
+     RETURNING business_id`,
+    [businessId],
+  );
+  if ((flipped.rowCount ?? 0) === 0) return;
+  await pool.query(`
+    INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, cap_at_entry, min_transaction_at_entry)
+    SELECT d.id, b.id, COALESCE(s.fee_at_entry, 0), s.entries_per_location, b.min_transaction_amount
+    FROM draw d
+    JOIN subscription s ON s.business_id = $1
+    JOIN business b ON b.id = s.business_id
+    WHERE d.status = 'Open'
+      AND s.current_period_end >= NOW()
+    ON CONFLICT (draw_id, business_id) DO NOTHING
+  `, [businessId]);
+  invalidatePublicBusinessData();
+  console.log(`[Stripe] Business ${businessId} recovered after payment method update`);
+}
+
+// Called by BOTH the webhook and the success-page verify; every step is idempotent.
+async function handleUpdatePaymentMethodSession(pool: Pool, session: Stripe.Checkout.Session): Promise<void> {
+  const businessId = Number(session.metadata?.business_id);
+  if (!businessId) throw new Error('Update-payment session missing business_id');
+  const customerId = session.customer as string;
+
+  const setupIntent = await stripe.setupIntents.retrieve(session.setup_intent as string);
+  const paymentMethodId = (setupIntent.payment_method as string | null) ?? null;
+  if (!paymentMethodId) throw new Error('Update-payment session has no payment method');
+
+  await stripe.customers.update(customerId, {
+    invoice_settings: { default_payment_method: paymentMethodId },
+  });
+
+  const subRow = await pool.query(
+    `SELECT stripe_subscription_id FROM subscription WHERE business_id = $1`,
+    [businessId],
+  );
+  const subscriptionId: string | null = subRow.rows[0]?.stripe_subscription_id ?? null;
+  let anyPaid = false;
+  if (subscriptionId) {
+    try {
+      await stripe.subscriptions.update(subscriptionId, { default_payment_method: paymentMethodId });
+    } catch (err: unknown) {
+      console.error('[Stripe] could not set subscription default payment method (non-fatal):', err instanceof Error ? err.message : err);
+    }
+    // Retry every outstanding invoice with the new card right now.
+    const open = await stripe.invoices.list({ subscription: subscriptionId, status: 'open', limit: 10 });
+    for (const inv of open.data) {
+      if (!inv.id) continue;
+      try {
+        const paid = await stripe.invoices.pay(inv.id);
+        if (paid.status === 'paid') anyPaid = true;
+      } catch (err: unknown) {
+        const code = (err as { code?: string })?.code;
+        if (code === 'invoice_already_paid') { anyPaid = true; continue; }
+        console.error(`[Stripe] retry of invoice ${inv.id} with new card failed:`, err instanceof Error ? err.message : err);
+      }
+    }
+  }
+  if (anyPaid) {
+    await recoverBusinessAfterPayment(pool, businessId);
+  }
+  console.log(`[Stripe] Business ${businessId} updated its payment method${anyPaid ? ' and settled outstanding invoices' : ''}`);
+}
 
 // ─── Create Subscription From a Completed Setup Session ───────────────────────
 // After a setup-mode Checkout completes (card saved, no charge), create the
@@ -430,6 +554,7 @@ async function createSubscriptionForSetupSession(pool: Pool, session: Stripe.Che
       monthlyFee,
       'Payment for the upcoming campaign',
       session.id,
+      'signup_charge',
     );
     if (!paid) initialStatus = 'Incomplete';
   }
@@ -498,6 +623,12 @@ async function processStripeEvent(event: Stripe.Event, pool: Pool): Promise<void
           break;
         }
 
+        // ── Update payment method (setup mode on an existing customer) ────────
+        if (session.mode === 'setup' && session.metadata?.purpose === 'update_payment_method') {
+          await handleUpdatePaymentMethodSession(pool, session);
+          break;
+        }
+
         // ── Recurring subscription (created from the setup-mode session) ──────
         if (session.mode === 'setup') {
           await createSubscriptionForSetupSession(pool, session);
@@ -563,12 +694,38 @@ async function processStripeEvent(event: Stripe.Event, pool: Pool): Promise<void
         const invoice = event.data.object as Stripe.Invoice;
         const subscriptionId = getInvoiceSubscriptionId(invoice);
         if (!subscriptionId) break;
+        // Settlement invoices (plan/location change differences) are voided when their
+        // charge fails and the change is rolled back — the business's campaign payment
+        // is untouched, so this failure must NOT mark them Past_Due.
+        if (invoice.metadata?.winnbell_kind === 'settlement') break;
 
         await pool.query(
           `UPDATE subscription SET status = 'Past_Due', updated_at = NOW() WHERE stripe_subscription_id = $1`,
           [subscriptionId],
         );
         invalidatePublicBusinessData();
+
+        // Tell the business on the FIRST failed attempt (Stripe keeps retrying on its
+        // own schedule; the in-app banner persists either way). Non-fatal: a mail hiccup
+        // must not make Stripe redeliver this event.
+        const attemptCount = (invoice as unknown as { attempt_count?: number }).attempt_count ?? 1;
+        if (attemptCount <= 1) {
+          try {
+            const biz = await pool.query(
+              `SELECT b.name, u.email
+               FROM subscription s
+               JOIN business b ON b.id = s.business_id
+               JOIN "user" u ON u.id = b.user_id
+               WHERE s.stripe_subscription_id = $1`,
+              [subscriptionId],
+            );
+            if (biz.rows[0]?.email) {
+              await sendPaymentFailedEmail(biz.rows[0].email, biz.rows[0].name, invoice.amount_due / 100);
+            }
+          } catch (mailErr: unknown) {
+            console.error('[Stripe] payment-failed email error (non-fatal):', mailErr instanceof Error ? mailErr.message : mailErr);
+          }
+        }
       } catch (err: unknown) {
         console.error('[Stripe] ERROR in invoice.payment_failed:', err instanceof Error ? err.message : err);
         throw err;
@@ -581,20 +738,30 @@ async function processStripeEvent(event: Stripe.Event, pool: Pool): Promise<void
         const invoice = event.data.object as Stripe.Invoice;
         const subscriptionId = getInvoiceSubscriptionId(invoice);
         if (!subscriptionId) break; // one-time / founding payments have no subscription — ignore
+        // Settlement invoices only exist for businesses that already paid their campaign
+        // (change guards require it) — nothing to flip or enroll.
+        if (invoice.metadata?.winnbell_kind === 'settlement') break;
 
-        // Symmetric counterpart to invoice.payment_failed. A paid invoice means the
-        // subscription is current, so clear a stale Past_Due immediately — otherwise a
-        // business that just recovered could be skipped by open-time draw enrollment if
-        // the authoritative customer.subscription.updated event is delayed or arrives
-        // out of order (Stripe does not guarantee ordering between the two).
+        // A paid invoice means the subscription is current. If the business was in a
+        // payment-failed state (Past_Due from a failed 24th renewal, Incomplete from a
+        // failed signup charge), this payment RECOVERS it: flip Active AND enroll it into
+        // the currently Open campaign - unpaid businesses are no longer enrolled at open,
+        // and this payment is precisely for the campaign that is running. ON CONFLICT
+        // makes it a no-op for businesses that were enrolled all along.
         //
-        // STATUS ONLY — we deliberately do NOT touch current_period_end here. This event
-        // also fires for the proration invoices we create in updateSubscriptionPlan /
-        // syncSubscriptionQuantity, whose line period is a short proration window; writing
-        // it would wrongly shorten the access window. Period sync stays owned by
+        // STATUS ONLY on the subscription row - current_period_end stays owned by
         // customer.subscription.updated. The `status <> 'Cancelled'` guard prevents
         // resurrecting a cancelled subscription, and a missing row (event ordering vs
         // checkout) is a safe no-op.
+        const prior = await pool.query(
+          `SELECT business_id FROM subscription WHERE stripe_subscription_id = $1`,
+          [subscriptionId],
+        );
+        if (prior.rows[0]) {
+          // Recovery path: flips Past_Due/Incomplete to Active AND enrolls into the
+          // running campaign (a no-op for businesses that were fine all along).
+          await recoverBusinessAfterPayment(pool, prior.rows[0].business_id);
+        }
         await pool.query(
           `UPDATE subscription SET status = 'Active', updated_at = NOW()
            WHERE stripe_subscription_id = $1 AND status <> 'Cancelled'`,
@@ -990,6 +1157,7 @@ export const syncSubscriptionQuantity = async (userId: number, newNextCampaignCo
       s.fee_at_entry,
       s.pending_entries_per_location,
       s.pending_fee_at_entry,
+      s.status,
       b.id AS business_id
     FROM business b
     JOIN subscription s ON s.business_id = b.id
@@ -999,6 +1167,9 @@ export const syncSubscriptionQuantity = async (userId: number, newNextCampaignCo
   const sub = result.rows[0];
   if (!sub) return; // no subscription yet — nothing to sync
   if (!sub.stripe_subscription_id) return; // founding member, no Stripe sub — skip
+  // A broken payment must be fixed before any billing change — otherwise settlements
+  // and baselines run against money that was never collected.
+  if (['Past_Due', 'Incomplete'].includes(sub.status)) throw new Error('PAYMENT_ISSUE');
 
   // The next campaign's tier: a staged plan change (or founding hand-off) takes precedence
   // over the live tier — it is what Stripe bills and what the next campaign runs with.
@@ -1039,7 +1210,7 @@ export const syncSubscriptionQuantity = async (userId: number, newNextCampaignCo
         ? `Added a location for the upcoming campaign (${quantity} location${quantity !== 1 ? 's' : ''} total)`
         : `Removed a location for the upcoming campaign (${quantity} location${quantity !== 1 ? 's' : ''} total)`;
       if (deltaDollars > 0) {
-        const paid = await chargeNow(sub.stripe_customer_id, sub.stripe_subscription_id, deltaDollars, label, `${sub.stripe_subscription_id}_${Date.now()}`);
+        const paid = await chargeNow(sub.stripe_customer_id, sub.stripe_subscription_id, deltaDollars, label, `${sub.stripe_subscription_id}_${Date.now()}`, 'settlement');
         if (!paid) throw new Error('CHARGE_FAILED');
       } else {
         await refundUpcomingCampaignDelta(sub.stripe_subscription_id, -deltaDollars, label);
@@ -1116,6 +1287,9 @@ export const updateSubscriptionPlan = async (userId: number, newEntriesPerLocati
   if (!sub) throw new Error('No subscription found');
   if (sub.status === 'Cancelled') throw new Error('Cannot update a cancelled subscription');
   if (!sub.stripe_subscription_id) throw new Error('No Stripe subscription on record');
+  // A broken payment must be fixed before any billing change — otherwise settlements
+  // and baselines run against money that was never collected.
+  if (['Past_Due', 'Incomplete'].includes(sub.status)) throw new Error('PAYMENT_ISSUE');
 
   // Baseline = what the next campaign is currently set to run with (a staged change wins
   // over the live tier). Changes never touch the RUNNING campaign; they retarget the next
@@ -1151,7 +1325,7 @@ export const updateSubscriptionPlan = async (userId: number, newEntriesPerLocati
       const direction = newEntriesPerLocation > baselineTier ? 'upgraded' : 'downgraded';
       const label = `Plan ${direction} for the upcoming campaign: ${baselineTier.toLocaleString()} to ${newEntriesPerLocation.toLocaleString()} entries per location`;
       if (deltaDollars > 0) {
-        const paid = await chargeNow(sub.stripe_customer_id, sub.stripe_subscription_id, deltaDollars, label, `${sub.stripe_subscription_id}_${Date.now()}`);
+        const paid = await chargeNow(sub.stripe_customer_id, sub.stripe_subscription_id, deltaDollars, label, `${sub.stripe_subscription_id}_${Date.now()}`, 'settlement');
         if (!paid) throw new Error('CHARGE_FAILED');
       } else {
         await refundUpcomingCampaignDelta(sub.stripe_subscription_id, -deltaDollars, label);

@@ -361,10 +361,14 @@ describe('openDrawService — enrollment', () => {
     expect(enroll).toBeDefined();
     const sql: string = enroll![0];
     expect(sql).toMatch(/JOIN subscription/);
-    // Paid businesses + Past_Due during the retry grace window
-    expect(sql).toMatch(/'Active',\s*'Trialing',\s*'Past_Due'/);
-    // Founding members (no stripe sub) join every campaign that OPENS inside their year
-    expect(sql).toMatch(/stripe_subscription_id IS NOT NULL/);
+    // STRICTLY PAID: Active/Trialing only. No Past_Due grace — payment had the whole
+    // 24th-to-open buffer week to recover; a late payment recovers + enrolls via the
+    // invoice.payment_succeeded webhook instead.
+    expect(sql).toMatch(/'Active',\s*'Trialing'/);
+    expect(sql).not.toMatch(/Past_Due/);
+    // Unified period check: founders join every campaign that opens inside their year;
+    // for regular subs this also excludes a cancelled-on-the-24th sub whose deleted
+    // webhook is late (stale Active status but expired period).
     expect(sql).toMatch(/current_period_end >= NOW\(\)/);
     // Businesses that opted out of the paid campaign are skipped (flag consumed after)
     expect(sql).toMatch(/skip_next_campaign = FALSE/);
@@ -405,8 +409,8 @@ describe('openDrawService — enrollment', () => {
 // ─────────────────────────────────────────────
 // closeDrawService — draw-time paid-only safety net
 // ─────────────────────────────────────────────
-describe('closeDrawService — draw-time paid check', () => {
-  test('drops businesses whose payment never cleared (Past_Due/Incomplete) when the draw closes', async () => {
+describe('closeDrawService — paid entries are never ejected at close', () => {
+  test('closing a draw removes NO draw entries (enrollment is strictly paid at open)', async () => {
     setupClientQueries(
       { rows: [] },                            // BEGIN
       { rows: [] },                            // pg_advisory_xact_lock
@@ -414,7 +418,6 @@ describe('closeDrawService — draw-time paid check', () => {
       { rows: [{ id: 6 }] },                   // SELECT next Upcoming draw FOR UPDATE (hand-off target)
       { rows: [] },                            // UPDATE -> Closed
       { rows: [] },                            // logDrawAudit (closed)
-      { rows: [], rowCount: 1 },               // DELETE draw_entry (unpaid)
       { rows: [] },                            // UPDATE business pending thresholds
       { rows: [] },                            // openDrawInTx: UPDATE draw -> Open
       { rows: [] },                            // openDrawInTx: apply staged plan changes
@@ -425,12 +428,13 @@ describe('closeDrawService — draw-time paid check', () => {
 
     await closeDrawService(5);
 
+    // Every business in draw_entry PAID for the campaign (strict open-time enrollment).
+    // A charge that fails later in the month is for the NEXT campaign and must never
+    // eject a business from the one it already paid for.
     const del = mockClientQuery.mock.calls.find(
       ([sql]: [string]) => typeof sql === 'string' && sql.includes('DELETE FROM draw_entry'),
     );
-    expect(del).toBeDefined();
-    expect(del![0]).toMatch(/'Past_Due',\s*'Incomplete'/);
-    expect(del![1]).toEqual([5]);
+    expect(del).toBeUndefined();
 
     // Hand-off: closing the current draw opens the next Upcoming one in the same transaction.
     const openNext = mockClientQuery.mock.calls.find(

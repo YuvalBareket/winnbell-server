@@ -293,15 +293,18 @@ export const getDrawBusinessesService = async (
 // already verified the draw is Upcoming and that no other draw is Open (the close hand-off
 // guarantees this by closing the current Open draw first, in the same transaction).
 //
-// Enrollment happens HERE — the single point a business joins a draw. Open runs from the 1st
-// (after month-end charges), so only paid businesses get in:
-//  - regular subs (stripe_subscription_id NOT NULL): Active/Trialing, plus Past_Due during
-//    Stripe's retry grace (the draw-time check at close removes any still-unpaid).
-//  - founding members (no stripe sub): enrolled in EVERY campaign that OPENS before their
-//    prepaid year ends (current_period_end >= NOW() at open time). A campaign that opens
-//    inside the year is fully included even if it draws after the expiry date — this is what
-//    makes "12 monthly campaigns" true for any purchase day. Expiry is automatic: the first
-//    open after current_period_end simply skips them.
+// Enrollment happens HERE — the single point a business joins a draw. Open runs from the 1st,
+// a full week after the charge on the 24th, so payment had Stripe's whole retry window to
+// clear. STRICTLY PAID businesses get in:
+//  - status Active/Trialing only. Past_Due/Incomplete are NOT enrolled (no grace): their
+//    charge failed and did not recover in the buffer week. The moment a late payment lands,
+//    invoice.payment_succeeded recovers them - flips Active and enrolls them into this
+//    campaign mid-flight (they paid for it).
+//  - current_period_end >= NOW() for EVERYONE: founding members are in every campaign that
+//    opens inside their prepaid year (what makes "12 monthly campaigns" true for any
+//    purchase day), and for regular subs this closes the timing hole where a subscription
+//    cancelled on the 24th still shows a stale Active status because Stripe's deleted
+//    webhook has not landed yet - its period ended on the 24th, so it is excluded anyway.
 const openDrawInTx = async (client: import('pg').PoolClient, drawId: number): Promise<void> => {
   await client.query(`UPDATE draw SET status = 'Open', opened_at = NOW() WHERE id = $1`, [drawId]);
   // Apply staged plan changes (founding-to-regular hand-off) at the campaign boundary,
@@ -352,10 +355,10 @@ const openDrawInTx = async (client: import('pg').PoolClient, drawId: number): Pr
     INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, cap_at_entry, min_transaction_at_entry)
     SELECT d.id, b.id, COALESCE(s.fee_at_entry, 0), s.entries_per_location, b.min_transaction_amount
     FROM draw d
-    JOIN subscription s ON s.status IN ('Active', 'Trialing', 'Past_Due')
+    JOIN subscription s ON s.status IN ('Active', 'Trialing')
     JOIN business b ON b.id = s.business_id
     WHERE d.id = $1
-      AND (s.stripe_subscription_id IS NOT NULL OR s.current_period_end >= NOW())
+      AND s.current_period_end >= NOW()
       AND s.skip_next_campaign = FALSE
     ON CONFLICT (draw_id, business_id) DO NOTHING
   `, [drawId]);
@@ -469,16 +472,11 @@ export const closeDrawService = async (drawId: number): Promise<void> => {
     await client.query(`UPDATE draw SET status = 'Closed', closed_at = NOW() WHERE id = $1`, [drawId]);
     await logDrawAudit(client, drawId, 'closed');
 
-    // Draw-time safety net: drop any business whose payment never cleared
-    // (Past_Due/Incomplete left over from the open-time grace window) so an
-    // unpaid business can never be in the final draw. Active businesses — and
-    // those who cancelled mid-month but were paid when the draw opened — stay.
-    await client.query(`
-      DELETE FROM draw_entry de
-      USING subscription s
-      WHERE de.draw_id = $1 AND s.business_id = de.business_id
-        AND s.status IN ('Past_Due', 'Incomplete')
-    `, [drawId]);
+    // NOTE: the old draw-time "drop unpaid businesses" deletion is gone. Enrollment at
+    // open is strictly paid-only now (no Past_Due grace), so draw_entry only ever holds
+    // businesses that paid for the campaign — including those whose subscription ended
+    // or failed LATER in the month (e.g. a failed charge on the 24th for the NEXT
+    // campaign must not eject them from the one they already paid for).
 
     // Apply any pending threshold changes that businesses set during the active campaign
     await client.query(`
