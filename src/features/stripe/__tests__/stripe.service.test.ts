@@ -21,6 +21,7 @@ const mockSessionsRetrieve = jest.fn();
 const mockSubscriptionsUpdate = jest.fn();
 const mockSubscriptionsCreate = jest.fn();
 const mockSubscriptionsRetrieve = jest.fn();
+const mockSubscriptionsCancel = jest.fn();
 const mockRefundsCreate = jest.fn();
 const mockSetupIntentsRetrieve = jest.fn();
 const mockCustomersUpdate = jest.fn();
@@ -36,7 +37,7 @@ jest.mock('stripe', () => {
     checkout: {
       sessions: { create: mockSessionsCreate, retrieve: mockSessionsRetrieve },
     },
-    subscriptions: { update: mockSubscriptionsUpdate, create: mockSubscriptionsCreate, retrieve: mockSubscriptionsRetrieve },
+    subscriptions: { update: mockSubscriptionsUpdate, create: mockSubscriptionsCreate, retrieve: mockSubscriptionsRetrieve, cancel: mockSubscriptionsCancel },
     refunds: { create: mockRefundsCreate },
     setupIntents: { retrieve: mockSetupIntentsRetrieve },
     customers: { update: mockCustomersUpdate },
@@ -216,7 +217,7 @@ describe('cancelSubscription — founding refund', () => {
 
     mockQuery
       .mockResolvedValueOnce({ rows: [FOUNDING_ROW] })                                              // founding check
-      .mockResolvedValueOnce({ rows: [{ created_at: createdAt, current_period_end: periodEnd }] }); // membership period
+      .mockResolvedValueOnce({ rows: [{ paid_at: createdAt, current_period_end: periodEnd }] }); // membership period
     // Destructive writes (ledger + deletes + cancel) now run in a client transaction.
     mockClientQuery.mockImplementation((sql: string) =>
       Promise.resolve(
@@ -244,7 +245,7 @@ describe('cancelSubscription — founding refund', () => {
 
     mockQuery
       .mockResolvedValueOnce({ rows: [FOUNDING_ROW] })
-      .mockResolvedValueOnce({ rows: [{ created_at: new RealDate('2026-01-01T00:00:00.000Z'), current_period_end: new RealDate('2027-01-01T00:00:00.000Z') }] });
+      .mockResolvedValueOnce({ rows: [{ paid_at: new RealDate('2026-01-01T00:00:00.000Z'), current_period_end: new RealDate('2027-01-01T00:00:00.000Z') }] });
 
     await expect(cancelSubscription(7)).rejects.toThrow('REFUND_FAILED');
 
@@ -257,7 +258,7 @@ describe('cancelSubscription — founding refund', () => {
     mockDateNow(new RealDate('2026-06-01T00:00:00.000Z'));
     mockQuery
       .mockResolvedValueOnce({ rows: [FOUNDING_ROW] })
-      .mockResolvedValueOnce({ rows: [{ created_at: new RealDate('2025-01-01T00:00:00.000Z'), current_period_end: new RealDate('2026-01-01T00:00:00.000Z') }] });
+      .mockResolvedValueOnce({ rows: [{ paid_at: new RealDate('2025-01-01T00:00:00.000Z'), current_period_end: new RealDate('2026-01-01T00:00:00.000Z') }] });
     // No refund, but the teardown still runs in a transaction; DELETE draw_entry finds none.
     mockClientQuery.mockResolvedValue({ rows: [], rowCount: 0 });
 
@@ -274,7 +275,7 @@ describe('cancelSubscription — founding refund', () => {
     mockRefundsCreate.mockResolvedValue({ id: 're_1' });
     mockQuery
       .mockResolvedValueOnce({ rows: [FOUNDING_ROW] })
-      .mockResolvedValueOnce({ rows: [{ created_at: new RealDate('2026-01-01T00:00:00.000Z'), current_period_end: new RealDate('2027-01-01T00:00:00.000Z') }] });
+      .mockResolvedValueOnce({ rows: [{ paid_at: new RealDate('2026-01-01T00:00:00.000Z'), current_period_end: new RealDate('2027-01-01T00:00:00.000Z') }] });
     mockClientQuery.mockResolvedValue({ rows: [], rowCount: 0 });
 
     await cancelSubscription(7);
@@ -623,6 +624,79 @@ describe('createCheckoutSession — founding transition guard', () => {
 
     await expect(call()).rejects.toThrow(/already has an active subscription/);
     expect(mockSessionsCreate).not.toHaveBeenCalled();
+  });
+});
+
+// ─────────────────────────────────────────────
+// verifyAndActivateSession — founding activation guards (duplicate purchase, live sub)
+// ─────────────────────────────────────────────
+describe('verifyAndActivateSession — founding activation guards', () => {
+  const FOUNDING_SESSION = (id: string, pi: string) => ({
+    id,
+    mode: 'payment',
+    payment_status: 'paid',
+    payment_intent: pi,
+    customer: 'cus_1',
+    metadata: { business_id: '42', founding: 'true' },
+  });
+
+  it('auto-refunds a DUPLICATE founding purchase (seat already held via another session)', async () => {
+    mockSessionsRetrieve.mockResolvedValue(FOUNDING_SESSION('cs_NEW', 'pi_dup'));
+    mockRefundsCreate.mockResolvedValue({ id: 're_dup' });
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 42 }] })                                     // business lookup
+      .mockResolvedValueOnce({ rows: [{ stripe_checkout_session_id: 'cs_OLD' }] })       // guard: seat exists from ANOTHER session
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 });                                 // ledger insert (refunded)
+
+    await verifyAndActivateSession('cs_NEW', 7);
+
+    // Full $1,200 refunded automatically; no seat claim transaction ever starts.
+    expect(mockRefundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_dup' });
+    expect(mockClientQuery).not.toHaveBeenCalled();
+    // Recorded on the append-only ledger as fully refunded.
+    const ledger = mockQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO founding_payment'),
+    );
+    expect(ledger).toBeDefined();
+    expect(ledger![0]).toMatch(/1200\.00,\s*1200\.00/);
+  });
+
+  it('is still idempotent for the SAME session (webhook + verify double call)', async () => {
+    mockSessionsRetrieve.mockResolvedValue(FOUNDING_SESSION('cs_SAME', 'pi_same'));
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 42 }] })                                     // business lookup
+      .mockResolvedValueOnce({ rows: [{ stripe_checkout_session_id: 'cs_SAME' }] });     // guard: THIS session already activated
+
+    await verifyAndActivateSession('cs_SAME', 7);
+
+    expect(mockRefundsCreate).not.toHaveBeenCalled();
+    expect(mockClientQuery).not.toHaveBeenCalled();
+  });
+
+  it('cancels a live Stripe subscription before founding activation (no orphan billing)', async () => {
+    mockSessionsRetrieve.mockResolvedValue(FOUNDING_SESSION('cs_F', 'pi_F'));
+    mockSubscriptionsCancel.mockResolvedValue({});
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 42 }] })                                     // business lookup
+      .mockResolvedValueOnce({ rows: [] })                                               // guard: no founding rows
+      .mockResolvedValueOnce({ rows: [{ stripe_subscription_id: 'sub_live' }] });        // live regular sub to supersede
+    mockClientQuery.mockImplementation((sql: string) => {
+      if (typeof sql === 'string' && sql.includes('INSERT INTO founding_member')) {
+        return Promise.resolve({ rows: [{ seat_number: 3 }], rowCount: 1 });             // seat claim
+      }
+      return Promise.resolve({ rows: [], rowCount: 1 });
+    });
+
+    await verifyAndActivateSession('cs_F', 7);
+
+    // The recurring subscription is cancelled at Stripe so the founding upsert (which
+    // NULLs stripe_subscription_id) can never orphan a live billing subscription.
+    expect(mockSubscriptionsCancel).toHaveBeenCalledWith('sub_live');
+    // Activation then proceeded normally (seat claimed in the transaction).
+    const claim = mockClientQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO founding_member'),
+    );
+    expect(claim).toBeDefined();
   });
 });
 

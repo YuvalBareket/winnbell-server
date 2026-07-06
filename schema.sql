@@ -186,8 +186,11 @@ CREATE INDEX IF NOT EXISTS idx_subscription_pending_plan
 CREATE TABLE founding_member (
   id                         SERIAL PRIMARY KEY,
   business_id                INTEGER UNIQUE NOT NULL REFERENCES business(id) ON DELETE CASCADE,
-  -- Seat number 1..founding_member_cap; enforced at runtime against platform_settings
-  seat_number                INTEGER NOT NULL CHECK (seat_number >= 1),
+  -- Seat number 1..founding_member_cap; cap enforced at runtime against platform_settings.
+  -- UNIQUE makes the "claim the lowest free seat" insert race-safe: two concurrent
+  -- payments can both see the same seat free, but only one insert commits - the loser's
+  -- transaction fails and the Stripe retry claims the next seat.
+  seat_number                INTEGER NOT NULL UNIQUE CHECK (seat_number >= 1),
   -- Stripe one-time payment tracking (no stripe_subscription_id — it's a single charge)
   stripe_payment_intent_id   TEXT UNIQUE,
   stripe_checkout_session_id TEXT UNIQUE,

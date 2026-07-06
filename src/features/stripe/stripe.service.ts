@@ -786,14 +786,71 @@ async function activateFoundingMember(
   checkoutSessionId: string,
   customerId: string | null = null,
 ): Promise<void> {
-  // Idempotency guard
+  // Idempotency + duplicate-purchase guard. One query answers both questions: was THIS
+  // session already activated (webhook + verify double call), and does this business
+  // already hold a seat from a DIFFERENT session (two checkout tabs both paid)?
   const existing = await pool.query(
-    `SELECT id FROM founding_member WHERE stripe_checkout_session_id = $1`,
-    [checkoutSessionId],
+    `SELECT stripe_checkout_session_id FROM founding_member
+     WHERE business_id = $1 OR stripe_checkout_session_id = $2`,
+    [businessId, checkoutSessionId],
   );
-  if (existing.rows.length > 0) {
+  if (existing.rows.some((r) => r.stripe_checkout_session_id === checkoutSessionId)) {
     console.log(`[Founding] Session ${checkoutSessionId} already activated — skipping`);
     return;
+  }
+  if (existing.rows.length > 0) {
+    // Duplicate purchase: the business already has a founding seat paid through another
+    // session. Auto-refund this second $1,200 in full and record it on the ledger as
+    // refunded. Returning (not throwing) keeps the webhook claim so Stripe stops
+    // redelivering; if the refund itself fails we DO throw so the retry re-attempts it.
+    console.error(`[Founding] Business ${businessId} paid founding twice (session ${checkoutSessionId}) — auto-refunding the duplicate`);
+    try {
+      await stripe.refunds.create({ payment_intent: paymentIntentId });
+    } catch (refundErr: unknown) {
+      const code = (refundErr as { code?: string })?.code;
+      if (code !== 'charge_already_refunded') {
+        console.error(`[Founding] CRITICAL: duplicate-purchase refund failed for business ${businessId}:`, refundErr instanceof Error ? refundErr.message : refundErr);
+        throw refundErr;
+      }
+    }
+    await pool.query(`
+      INSERT INTO founding_payment (business_id, stripe_payment_intent_id, stripe_checkout_session_id, amount, refunded_amount)
+      VALUES ($1, $2, $3, 1200.00, 1200.00)
+      ON CONFLICT (stripe_payment_intent_id) DO NOTHING
+    `, [businessId, paymentIntentId, checkoutSessionId]);
+    return;
+  }
+
+  // A live recurring subscription must not be silently orphaned: the founding upsert
+  // below sets stripe_subscription_id to NULL, and an unlinked Stripe subscription would
+  // keep charging monthly with no record on our side. Founding supersedes it - cancel it
+  // at Stripe first (idempotent: an already-cancelled sub is treated as done).
+  const liveSub = await pool.query(
+    `SELECT stripe_subscription_id FROM subscription
+     WHERE business_id = $1 AND status != 'Cancelled' AND stripe_subscription_id IS NOT NULL`,
+    [businessId],
+  );
+  const liveSubId: string | null = liveSub.rows[0]?.stripe_subscription_id ?? null;
+  if (liveSubId) {
+    console.log(`[Founding] Business ${businessId} has live subscription ${liveSubId} — cancelling it before founding activation`);
+    try {
+      await stripe.subscriptions.cancel(liveSubId);
+    } catch (cancelErr: unknown) {
+      const code = (cancelErr as { code?: string })?.code;
+      const msg = cancelErr instanceof Error ? cancelErr.message : '';
+      if (code !== 'resource_missing' && !/canceled subscription/i.test(msg)) {
+        console.error(`[Founding] CRITICAL: could not cancel subscription ${liveSubId} before founding activation:`, msg);
+        throw cancelErr;
+      }
+    }
+    try {
+      await pool.query(
+        `INSERT INTO subscription_change_log (business_id, description) VALUES ($1, $2)`,
+        [businessId, 'Founding Partner purchase replaced your monthly plan. Monthly billing has stopped.'],
+      );
+    } catch (logErr: unknown) {
+      console.error('[Founding] change-log write failed (non-fatal):', logErr instanceof Error ? logErr.message : logErr);
+    }
   }
 
   const client = await pool.connect();
@@ -899,12 +956,18 @@ async function cancelFoundingMembership(
   businessId: number,
   paymentIntentId: string,
 ): Promise<CancelResult> {
-  // Get membership period to calculate time-based refund
+  // Membership period for the time-based refund. The year STARTS at the founding payment
+  // (founding_member.paid_at) - NOT subscription.created_at, which can be years older when
+  // the business had a regular plan before buying founding (the upsert never resets it)
+  // and would wrongly shrink the refund.
   const subResult = await pool.query(
-    `SELECT created_at, current_period_end FROM subscription WHERE business_id = $1`,
+    `SELECT fm.paid_at, s.current_period_end
+     FROM founding_member fm
+     JOIN subscription s ON s.business_id = fm.business_id
+     WHERE fm.business_id = $1`,
     [businessId],
   );
-  const sub = subResult.rows[0] as { created_at: Date; current_period_end: Date } | undefined;
+  const sub = subResult.rows[0] as { paid_at: Date; current_period_end: Date } | undefined;
 
   // 50% refund of remaining time: $1,200 × (days_remaining / total_days) × 0.5.
   // The refund is issued BEFORE any destructive change — if Stripe rejects it,
@@ -918,7 +981,7 @@ async function cancelFoundingMembership(
   if (sub) {
     const now = new Date();
     const periodEnd = new Date(sub.current_period_end);
-    const periodStart = new Date(sub.created_at);
+    const periodStart = new Date(sub.paid_at);
     const totalMs = periodEnd.getTime() - periodStart.getTime();
     const remainingMs = Math.max(0, periodEnd.getTime() - now.getTime());
     const remainingFraction = totalMs > 0 ? remainingMs / totalMs : 0;
