@@ -191,6 +191,7 @@ export const setupBusiness = async (req: AuthRequest, res: Response): Promise<vo
 
     // Validate each location (phone is now per-location, not per-business).
     const locations: Array<{ name?: string; address?: string; suite?: string; phone?: string; lat?: unknown; lon?: unknown }> = req.body.locations ?? [];
+    if (locations.length === 0) { res.status(400).json({ message: 'At least one location is required.' }); return; }
     for (const loc of locations) {
       const locErr = validateLengths([
         ['Location name', loc.name, 200],

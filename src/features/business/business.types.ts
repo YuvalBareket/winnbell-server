@@ -27,6 +27,10 @@ export interface MyBusinessLocation {
   id: number;
   name: string;
   address: string;
+  latitude: number | null;
+  longitude: number | null;
+  suite: string | null;
+  phone: string | null;
   manager_id: number | null;
   manager_name: string | null;
   is_active: boolean;
@@ -56,7 +60,6 @@ export interface MyBusinessData {
   cancel_at_period_end: boolean | null;
   locations: MyBusinessLocation[];
   website_url?: string | null;
-  phone?: string | null;
 }
 
 export interface UpdateCampaignSettingsInput {
