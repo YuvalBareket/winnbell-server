@@ -203,6 +203,9 @@ describe('handleStripeWebhook — invoice.payment_succeeded', () => {
     expect(enroll).toBeDefined();
     expect(enroll![0]).toMatch(/d\.status = 'Open'/);
     expect(enroll![0]).toMatch(/current_period_end >= NOW\(\)/);
+    // Recovery must respect an opt-out: a business that skipped this campaign is not
+    // re-enrolled just because its late payment cleared.
+    expect(enroll![0]).toMatch(/skip_next_campaign = FALSE/);
     expect(enroll![1]).toEqual([42]);
   });
 
@@ -358,6 +361,27 @@ describe('handleStripeWebhook — invoice.payment_failed', () => {
     await handleStripeWebhook(Buffer.from('{}'), 'sig');
 
     expect(mockSendPaymentFailedEmail).not.toHaveBeenCalled();
+  });
+
+  it('keeps a failed SIGNUP charge as Incomplete (no Past_Due) but still emails the first attempt', async () => {
+    mockConstructEvent.mockReturnValue({
+      id: 'evt_signupfail',
+      type: 'invoice.payment_failed',
+      data: { object: { subscription: 'sub_123', attempt_count: 1, amount_due: 146000, metadata: { winnbell_kind: 'signup_charge' } } },
+    });
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ event_id: 'evt_signupfail' }], rowCount: 1 })         // claim
+      .mockResolvedValueOnce({ rows: [{ name: 'New Cafe', email: 'new@cafe.com' }] });        // email lookup
+
+    await handleStripeWebhook(Buffer.from('{}'), 'sig');
+
+    // Signup failures stay Incomplete (set at activation) — Past_Due is for established subs.
+    const pastDue = mockQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes("status = 'Past_Due'"),
+    );
+    expect(pastDue).toBeUndefined();
+    // But the business is still told to fix its card.
+    expect(mockSendPaymentFailedEmail).toHaveBeenCalledWith('new@cafe.com', 'New Cafe', 1460);
   });
 
   it('ignores failed SETTLEMENT invoices — the change was rolled back, the campaign payment is fine', async () => {

@@ -109,8 +109,8 @@ export const getLocationProfileById = async (req: AuthRequest, res: Response) =>
 };
 
 // Gated variant for the submit / scan flow: returns the location only when it is currently
-// participating (active + subscribed + enrolled in the open draw), else 404. Not a profile view,
-// so it does not record analytics.
+// participating (active location + enrolled in the Open draw via draw_entry), else 404. Not a
+// profile view, so it does not record analytics.
 export const getParticipatingLocationById = async (req: Request, res: Response) => {
   const locationId = Number(req.params.locationId);
   if (isNaN(locationId)) return res.status(400).json({ message: 'Invalid location ID' });
@@ -395,11 +395,10 @@ export const addLocation = async (req: AuthRequest, res: Response): Promise<void
     `, [userId]);
     const stageForNextCampaign = participating.rows.length > 0;
 
-    const result = await addBusinessLocation(userId, { name, address, lat, lon, suite: suite ?? null, phone: phone ?? null }, stageForNextCampaign);
-    locationId = result.locationId;
-
-    // Sync billing to the next campaign's location count (active - scheduled removals +
-    // scheduled adds). Inside the charged window this also settles the difference now.
+    // Billing FIRST, DB insert LAST: the Stripe sync (network, settlements) is the step
+    // that can realistically fail, while the single INSERT almost never does. This order
+    // shrinks the inconsistency window to "insert failed after billing succeeded", which
+    // the compensating re-sync below reverts (charging/refunding symmetrically).
     const countResult = await pool.query(
       `SELECT COUNT(*)::int AS cnt FROM business_location bl
        JOIN business b ON b.id = bl.business_id
@@ -407,20 +406,29 @@ export const addLocation = async (req: AuthRequest, res: Response): Promise<void
          AND ((bl.is_active = TRUE AND bl.deactivate_at_open = FALSE) OR bl.activate_at_open = TRUE)`,
       [userId],
     );
-    const newCount = Number(countResult.rows[0]?.cnt ?? 1);
+    const currentCount = Number(countResult.rows[0]?.cnt ?? 0);
+    const newCount = currentCount + 1;
     await syncSubscriptionQuantity(userId, newCount, 'location_added');
+
+    try {
+      const result = await addBusinessLocation(userId, { name, address, lat, lon, suite: suite ?? null, phone: phone ?? null }, stageForNextCampaign);
+      locationId = result.locationId;
+    } catch (insertErr: unknown) {
+      // Compensate: revert billing to the previous count (refunds any window settlement).
+      try {
+        await syncSubscriptionQuantity(userId, Math.max(1, currentCount), 'location_removed');
+      } catch (revertErr: unknown) {
+        console.error(
+          `[Business] CRITICAL: location insert failed AND the billing revert failed for user ${userId} — ` +
+          `Stripe may bill ${newCount} locations while the DB has ${currentCount}. Reconcile manually.`,
+          revertErr instanceof Error ? revertErr.message : revertErr,
+        );
+      }
+      throw insertErr;
+    }
 
     res.status(201).json({ locationId, stagedForNextCampaign: stageForNextCampaign });
   } catch (error: unknown) {
-    // Rollback: delete the newly created location if Stripe sync failed
-    if (locationId !== null) {
-      try {
-        const pool = getPool();
-        await pool.query(`DELETE FROM business_location WHERE id = $1`, [locationId]);
-      } catch {
-        // Rollback failure — log but don't overwrite the original error
-      }
-    }
     if (error instanceof Error && error.message === 'BUSINESS_NOT_FOUND') {
       res.status(404).json({ message: 'Business not found' });
       return;

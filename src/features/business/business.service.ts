@@ -567,9 +567,11 @@ export const searchParticipatingLocationsService = async (query: string): Promis
 };
 
 // Shared fetch for a location's public profile. When `participatingOnly` is true it restores the
-// strict gating (active location + active subscription + enrolled in the current open draw) used by
-// the submit / scan flow so a receipt can only be started for a live, enrolled location. Without it
-// the profile is returned for ANY location (map popup + draw-history winner link).
+// strict gating (active location + enrolled in the current Open draw via draw_entry) used by the
+// submit / scan flow so a receipt can only be started for a live, participating location. Do NOT
+// re-add a subscription-status filter here: a business that cancelled or lapsed AFTER the campaign
+// opened still owns the campaign it paid for (draw_entry is the paid-participation record). Without
+// the flag the profile is returned for ANY location (map popup + draw-history winner link).
 const fetchLocationProfile = async (
   locationId: number,
   participatingOnly: boolean,

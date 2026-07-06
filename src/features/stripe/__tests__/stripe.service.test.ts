@@ -213,6 +213,11 @@ describe('cancelSubscription — recurring', () => {
 describe('cancelSubscription — founding refund', () => {
   const FOUNDING_ROW = { stripe_payment_intent_id: 'pi_1', business_id: 42 };
 
+  beforeEach(() => {
+    // Double-refund guard verifies prior refunds on Stripe before refunding; default: none.
+    mockPaymentIntentsRetrieve.mockResolvedValue({ latest_charge: { amount: 120000, amount_refunded: 0 } });
+  });
+
   it('issues a prorated 50%-of-remaining-time refund, then tears down the membership', async () => {
     const createdAt = new RealDate('2026-01-01T00:00:00.000Z');
     const periodEnd = new RealDate('2027-01-01T00:00:00.000Z');
@@ -289,6 +294,39 @@ describe('cancelSubscription — founding refund', () => {
     expect(amount).toBeLessThanOrEqual(60000); // never more than $600 (50% of $1,200)
     expect(amount).toBeGreaterThan(59900);     // ~$600 on day one
   });
+
+  it('does NOT refund again on a retry after a failed commit — Stripe already shows the refund', async () => {
+    mockDateNow(new RealDate('2026-07-02T00:00:00.000Z'));
+    // A prior attempt refunded $302 (say) and the DB commit then failed; Stripe remembers.
+    mockPaymentIntentsRetrieve.mockResolvedValue({ latest_charge: { amount: 120000, amount_refunded: 60000 } });
+    mockQuery
+      .mockResolvedValueOnce({ rows: [FOUNDING_ROW] })
+      .mockResolvedValueOnce({ rows: [{ paid_at: new RealDate('2026-01-01T00:00:00.000Z'), current_period_end: new RealDate('2027-01-01T00:00:00.000Z') }] });
+    mockClientQuery.mockResolvedValue({ rows: [], rowCount: 0 });
+
+    const res = await cancelSubscription(7);
+
+    // $60,000c already refunded >= the ~$302 entitled now → nothing more goes out,
+    // but the teardown still completes.
+    expect(mockRefundsCreate).not.toHaveBeenCalled();
+    expect(res.refundAmount).toBe(0);
+    const teardown = mockClientQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('DELETE FROM founding_member'),
+    );
+    expect(teardown).toBeDefined();
+  });
+
+  it('aborts when prior refunds cannot be verified (never risk a double refund)', async () => {
+    mockDateNow(new RealDate('2026-07-02T00:00:00.000Z'));
+    mockPaymentIntentsRetrieve.mockRejectedValue(new Error('stripe unavailable'));
+    mockQuery
+      .mockResolvedValueOnce({ rows: [FOUNDING_ROW] })
+      .mockResolvedValueOnce({ rows: [{ paid_at: new RealDate('2026-01-01T00:00:00.000Z'), current_period_end: new RealDate('2027-01-01T00:00:00.000Z') }] });
+
+    await expect(cancelSubscription(7)).rejects.toThrow('REFUND_FAILED');
+    expect(mockRefundsCreate).not.toHaveBeenCalled();
+    expect(mockClientQuery).not.toHaveBeenCalled(); // no destructive change happened
+  });
 });
 
 // ─────────────────────────────────────────────
@@ -317,7 +355,7 @@ describe('verifyAndActivateSession — setup-mode subscription creation', () => 
     mockQuery
       .mockResolvedValueOnce({ rows: [{ id: 42 }] })                    // business lookup
       .mockResolvedValueOnce({ rows: [] })                              // existing-sub check — none
-      .mockResolvedValueOnce({ rows: [{ opened_at: new RealDate() }] }) // Open campaign opened after the last charge → NOT in window
+      .mockResolvedValueOnce({ rows: [{ open_opened_at: new RealDate(), any_draw: true }] }) // Open campaign opened after the last charge → NOT in window
       .mockResolvedValueOnce({ rows: [] });                             // email lookup in activateBusinessSubscription
 
     await verifyAndActivateSession('cs_1', 7);
@@ -352,7 +390,7 @@ describe('verifyAndActivateSession — setup-mode subscription creation', () => 
     mockQuery
       .mockResolvedValueOnce({ rows: [{ id: 42 }] })  // business lookup
       .mockResolvedValueOnce({ rows: [] })            // existing-sub check — none
-      .mockResolvedValueOnce({ rows: [] })            // no Open campaign since the charge → IN window
+      .mockResolvedValueOnce({ rows: [{ open_opened_at: null, any_draw: true }] }) // no Open campaign since the charge → IN window
       .mockResolvedValueOnce({ rows: [] });           // email lookup
 
     await verifyAndActivateSession('cs_1', 7);
@@ -384,7 +422,7 @@ describe('verifyAndActivateSession — setup-mode subscription creation', () => 
     mockQuery
       .mockResolvedValueOnce({ rows: [{ id: 42 }] })
       .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [] })            // IN window
+      .mockResolvedValueOnce({ rows: [{ open_opened_at: null, any_draw: true }] }) // IN window
       .mockResolvedValueOnce({ rows: [] });
 
     await verifyAndActivateSession('cs_1', 7);
@@ -466,7 +504,7 @@ describe('updateSubscriptionPlan — staged change with window settlement', () =
     stripeItemMocks();
     mockQuery
       .mockResolvedValueOnce({ rows: [SUB_ROW(500, '490.00')] })          // sub row
-      .mockResolvedValueOnce({ rows: [{ opened_at: new RealDate() }] })   // campaign opened after last charge → NOT in window
+      .mockResolvedValueOnce({ rows: [{ open_opened_at: new RealDate(), any_draw: true }] })   // campaign opened after last charge → NOT in window
       .mockResolvedValueOnce({ rows: [], rowCount: 1 });                  // staging UPDATE
 
     await updateSubscriptionPlan(7, 1000);
@@ -500,7 +538,7 @@ describe('updateSubscriptionPlan — staged change with window settlement', () =
     mockInvoicesFinalize.mockResolvedValue({ id: 'in_up', status: 'paid' });
     mockQuery
       .mockResolvedValueOnce({ rows: [SUB_ROW(500, '490.00')] })
-      .mockResolvedValueOnce({ rows: [] })                                // no campaign opened since the charge → IN window
+      .mockResolvedValueOnce({ rows: [{ open_opened_at: null, any_draw: true }] }) // no campaign opened since the charge → IN window
       .mockResolvedValueOnce({ rows: [], rowCount: 1 });                  // staging UPDATE
 
     await updateSubscriptionPlan(7, 1000);
@@ -515,12 +553,12 @@ describe('updateSubscriptionPlan — staged change with window settlement', () =
       items: { data: [{ id: 'si_1', price: { id: 'price_test_1000' }, quantity: 1 }] },
     });
     mockSubscriptionsUpdate.mockResolvedValue({});
-    mockInvoicesList.mockResolvedValue({ data: [{ id: 'in_cycle', payment_intent: 'pi_9' }] });
+    mockInvoicesList.mockResolvedValue({ data: [{ id: 'in_cycle', amount_paid: 92000, payment_intent: 'pi_9' }] });
     mockPaymentIntentsRetrieve.mockResolvedValue({ latest_charge: { amount: 92000, amount_refunded: 0 } });
     mockRefundsCreate.mockResolvedValue({ id: 're_1' });
     mockQuery
       .mockResolvedValueOnce({ rows: [SUB_ROW(1000, '920.00')] })
-      .mockResolvedValueOnce({ rows: [] })                                // IN window
+      .mockResolvedValueOnce({ rows: [{ open_opened_at: null, any_draw: true }] }) // IN window
       .mockResolvedValueOnce({ rows: [], rowCount: 1 });
 
     await updateSubscriptionPlan(7, 500);
@@ -528,6 +566,16 @@ describe('updateSubscriptionPlan — staged change with window settlement', () =
     // $920 - $490 = $430 refunded from the invoice that paid the upcoming campaign.
     expect(mockRefundsCreate).toHaveBeenCalledTimes(1);
     expect(mockRefundsCreate.mock.calls[0][0]).toMatchObject({ payment_intent: 'pi_9', amount: 43000 });
+  });
+
+  it('refuses any plan change while payment is broken (Past_Due) — fix the card first', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ ...SUB_ROW(500, '490.00'), status: 'Past_Due' }] });
+
+    await expect(updateSubscriptionPlan(7, 1000)).rejects.toThrow('PAYMENT_ISSUE');
+
+    // Nothing was touched at Stripe.
+    expect(mockSubscriptionsRetrieve).not.toHaveBeenCalled();
+    expect(mockSubscriptionsUpdate).not.toHaveBeenCalled();
   });
 
   it('rolls Stripe back and throws when the window charge fails — nothing changes anywhere', async () => {
@@ -538,7 +586,7 @@ describe('updateSubscriptionPlan — staged change with window settlement', () =
     mockInvoicesPay.mockRejectedValue(Object.assign(new Error('declined'), { code: 'card_declined' }));
     mockQuery
       .mockResolvedValueOnce({ rows: [SUB_ROW(500, '490.00')] })
-      .mockResolvedValueOnce({ rows: [] });                               // IN window
+      .mockResolvedValueOnce({ rows: [{ open_opened_at: null, any_draw: true }] }); // IN window
 
     await expect(updateSubscriptionPlan(7, 1000)).rejects.toThrow('CHARGE_FAILED');
 
@@ -678,6 +726,26 @@ describe('verifyAndActivateSession — founding activation guards', () => {
     expect(mockClientQuery).not.toHaveBeenCalled();
   });
 
+  it('auto-refunds in full when the seats sold out while the payment was processing', async () => {
+    mockSessionsRetrieve.mockResolvedValue(FOUNDING_SESSION('cs_SOLD', 'pi_sold'));
+    mockRefundsCreate.mockResolvedValue({ id: 're_sold' });
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 42 }] })   // business lookup
+      .mockResolvedValueOnce({ rows: [] })             // guard: no founding rows
+      .mockResolvedValueOnce({ rows: [] });            // no live regular sub
+    mockClientQuery.mockImplementation((sql: string) => {
+      if (typeof sql === 'string' && sql.includes('INSERT INTO founding_member')) {
+        return Promise.resolve({ rows: [], rowCount: 0 }); // no seat available — cap reached
+      }
+      return Promise.resolve({ rows: [], rowCount: 1 });
+    });
+
+    await expect(verifyAndActivateSession('cs_SOLD', 7)).rejects.toThrow(/refund has been issued/);
+
+    // The $1,200 goes straight back — full refund, no amount cap.
+    expect(mockRefundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_sold' });
+  });
+
   it('cancels a live Stripe subscription before founding activation (no orphan billing)', async () => {
     mockSessionsRetrieve.mockResolvedValue(FOUNDING_SESSION('cs_F', 'pi_F'));
     mockSubscriptionsCancel.mockResolvedValue({});
@@ -770,7 +838,7 @@ describe('verifyAndActivateSession — founding hand-off', () => {
     mockQuery
       .mockResolvedValueOnce({ rows: [{ id: 42 }] })                                                // business lookup
       .mockResolvedValueOnce({ rows: [{ stripe_subscription_id: null, is_founding: true }] })       // existing check → founding, proceed
-      .mockResolvedValueOnce({ rows: [{ opened_at: new RealDate() }] })                             // Open campaign after the charge → NOT in window
+      .mockResolvedValueOnce({ rows: [{ open_opened_at: new RealDate(), any_draw: true }] })                             // Open campaign after the charge → NOT in window
       .mockResolvedValueOnce({ rows: [] });                                                         // email lookup
   };
 

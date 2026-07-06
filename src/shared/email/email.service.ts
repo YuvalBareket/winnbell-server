@@ -1,7 +1,5 @@
 import nodemailer from 'nodemailer';
-import { readFileSync } from 'fs';
-import { fileURLToPath } from 'url';
-import { dirname, join } from 'path';
+import { WINNBELL_LOGO_BASE64 } from './winnbell-logo.data.js';
 
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
@@ -24,18 +22,11 @@ const LOGO_CID = 'winnbell-logo';
 const LOGO_SRC = `cid:${LOGO_CID}`;
 const BRAND_GRADIENT = 'linear-gradient(135deg,#7fa6ff 0%,#06347e 100%)';
 
-let logoBuffer: Buffer | null = null;
-try {
-  logoBuffer = readFileSync(join(dirname(fileURLToPath(import.meta.url)), 'winnbell_app_name_white.png'));
-} catch {
-  console.warn('[Email] Winnbell wordmark PNG not found next to email.service — welcome emails will show the text fallback.');
-}
+const logoBuffer = Buffer.from(WINNBELL_LOGO_BASE64, 'base64');
 
-// Attachment list for the brand logo, or empty when the asset could not be loaded.
+// Attachment list for the brand logo (embedded so it always renders and needs no hosting).
 const logoAttachments = () =>
-  logoBuffer
-    ? [{ filename: 'winnbell.png', content: logoBuffer, cid: LOGO_CID, contentType: 'image/png' }]
-    : [];
+  [{ filename: 'winnbell.png', content: logoBuffer, cid: LOGO_CID, contentType: 'image/png' }];
 
 // ─── Subscription Confirmation ────────────────────────────────────────────────
 

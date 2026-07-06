@@ -92,9 +92,21 @@ export function resolveMonthlyFee(
 // new configuration. Detected as "the most recent charge moment is later than the moment
 // the current Open campaign opened" (also true if no campaign is open at all).
 export async function isChargedNotOpenedWindow(pool: Pool): Promise<boolean> {
-  const res = await pool.query(`SELECT opened_at FROM draw WHERE status = 'Open' ORDER BY opened_at DESC NULLS LAST LIMIT 1`);
-  const openedAt: Date | null = res.rows[0]?.opened_at ?? null;
-  if (!openedAt) return true; // charge ran, its campaign has not opened yet
+  const res = await pool.query(`
+    SELECT
+      (SELECT opened_at FROM draw WHERE status = 'Open' ORDER BY opened_at DESC NULLS LAST LIMIT 1) AS open_opened_at,
+      EXISTS(SELECT 1 FROM draw) AS any_draw
+  `);
+  const openedAt: Date | null = res.rows[0]?.open_opened_at ?? null;
+  const anyDraw: boolean = res.rows[0]?.any_draw ?? false;
+  // No campaigns exist at all (platform's first month, nothing created yet): there is no
+  // "already-paid upcoming campaign" to settle against, so this is NOT the window — the
+  // normal 24th cycle and open-time enrollment handle the business.
+  if (!anyDraw) return false;
+  // A draw exists but none is Open (between a close and the next open): the last charge
+  // paid for the campaign about to open, so we are inside the window.
+  if (!openedAt) return true;
+  // A campaign is Open: in-window only if the most recent charge is newer than that open.
   return lastChargeAtNy().getTime() > new Date(openedAt).getTime();
 }
 
@@ -120,14 +132,28 @@ async function chargeNow(
   kind: 'signup_charge' | 'settlement',
 ): Promise<boolean> {
   const voidOnFailure = kind === 'settlement';
-  await stripe.invoiceItems.create(
+  // A customer-level pending invoice item. If the invoice.create below fails (network,
+  // 5xx), this item is left pending and Stripe would sweep it into the NEXT renewal invoice
+  // — a silent overcharge. So we track its id and delete it if the invoice never forms.
+  const item = await stripe.invoiceItems.create(
     { customer: customerId, amount: Math.round(amountDollars * 100), currency: 'usd', description },
     { idempotencyKey: `winnbell_item_${idempotencyTag}` },
   );
-  const draft = await stripe.invoices.create(
-    { customer: customerId, subscription: subscriptionId, description, auto_advance: !voidOnFailure, metadata: { winnbell_kind: kind } },
-    { idempotencyKey: `winnbell_inv_${idempotencyTag}` },
-  );
+  let draft: Stripe.Invoice;
+  try {
+    draft = await stripe.invoices.create(
+      { customer: customerId, subscription: subscriptionId, description, auto_advance: !voidOnFailure, metadata: { winnbell_kind: kind } },
+      { idempotencyKey: `winnbell_inv_${idempotencyTag}` },
+    );
+  } catch (createErr: unknown) {
+    if (item.id) {
+      try { await stripe.invoiceItems.del(item.id); }
+      catch (delErr: unknown) {
+        console.error(`[Stripe] CRITICAL: orphaned invoice item ${item.id} could not be deleted after invoice.create failed — it may be swept into the next renewal:`, delErr instanceof Error ? delErr.message : delErr);
+      }
+    }
+    throw createErr;
+  }
   if (!draft.id) throw new Error('Stripe did not return an invoice id');
   let invoice = draft;
   if (invoice.status === 'draft') {
@@ -156,24 +182,35 @@ async function chargeNow(
 }
 
 // Refund `amountDollars` of what was already paid for the upcoming campaign, drawing from
-// the subscription's most recent paid invoices (newest first). Throws if the full amount
-// cannot be refunded — the caller must then abort the change entirely.
+// the subscription's most recent paid invoices (newest first). Money rule: never refund
+// more than was ACTUALLY paid. If the shortfall exists because nothing was truly paid
+// ($0 invoices from credits/coupons), proceed without the missing part — no refund is
+// owed. But if paid invoices exist whose payments we could not access (structural / API
+// shape issue), throw so the change aborts instead of silently skipping an owed refund.
 async function refundUpcomingCampaignDelta(subscriptionId: string, amountDollars: number, reason: string): Promise<void> {
   let remainingCents = Math.round(amountDollars * 100);
+  let inaccessiblePaidInvoice = false;
   const invoices = await stripe.invoices.list({ subscription: subscriptionId, status: 'paid', limit: 10 });
   for (const invoice of invoices.data) {
     if (remainingCents <= 0) break;
+    if ((invoice.amount_paid ?? 0) <= 0) continue; // nothing was paid — nothing to refund
     const piId = (invoice as unknown as { payment_intent?: string | { id?: string } | null }).payment_intent;
     const paymentIntentId = typeof piId === 'string' ? piId : piId?.id;
-    if (!paymentIntentId) continue;
+    if (!paymentIntentId) { inaccessiblePaidInvoice = true; continue; }
     const pi = await stripe.paymentIntents.retrieve(paymentIntentId, { expand: ['latest_charge'] });
     const charge = pi.latest_charge as Stripe.Charge | null;
-    if (!charge || typeof charge === 'string') continue;
+    if (!charge || typeof charge === 'string') { inaccessiblePaidInvoice = true; continue; }
     const available = charge.amount - charge.amount_refunded;
     if (available <= 0) continue;
     const refundCents = Math.min(available, remainingCents);
     await stripe.refunds.create({ payment_intent: paymentIntentId, amount: refundCents, metadata: { reason } });
     remainingCents -= refundCents;
+  }
+  if (remainingCents > 0 && !inaccessiblePaidInvoice) {
+    // Genuine shortfall: the business never paid this much for the upcoming campaign, so
+    // the un-refundable part is not owed. Proceed with the change.
+    console.warn(`[Stripe] refund shortfall for ${reason}: $${(remainingCents / 100).toFixed(2)} was never actually paid — nothing further to refund.`);
+    remainingCents = 0;
   }
   if (remainingCents > 0) {
     throw new Error(`REFUND_INCOMPLETE: could not refund remaining $${(remainingCents / 100).toFixed(2)} for ${reason}`);
@@ -311,8 +348,14 @@ export const createCheckoutSession = async (
     if (!foundingInTransition) throw new Error('This business already has an active subscription');
   }
 
+  // Next-campaign location count (live minus scheduled removals plus staged adds) — the
+  // same formula every other billing site uses. A founding member transitioning to a
+  // regular plan may have staged-add locations; counting only is_active would undercount
+  // the quantity billed and the fee staged for their first regular campaign.
   const locResult = await pool.query(
-    `SELECT COUNT(*) AS cnt FROM business_location WHERE business_id = $1 AND is_active = true`,
+    `SELECT COUNT(*) AS cnt FROM business_location
+     WHERE business_id = $1
+       AND ((is_active = true AND deactivate_at_open = false) OR activate_at_open = true)`,
     [businessId],
   );
   const locationCount = Math.max(1, Number(locResult.rows[0]?.cnt ?? 1));
@@ -435,6 +478,7 @@ async function recoverBusinessAfterPayment(pool: Pool, businessId: number): Prom
     JOIN business b ON b.id = s.business_id
     WHERE d.status = 'Open'
       AND s.current_period_end >= NOW()
+      AND s.skip_next_campaign = FALSE
     ON CONFLICT (draw_id, business_id) DO NOTHING
   `, [businessId]);
   invalidatePublicBusinessData();
@@ -787,11 +831,20 @@ async function processStripeEvent(event: Stripe.Event, pool: Pool): Promise<void
         // is untouched, so this failure must NOT mark them Past_Due.
         if (invoice.metadata?.winnbell_kind === 'settlement') break;
 
-        await pool.query(
-          `UPDATE subscription SET status = 'Past_Due', updated_at = NOW() WHERE stripe_subscription_id = $1`,
-          [subscriptionId],
-        );
-        invalidatePublicBusinessData();
+        // A failed signup charge keeps the business Incomplete (set at activation), NOT
+        // Past_Due — Past_Due is for an established subscription that missed a renewal. Both
+        // states recover via invoice.payment_succeeded, so the business is not stuck; we
+        // just preserve the correct state. Guard on business_id NULL-check via the row
+        // status: only demote a currently-Active/Trialing/Past_Due row to Past_Due.
+        const isSignupCharge = invoice.metadata?.winnbell_kind === 'signup_charge';
+        if (!isSignupCharge) {
+          await pool.query(
+            `UPDATE subscription SET status = 'Past_Due', updated_at = NOW()
+             WHERE stripe_subscription_id = $1 AND status <> 'Cancelled'`,
+            [subscriptionId],
+          );
+          invalidatePublicBusinessData();
+        }
 
         // Tell the business on the FIRST failed attempt (Stripe keeps retrying on its
         // own schedule; the in-app banner persists either way). Non-fatal: a mail hiccup
@@ -1085,6 +1138,24 @@ async function cancelFoundingMembership(
   // every DB change: if Stripe rejects it the cancellation aborts and the business
   // keeps its membership intact (no destructive change has happened yet).
   if (refundCents > 0) {
+    // Double-refund guard: Stripe is the source of truth for prior refunds. If an earlier
+    // cancel attempt refunded but our DB commit then failed, the ledger never recorded it —
+    // a retry must NOT refund again. Cap by what Stripe says was already returned. If we
+    // cannot verify, abort rather than risk paying twice.
+    try {
+      const pi = await stripe.paymentIntents.retrieve(paymentIntentId, { expand: ['latest_charge'] });
+      const charge = pi.latest_charge;
+      const alreadyRefundedCents = charge && typeof charge !== 'string' ? (charge.amount_refunded ?? 0) : 0;
+      if (alreadyRefundedCents > 0) {
+        console.warn(`[Founding] Business ${businessId}: $${(alreadyRefundedCents / 100).toFixed(2)} already refunded on Stripe (prior attempt) — capping this refund.`);
+      }
+      refundCents = Math.max(0, refundCents - alreadyRefundedCents);
+    } catch (err: unknown) {
+      console.error(`[Founding] Could not verify prior refunds — cancellation aborted for business ${businessId}: ${err instanceof Error ? err.message : err}`);
+      throw new Error('REFUND_FAILED');
+    }
+  }
+  if (refundCents > 0) {
     try {
       await stripe.refunds.create({ payment_intent: paymentIntentId, amount: refundCents });
     } catch (err: unknown) {
@@ -1222,6 +1293,7 @@ async function activateBusinessSubscription(
             cancel_at_period_end         = false,
             pending_fee_at_entry         = $6,
             pending_entries_per_location = $7,
+            skip_next_campaign           = false,
             billing_interval             = $8,
             updated_at                   = NOW()
         WHERE business_id = $1
@@ -1366,7 +1438,10 @@ export const syncSubscriptionQuantity = async (userId: number, newNextCampaignCo
         ? `Added a location for the upcoming campaign (${quantity} location${quantity !== 1 ? 's' : ''} total)`
         : `Removed a location for the upcoming campaign (${quantity} location${quantity !== 1 ? 's' : ''} total)`;
       if (deltaDollars > 0) {
-        const paid = await chargeNow(sub.stripe_customer_id, sub.stripe_subscription_id, deltaDollars, label, `${sub.stripe_subscription_id}_${Date.now()}`, 'settlement');
+        // Deterministic idempotency tag (target config + delta), NOT a timestamp: a retry
+        // of the SAME change, or a concurrent double-submit, dedupes to one charge.
+        const tag = `${sub.stripe_subscription_id}_settle_${effectiveTier}_${quantity}_${Math.round(deltaDollars * 100)}`;
+        const paid = await chargeNow(sub.stripe_customer_id, sub.stripe_subscription_id, deltaDollars, label, tag, 'settlement');
         if (!paid) throw new Error('CHARGE_FAILED');
       } else {
         await refundUpcomingCampaignDelta(sub.stripe_subscription_id, -deltaDollars, label);
@@ -1380,7 +1455,11 @@ export const syncSubscriptionQuantity = async (userId: number, newNextCampaignCo
         proration_behavior: 'none',
       });
     } catch (rollbackErr: unknown) {
-      console.error('[Stripe] Rollback failed after settlement error:', rollbackErr instanceof Error ? rollbackErr.message : rollbackErr);
+      console.error(
+        `[Stripe] CRITICAL: settlement rolled back but the Stripe revert ALSO failed for business ${sub.business_id} ` +
+        `(sub ${sub.stripe_subscription_id}). Stripe may hold the new price while the DB keeps the old fee — reconcile manually.`,
+        rollbackErr instanceof Error ? rollbackErr.message : rollbackErr,
+      );
     }
     throw settleErr;
   }
@@ -1481,7 +1560,10 @@ export const updateSubscriptionPlan = async (userId: number, newEntriesPerLocati
       const direction = newEntriesPerLocation > baselineTier ? 'upgraded' : 'downgraded';
       const label = `Plan ${direction} for the upcoming campaign: ${baselineTier.toLocaleString()} to ${newEntriesPerLocation.toLocaleString()} entries per location`;
       if (deltaDollars > 0) {
-        const paid = await chargeNow(sub.stripe_customer_id, sub.stripe_subscription_id, deltaDollars, label, `${sub.stripe_subscription_id}_${Date.now()}`, 'settlement');
+        // Deterministic idempotency tag (target plan + delta), NOT a timestamp: a retry of
+        // the SAME change, or a concurrent double-submit, dedupes to one charge.
+        const tag = `${sub.stripe_subscription_id}_settle_${newEntriesPerLocation}_${locationCount}_${Math.round(deltaDollars * 100)}`;
+        const paid = await chargeNow(sub.stripe_customer_id, sub.stripe_subscription_id, deltaDollars, label, tag, 'settlement');
         if (!paid) throw new Error('CHARGE_FAILED');
       } else {
         await refundUpcomingCampaignDelta(sub.stripe_subscription_id, -deltaDollars, label);
@@ -1495,7 +1577,11 @@ export const updateSubscriptionPlan = async (userId: number, newEntriesPerLocati
         proration_behavior: 'none',
       });
     } catch (rollbackErr: unknown) {
-      console.error('[Stripe] Rollback failed after settlement error:', rollbackErr instanceof Error ? rollbackErr.message : rollbackErr);
+      console.error(
+        `[Stripe] CRITICAL: settlement rolled back but the Stripe revert ALSO failed for business ${sub.business_id} ` +
+        `(sub ${sub.stripe_subscription_id}). Stripe may hold the new price while the DB keeps the old fee — reconcile manually.`,
+        rollbackErr instanceof Error ? rollbackErr.message : rollbackErr,
+      );
     }
     throw settleErr;
   }
