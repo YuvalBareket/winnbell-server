@@ -15,6 +15,9 @@ export interface CampaignEntry {
   customer_masked: string;
   transaction_amount: number | null;
   entry_source: string;
+  // Number of entries this submission granted. A receipt over the threshold can earn several
+  // entries; the feed shows only the anchor ticket, so this counts the anchor + its siblings.
+  entry_count: number;
   status: 'active' | 'under_review';
   created_at: string;
 }
@@ -296,7 +299,8 @@ export const getCampaignEntries = async (
   const res = await pool.query(
     `SELECT t.id AS ticket_id, COALESCE(bl.name, bl.address) AS location_name,
             u.full_name AS customer_name, t.transaction_amount, t.entry_source,
-            t.is_quarantined, t.created_at
+            t.is_quarantined, t.created_at,
+            (1 + (SELECT COUNT(*)::int FROM ticket s WHERE s.anchor_ticket_id = t.id)) AS entry_count
      FROM ticket t
      LEFT JOIN business_location bl ON bl.id = t.location_id
      LEFT JOIN "user" u ON u.id = t.activated_by_user_id
@@ -315,6 +319,7 @@ export const getCampaignEntries = async (
     customer_masked: maskCustomer(r.customer_name),
     transaction_amount: r.transaction_amount != null ? parseFloat(r.transaction_amount) : null,
     entry_source: r.entry_source ?? 'receipt',
+    entry_count: Number(r.entry_count) || 1,
     status: r.is_quarantined ? 'under_review' : 'active',
     created_at: r.created_at instanceof Date ? r.created_at.toISOString() : String(r.created_at),
   }));
