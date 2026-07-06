@@ -1,14 +1,11 @@
 /**
- * Tests — createCheckoutSession: 7-day campaign onboarding cutoff (stripe.service.ts)
- *
- * The service blocks new subscriptions when fewer than CAMPAIGN_ONBOARDING_CUTOFF_DAYS (7)
- * days remain before the 1st of the next month in the America/New_York timezone.
+ * Tests — stripe.service.ts: checkout, activation (24th anchor + immediate window charge),
+ * cancellation/refunds, the founding transition, and fee resolution.
  *
  * Mock strategy:
  *   - Stripe constructor is mocked at module level (required before import).
  *   - email.service is mocked (transitive import).
- *   - getPool / pool.query is mocked: the existing-subscription guard query returns no rows
- *     so execution reaches the date-check logic before any other early-exit.
+ *   - getPool / pool.query is mocked per test.
  *   - Date constructor is spied on to control "now".
  */
 
@@ -27,6 +24,12 @@ const mockSubscriptionsRetrieve = jest.fn();
 const mockRefundsCreate = jest.fn();
 const mockSetupIntentsRetrieve = jest.fn();
 const mockCustomersUpdate = jest.fn();
+const mockInvoiceItemsCreate = jest.fn();
+const mockInvoicesCreate = jest.fn();
+const mockInvoicesFinalize = jest.fn();
+const mockInvoicesPay = jest.fn();
+const mockInvoicesList = jest.fn();
+const mockPaymentIntentsRetrieve = jest.fn();
 
 jest.mock('stripe', () => {
   return jest.fn().mockImplementation(() => ({
@@ -37,6 +40,9 @@ jest.mock('stripe', () => {
     refunds: { create: mockRefundsCreate },
     setupIntents: { retrieve: mockSetupIntentsRetrieve },
     customers: { update: mockCustomersUpdate },
+    invoiceItems: { create: mockInvoiceItemsCreate },
+    invoices: { create: mockInvoicesCreate, finalizeInvoice: mockInvoicesFinalize, pay: mockInvoicesPay, list: mockInvoicesList },
+    paymentIntents: { retrieve: mockPaymentIntentsRetrieve },
   }));
 });
 
@@ -63,8 +69,10 @@ jest.mock('../../../shared/db/db.js', () => ({
 // Set required env vars before importing the service
 process.env.STRIPE_SECRET_KEY = 'sk_test_dummy';
 process.env.STRIPE_PRICE_ID_250 = 'price_test_250';
+process.env.STRIPE_PRICE_ID_500 = 'price_test_500';
+process.env.STRIPE_PRICE_ID_1000 = 'price_test_1000';
 
-import { createCheckoutSession, cancelSubscription, verifyAndActivateSession, resumeSubscription, resolveMonthlyFee } from '../stripe.service';
+import { createCheckoutSession, cancelSubscription, verifyAndActivateSession, resumeSubscription, resolveMonthlyFee, isFoundingTransitionWindow, updateSubscriptionPlan } from '../stripe.service';
 
 // ─────────────────────────────────────────────
 // resolveMonthlyFee — fee_at_entry single source of truth (TIER_PRICE_MAP) + drift guard
@@ -151,75 +159,19 @@ beforeEach(() => {
 });
 
 // ─────────────────────────────────────────────
-// createCheckoutSession — campaign cutoff tests
+// createCheckoutSession — basic setup-mode session
 // ─────────────────────────────────────────────
-
-// The service no longer BLOCKS signups inside the 7-day window — it allows the
-// subscription and returns joinsNextCampaign so the client can tell the business
-// they will join the NEXT campaign instead of the current one.
-describe('createCheckoutSession — 7-day campaign onboarding flag', () => {
-  beforeEach(() => {
+// (The old 7-day onboarding flag is gone: every signup joins the next campaign — before
+// the 24th via the regular charge, after it via an immediate charge at activation.)
+describe('createCheckoutSession — setup session', () => {
+  it('creates a setup-mode session and returns its url', async () => {
     mockSessionsCreate.mockResolvedValue({ url: 'https://checkout.stripe.com/test' });
-  });
-
-  it('flags joinsNextCampaign when only 2 days remain before next month', async () => {
-    // January 29 — 2 days before Feb 1 → within 7-day window
-    mockDateNow(nyDate(2026, 1, 29));
 
     const res = await createCheckoutSession(42, 'owner@test.com', 250);
-    expect(res.joinsNextCampaign).toBe(true);
+
     expect(res.url).toBe('https://checkout.stripe.com/test');
-  });
-
-  it('flags joinsNextCampaign exactly on the cutoff day (7 days before)', async () => {
-    // January 25 — exactly 7 days before Feb 1 (daysUntilNext ≈ 7.0, which is <= 7)
-    mockDateNow(nyDate(2026, 1, 25));
-
-    const res = await createCheckoutSession(42, 'owner@test.com', 250);
-    expect(res.joinsNextCampaign).toBe(true);
-  });
-
-  it('does NOT flag joinsNextCampaign when 10 days remain before next month', async () => {
-    // January 22 — 10 days before Feb 1 → outside 7-day window
-    mockDateNow(nyDate(2026, 1, 22));
-
-    const res = await createCheckoutSession(42, 'owner@test.com', 250);
-    expect(res.joinsNextCampaign).toBe(false);
-    expect(res.nextCampaignDate).toBeNull();
-  });
-
-  it('includes the month-after-next in nextCampaignDate when flagged', async () => {
-    // January 29 — flagged; the business joins the campaign starting March 1
-    mockDateNow(nyDate(2026, 1, 29));
-
-    const res = await createCheckoutSession(42, 'owner@test.com', 250);
-    expect(res.joinsNextCampaign).toBe(true);
-    expect(res.nextCampaignDate).toMatch(/March/);
-  });
-
-  it('flags joinsNextCampaign when 1 day remains (last day of month)', async () => {
-    // January 31 — 1 day before Feb 1
-    mockDateNow(nyDate(2026, 1, 31));
-
-    const res = await createCheckoutSession(42, 'owner@test.com', 250);
-    expect(res.joinsNextCampaign).toBe(true);
-  });
-
-  it('does NOT flag at the start of a month (30+ days to go)', async () => {
-    // January 1 — 31 days before Feb 1 → well outside the 7-day window
-    mockDateNow(nyDate(2026, 1, 1));
-
-    const res = await createCheckoutSession(42, 'owner@test.com', 250);
-    expect(res.joinsNextCampaign).toBe(false);
-  });
-
-  it('respects the window for shorter months (Feb 22 — 6 days before Mar 1)', async () => {
-    // February 22, 2026 — 6 days before March 1 → within 7-day window
-    mockDateNow(nyDate(2026, 2, 22));
-
-    const res = await createCheckoutSession(42, 'owner@test.com', 250);
-    expect(res.joinsNextCampaign).toBe(true);
-    expect(res.nextCampaignDate).toMatch(/April/);
+    const [params] = mockSessionsCreate.mock.calls[0];
+    expect(params.mode).toBe('setup');
   });
 });
 
@@ -346,26 +298,27 @@ describe('verifyAndActivateSession — setup-mode subscription creation', () => 
     metadata: { business_id: '42', price_id: 'price_x', quantity: '2', entries_per_location: '750', billing_interval: 'monthly' },
   };
 
-  it('creates a month-end-anchored subscription with no first-month proration', async () => {
+  it('creates a subscription anchored on the 24th with no proration', async () => {
     mockClientQuery.mockResolvedValue({ rows: [] }); // BEGIN / INSERT / COMMIT in activateBusinessSubscription
     mockSessionsRetrieve.mockResolvedValue(SETUP_SESSION);
     mockSetupIntentsRetrieve.mockResolvedValue({ payment_method: 'pm_1' });
     mockCustomersUpdate.mockResolvedValue({});
     mockSubscriptionsCreate.mockResolvedValue({
       id: 'sub_new',
-      current_period_end: Math.floor(new RealDate('2026-08-31T00:00:00.000Z').getTime() / 1000),
+      current_period_end: Math.floor(new RealDate('2026-08-24T00:00:00.000Z').getTime() / 1000),
       items: { data: [{ price: { unit_amount: 94000, recurring: { interval: 'month' } }, quantity: 2 }] },
     });
     mockQuery
-      .mockResolvedValueOnce({ rows: [{ id: 42 }] }) // business lookup
-      .mockResolvedValueOnce({ rows: [] })           // existing-sub check — none
-      .mockResolvedValueOnce({ rows: [] });          // email lookup in activateBusinessSubscription
+      .mockResolvedValueOnce({ rows: [{ id: 42 }] })                    // business lookup
+      .mockResolvedValueOnce({ rows: [] })                              // existing-sub check — none
+      .mockResolvedValueOnce({ rows: [{ opened_at: new RealDate() }] }) // Open campaign opened after the last charge → NOT in window
+      .mockResolvedValueOnce({ rows: [] });                             // email lookup in activateBusinessSubscription
 
     await verifyAndActivateSession('cs_1', 7);
 
     expect(mockSubscriptionsCreate).toHaveBeenCalledTimes(1);
     const [params, opts] = mockSubscriptionsCreate.mock.calls[0];
-    expect(params.billing_cycle_anchor_config).toEqual({ day_of_month: 31 });
+    expect(params.billing_cycle_anchor_config).toEqual({ day_of_month: 24 });
     expect(params.proration_behavior).toBe('none');
     expect(params.customer).toBe('cus_1');
     expect(params.items).toEqual([{ price: 'price_x', quantity: 2 }]);
@@ -373,6 +326,68 @@ describe('verifyAndActivateSession — setup-mode subscription creation', () => 
     expect(opts.idempotencyKey).toContain('cs_1');
     // The saved card is made the customer default
     expect(mockCustomersUpdate).toHaveBeenCalledWith('cus_1', { invoice_settings: { default_payment_method: 'pm_1' } });
+    // Outside the charged window there is no immediate charge
+    expect(mockInvoiceItemsCreate).not.toHaveBeenCalled();
+  });
+
+  it('charges the upcoming campaign immediately (full price) when signing up inside the charged window', async () => {
+    mockClientQuery.mockResolvedValue({ rows: [] });
+    mockSessionsRetrieve.mockResolvedValue(SETUP_SESSION);
+    mockSetupIntentsRetrieve.mockResolvedValue({ payment_method: 'pm_1' });
+    mockCustomersUpdate.mockResolvedValue({});
+    mockSubscriptionsCreate.mockResolvedValue({
+      id: 'sub_new',
+      current_period_end: Math.floor(new RealDate('2026-08-24T00:00:00.000Z').getTime() / 1000),
+      items: { data: [{ price: { unit_amount: 73000, recurring: { interval: 'month' } }, quantity: 2 }] },
+    });
+    mockInvoiceItemsCreate.mockResolvedValue({});
+    mockInvoicesCreate.mockResolvedValue({ id: 'in_first', status: 'draft' });
+    mockInvoicesFinalize.mockResolvedValue({ id: 'in_first', status: 'paid' });
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 42 }] })  // business lookup
+      .mockResolvedValueOnce({ rows: [] })            // existing-sub check — none
+      .mockResolvedValueOnce({ rows: [] })            // no Open campaign since the charge → IN window
+      .mockResolvedValueOnce({ rows: [] });           // email lookup
+
+    await verifyAndActivateSession('cs_1', 7);
+
+    // Full campaign price for tier 750 × 2 locations = $1,460 → 146000 cents, right now.
+    expect(mockInvoiceItemsCreate).toHaveBeenCalledTimes(1);
+    expect(mockInvoiceItemsCreate.mock.calls[0][0].amount).toBe(146000);
+    // The business activates as Active (charge succeeded).
+    const upsert = mockClientQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO subscription'),
+    );
+    expect(upsert![1]).toContain('Active');
+  });
+
+  it('activates as Incomplete when the immediate window charge fails', async () => {
+    mockClientQuery.mockResolvedValue({ rows: [] });
+    mockSessionsRetrieve.mockResolvedValue(SETUP_SESSION);
+    mockSetupIntentsRetrieve.mockResolvedValue({ payment_method: 'pm_1' });
+    mockCustomersUpdate.mockResolvedValue({});
+    mockSubscriptionsCreate.mockResolvedValue({
+      id: 'sub_new',
+      current_period_end: Math.floor(new RealDate('2026-08-24T00:00:00.000Z').getTime() / 1000),
+      items: { data: [{ price: { unit_amount: 73000, recurring: { interval: 'month' } }, quantity: 2 }] },
+    });
+    mockInvoiceItemsCreate.mockResolvedValue({});
+    mockInvoicesCreate.mockResolvedValue({ id: 'in_first', status: 'draft' });
+    mockInvoicesFinalize.mockResolvedValue({ id: 'in_first', status: 'open' });
+    mockInvoicesPay.mockRejectedValue(Object.assign(new Error('Your card was declined.'), { code: 'card_declined' }));
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 42 }] })
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [] })            // IN window
+      .mockResolvedValueOnce({ rows: [] });
+
+    await verifyAndActivateSession('cs_1', 7);
+
+    // Incomplete: NOT enrolled at open; Stripe retries flip it Active via webhooks later.
+    const upsert = mockClientQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO subscription'),
+    );
+    expect(upsert![1]).toContain('Incomplete');
   });
 
   it('is idempotent — does not create a second subscription if one already exists', async () => {
@@ -415,5 +430,292 @@ describe('resumeSubscription', () => {
       ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO draw_entry'),
     );
     expect(enroll).toBeUndefined();
+  });
+});
+
+// ─────────────────────────────────────────────
+// updateSubscriptionPlan — staged plan changes, no prorations, window settlement
+// ─────────────────────────────────────────────
+describe('updateSubscriptionPlan — staged change with window settlement', () => {
+  const SUB_ROW = (tier: number, fee: string) => ({
+    stripe_subscription_id: 'sub_1',
+    stripe_customer_id: 'cus_1',
+    current_entries_per_location: tier,
+    fee_at_entry: fee,
+    pending_entries_per_location: null,
+    pending_fee_at_entry: null,
+    status: 'Active',
+    business_id: 42,
+    next_campaign_location_count: 1,
+  });
+
+  const stripeItemMocks = () => {
+    mockSubscriptionsRetrieve.mockResolvedValue({
+      items: { data: [{ id: 'si_1', price: { id: 'price_test_500' }, quantity: 1 }] },
+    });
+    mockSubscriptionsUpdate.mockResolvedValue({});
+  };
+
+  it('outside the window: updates Stripe with no proration and stages the plan, no money moves', async () => {
+    stripeItemMocks();
+    mockQuery
+      .mockResolvedValueOnce({ rows: [SUB_ROW(500, '490.00')] })          // sub row
+      .mockResolvedValueOnce({ rows: [{ opened_at: new RealDate() }] })   // campaign opened after last charge → NOT in window
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 });                  // staging UPDATE
+
+    await updateSubscriptionPlan(7, 1000);
+
+    const [subId, params] = mockSubscriptionsUpdate.mock.calls[0];
+    expect(subId).toBe('sub_1');
+    expect(params.proration_behavior).toBe('none');
+    expect(params.items).toEqual([{ id: 'si_1', price: 'price_test_1000', quantity: 1 }]);
+    // No settlement outside the window — the next 24th simply bills the new plan.
+    expect(mockInvoiceItemsCreate).not.toHaveBeenCalled();
+    expect(mockRefundsCreate).not.toHaveBeenCalled();
+    // The change is STAGED (pending_*), never written to the live tier.
+    const staging = mockQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('pending_entries_per_location = $1'),
+    );
+    expect(staging).toBeDefined();
+    expect(staging![1]).toEqual([1000, 920, 'price_test_1000', 42]);
+    // With no settlement invoice, the change is recorded in the change log so the
+    // payment history still shows what happened.
+    const log = mockQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO subscription_change_log'),
+    );
+    expect(log).toBeDefined();
+    expect(log![1][1]).toMatch(/from 500 to 1,000 entries per location/);
+  });
+
+  it('inside the window: an upgrade charges the full-campaign difference immediately', async () => {
+    stripeItemMocks();
+    mockInvoiceItemsCreate.mockResolvedValue({});
+    mockInvoicesCreate.mockResolvedValue({ id: 'in_up', status: 'draft' });
+    mockInvoicesFinalize.mockResolvedValue({ id: 'in_up', status: 'paid' });
+    mockQuery
+      .mockResolvedValueOnce({ rows: [SUB_ROW(500, '490.00')] })
+      .mockResolvedValueOnce({ rows: [] })                                // no campaign opened since the charge → IN window
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 });                  // staging UPDATE
+
+    await updateSubscriptionPlan(7, 1000);
+
+    // $920 - $490 = $430 difference charged now.
+    expect(mockInvoiceItemsCreate).toHaveBeenCalledTimes(1);
+    expect(mockInvoiceItemsCreate.mock.calls[0][0].amount).toBe(43000);
+  });
+
+  it('inside the window: a downgrade refunds the full-campaign difference from the paid invoice', async () => {
+    mockSubscriptionsRetrieve.mockResolvedValue({
+      items: { data: [{ id: 'si_1', price: { id: 'price_test_1000' }, quantity: 1 }] },
+    });
+    mockSubscriptionsUpdate.mockResolvedValue({});
+    mockInvoicesList.mockResolvedValue({ data: [{ id: 'in_cycle', payment_intent: 'pi_9' }] });
+    mockPaymentIntentsRetrieve.mockResolvedValue({ latest_charge: { amount: 92000, amount_refunded: 0 } });
+    mockRefundsCreate.mockResolvedValue({ id: 're_1' });
+    mockQuery
+      .mockResolvedValueOnce({ rows: [SUB_ROW(1000, '920.00')] })
+      .mockResolvedValueOnce({ rows: [] })                                // IN window
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 });
+
+    await updateSubscriptionPlan(7, 500);
+
+    // $920 - $490 = $430 refunded from the invoice that paid the upcoming campaign.
+    expect(mockRefundsCreate).toHaveBeenCalledTimes(1);
+    expect(mockRefundsCreate.mock.calls[0][0]).toMatchObject({ payment_intent: 'pi_9', amount: 43000 });
+  });
+
+  it('rolls Stripe back and throws when the window charge fails — nothing changes anywhere', async () => {
+    stripeItemMocks();
+    mockInvoiceItemsCreate.mockResolvedValue({});
+    mockInvoicesCreate.mockResolvedValue({ id: 'in_fail', status: 'draft' });
+    mockInvoicesFinalize.mockResolvedValue({ id: 'in_fail', status: 'open' });
+    mockInvoicesPay.mockRejectedValue(Object.assign(new Error('declined'), { code: 'card_declined' }));
+    mockQuery
+      .mockResolvedValueOnce({ rows: [SUB_ROW(500, '490.00')] })
+      .mockResolvedValueOnce({ rows: [] });                               // IN window
+
+    await expect(updateSubscriptionPlan(7, 1000)).rejects.toThrow('CHARGE_FAILED');
+
+    // Second subscriptions.update call restored the original price/quantity.
+    expect(mockSubscriptionsUpdate).toHaveBeenCalledTimes(2);
+    const [, rollbackParams] = mockSubscriptionsUpdate.mock.calls[1];
+    expect(rollbackParams.items).toEqual([{ id: 'si_1', price: 'price_test_500', quantity: 1 }]);
+    // The staging UPDATE never ran.
+    const staging = mockQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('pending_entries_per_location = $1'),
+    );
+    expect(staging).toBeUndefined();
+  });
+});
+
+// ─────────────────────────────────────────────
+// isFoundingTransitionWindow — founders are in every campaign that OPENS inside their
+// year; they may start a regular plan once the year ends before the NEXT campaign opens
+// (final included month or expired).
+// ─────────────────────────────────────────────
+describe('isFoundingTransitionWindow', () => {
+  it('is true in the final included month (year ends before the next campaign opens)', () => {
+    mockDateNow(nyDate(2026, 8, 6)); // August → next campaign opens Sep 1, 2026
+    expect(isFoundingTransitionWindow(new RealDate('2026-08-10T12:00:00.000Z'))).toBe(true);
+  });
+
+  it('is false while the year still covers the next campaign open', () => {
+    // July: next campaign opens Aug 1. Year ends Aug 10 — the August campaign is still
+    // included (it opens before the expiry), so no transition yet.
+    mockDateNow(nyDate(2026, 7, 6));
+    expect(isFoundingTransitionWindow(new RealDate('2026-08-10T12:00:00.000Z'))).toBe(false);
+  });
+
+  it('is true after the year has fully ended', () => {
+    mockDateNow(nyDate(2026, 7, 6));
+    expect(isFoundingTransitionWindow(new RealDate('2026-05-31T00:00:00.000Z'))).toBe(true);
+  });
+
+  it('handles the December rollover (next campaign opens January 1 next year)', () => {
+    mockDateNow(nyDate(2026, 12, 10)); // December → next campaign opens Jan 1, 2027
+    expect(isFoundingTransitionWindow(new RealDate('2026-12-20T00:00:00.000Z'))).toBe(true);  // ends before Jan 1
+    expect(isFoundingTransitionWindow(new RealDate('2027-01-05T00:00:00.000Z'))).toBe(false); // covers the January open
+  });
+});
+
+// ─────────────────────────────────────────────
+// createCheckoutSession — founding transition guard
+// ─────────────────────────────────────────────
+describe('createCheckoutSession — founding transition guard', () => {
+  const call = () => createCheckoutSession(42, 'biz@test.com', 250);
+
+  it('allows a founding member in their final included month to start a regular plan', async () => {
+    mockDateNow(nyDate(2026, 8, 6)); // August; year ends Aug 10 → September open not covered
+    mockSessionsCreate.mockResolvedValue({ url: 'https://checkout.stripe.com/s/1' });
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ stripe_subscription_id: null, current_period_end: new RealDate('2026-08-10T12:00:00.000Z'), is_founding: true }] }) // guard
+      .mockResolvedValueOnce({ rows: [{ cnt: '2' }] }); // active location count
+
+    const res = await call();
+
+    expect(res.url).toContain('checkout.stripe.com');
+    expect(mockSessionsCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it('allows an EXPIRED founding member (stuck-Active row) to start a regular plan', async () => {
+    mockDateNow(nyDate(2026, 7, 6));
+    mockSessionsCreate.mockResolvedValue({ url: 'https://checkout.stripe.com/s/1' });
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ stripe_subscription_id: null, current_period_end: new RealDate('2026-03-31T00:00:00.000Z'), is_founding: true }] })
+      .mockResolvedValueOnce({ rows: [{ cnt: '1' }] });
+
+    await expect(call()).resolves.toBeDefined();
+    expect(mockSessionsCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it('still blocks a founding member whose year covers the next campaign open', async () => {
+    // July; year ends Aug 10, so the August campaign (opens Aug 1) is still included.
+    mockDateNow(nyDate(2026, 7, 6));
+    mockQuery.mockResolvedValueOnce({ rows: [{ stripe_subscription_id: null, current_period_end: new RealDate('2026-08-10T12:00:00.000Z'), is_founding: true }] });
+
+    await expect(call()).rejects.toThrow(/already has an active subscription/);
+    expect(mockSessionsCreate).not.toHaveBeenCalled();
+  });
+
+  it('still blocks a business with a live regular subscription', async () => {
+    mockDateNow(nyDate(2026, 7, 6));
+    mockQuery.mockResolvedValueOnce({ rows: [{ stripe_subscription_id: 'sub_live', current_period_end: new RealDate('2026-07-31T00:00:00.000Z'), is_founding: false }] });
+
+    await expect(call()).rejects.toThrow(/already has an active subscription/);
+    expect(mockSessionsCreate).not.toHaveBeenCalled();
+  });
+});
+
+// ─────────────────────────────────────────────
+// verifyAndActivateSession — founding hand-off (setup session replacing a founding membership)
+// ─────────────────────────────────────────────
+describe('verifyAndActivateSession — founding hand-off', () => {
+  const SETUP_SESSION = {
+    id: 'cs_1',
+    mode: 'setup',
+    status: 'complete',
+    customer: 'cus_1',
+    setup_intent: 'seti_1',
+    metadata: { business_id: '42', price_id: 'price_x', quantity: '2', entries_per_location: '750', billing_interval: 'monthly' },
+  };
+
+  const stripeSetupMocks = () => {
+    mockSessionsRetrieve.mockResolvedValue(SETUP_SESSION);
+    mockSetupIntentsRetrieve.mockResolvedValue({ payment_method: 'pm_1' });
+    mockCustomersUpdate.mockResolvedValue({});
+    mockSubscriptionsCreate.mockResolvedValue({
+      id: 'sub_new',
+      current_period_end: Math.floor(new RealDate('2026-07-31T04:00:00.000Z').getTime() / 1000),
+      items: { data: [{ price: { unit_amount: 73000 }, quantity: 2 }] },
+    });
+  };
+
+  /** clientQuery driven by SQL content: founding row exists; `covered` controls whether the
+   *  business is enrolled in the currently Open campaign — i.e. whether its founding
+   *  benefits still cover it (deferred vs immediate apply). */
+  const setupHandoffClientQueries = (covered: boolean) => {
+    mockClientQuery.mockImplementation((sql: string) => {
+      if (typeof sql === 'string' && sql.includes('FROM founding_member') && sql.includes('FOR UPDATE')) {
+        return Promise.resolve({ rows: [{ id: 5 }], rowCount: 1 });
+      }
+      if (typeof sql === 'string' && sql.includes('FROM draw_entry') && sql.includes(`d.status = 'Open'`)) {
+        return Promise.resolve(covered ? { rows: [{ ok: 1 }], rowCount: 1 } : { rows: [], rowCount: 0 });
+      }
+      return Promise.resolve({ rows: [], rowCount: 0 });
+    });
+  };
+
+  const poolMocks = () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 42 }] })                                                // business lookup
+      .mockResolvedValueOnce({ rows: [{ stripe_subscription_id: null, is_founding: true }] })       // existing check → founding, proceed
+      .mockResolvedValueOnce({ rows: [{ opened_at: new RealDate() }] })                             // Open campaign after the charge → NOT in window
+      .mockResolvedValueOnce({ rows: [] });                                                         // email lookup
+  };
+
+  it('proceeds past the idempotency check when the only live row is a founding membership', async () => {
+    stripeSetupMocks();
+    poolMocks();
+    setupHandoffClientQueries(true);
+
+    await verifyAndActivateSession('cs_1', 7);
+
+    expect(mockSubscriptionsCreate).toHaveBeenCalledTimes(1);
+  });
+
+  it('stages the new plan in pending_* and ends the founding seat while the open campaign is still covered', async () => {
+    stripeSetupMocks();
+    poolMocks();
+    setupHandoffClientQueries(true);
+
+    await verifyAndActivateSession('cs_1', 7);
+
+    const sqls = mockClientQuery.mock.calls.map(([sql]: [string]) => (typeof sql === 'string' ? sql : ''));
+    // Founding seat ends at hand-off (payment history survives in founding_payment).
+    expect(sqls.some((s) => s.includes('DELETE FROM founding_member'))).toBe(true);
+    // Deferred: the new plan waits in pending_*, live founding tier/fee untouched.
+    const staged = mockClientQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('UPDATE subscription') && sql.includes('pending_fee_at_entry'),
+    );
+    expect(staged).toBeDefined();
+    // params: businessId, customer, sub id, price, period end, fee, tier, interval
+    expect(staged![1][6]).toBe(750);
+    // The plain upsert (which would overwrite the live tier) must NOT run.
+    expect(sqls.some((s) => s.includes('INSERT INTO subscription'))).toBe(false);
+  });
+
+  it('applies the new plan immediately when the founding year covers no open campaign (expired)', async () => {
+    stripeSetupMocks();
+    poolMocks();
+    setupHandoffClientQueries(false);
+
+    await verifyAndActivateSession('cs_1', 7);
+
+    const sqls = mockClientQuery.mock.calls.map(([sql]: [string]) => (typeof sql === 'string' ? sql : ''));
+    expect(sqls.some((s) => s.includes('DELETE FROM founding_member'))).toBe(true);
+    const insert = sqls.find((s) => s.includes('INSERT INTO subscription'));
+    expect(insert).toBeDefined();
+    // Immediate path also clears any stale staged values.
+    expect(insert).toMatch(/pending_fee_at_entry\s*=\s*NULL/);
   });
 });

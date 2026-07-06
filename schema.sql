@@ -125,6 +125,13 @@ CREATE TABLE business_location (
   latitude         DECIMAL(10, 8),
   longitude        DECIMAL(11, 8),
   is_active        BOOLEAN NOT NULL DEFAULT TRUE,
+  -- Location changes never touch the RUNNING campaign: while the business participates in
+  -- the Open campaign, a new location waits here (is_active=false, activate_at_open=true)
+  -- and a removed one keeps serving (is_active=true, deactivate_at_open=true). openDrawInTx
+  -- promotes both flags at the campaign boundary. Businesses not in the Open campaign
+  -- change locations immediately and never set these flags.
+  activate_at_open   BOOLEAN NOT NULL DEFAULT FALSE,
+  deactivate_at_open BOOLEAN NOT NULL DEFAULT FALSE,
   -- Location manager (a Business-role user assigned via invite link)
   manager_user_id  INTEGER REFERENCES "user"(id) ON DELETE SET NULL,
   -- Single-use invite token enforcement:
@@ -153,10 +160,25 @@ CREATE TABLE subscription (
   fee_at_entry           NUMERIC(10, 2) NULL,
   -- Max entries per location per draw. Single source of truth - not duplicated in business.entry_cap.
   entries_per_location   INTEGER NULL CHECK (entries_per_location IS NULL OR entries_per_location > 0),
+  -- Staged plan change applied when the next campaign opens (openDrawInTx). Used by the
+  -- founding-to-regular hand-off: the new plan's tier/fee wait here so the campaign that is
+  -- already running keeps the terms the business paid for. NULL = no staged change.
+  pending_entries_per_location INTEGER NULL CHECK (pending_entries_per_location IS NULL OR pending_entries_per_location > 0),
+  pending_fee_at_entry         NUMERIC(10, 2) NULL,
+  -- Business opted out of the campaign it already paid for (no refund). Consumed at the
+  -- next campaign open: enrollment skips the business, then the flag resets to FALSE.
+  skip_next_campaign     BOOLEAN NOT NULL DEFAULT FALSE,
   billing_interval       billing_interval_enum NOT NULL DEFAULT 'monthly',
   created_at             TIMESTAMP NOT NULL DEFAULT NOW(),
   updated_at             TIMESTAMP NOT NULL DEFAULT NOW()
 );
+
+-- Partial index for openDrawInTx: it applies staged plan changes via
+-- WHERE pending_entries_per_location IS NOT NULL. Almost every subscription has NULL,
+-- so this tiny partial index lets the once-a-month UPDATE skip a full table scan.
+CREATE INDEX IF NOT EXISTS idx_subscription_pending_plan
+  ON subscription (id)
+  WHERE pending_entries_per_location IS NOT NULL;
 
 
 -- ── Founding Members (one-time early-bird subscription cohort) ────────────────
@@ -192,6 +214,21 @@ CREATE TABLE founding_payment (
   created_at                 TIMESTAMP NOT NULL DEFAULT NOW()
 );
 CREATE INDEX idx_founding_payment_business ON founding_payment (business_id, created_at DESC);
+
+
+-- ── Subscription Change Log (append-only, shown in the payment history) ───────
+-- Under the no-proration billing model, a plan or location change made before the 24th
+-- moves no money and creates no Stripe invoice, so it would leave no trace. This ledger
+-- records those changes so the payment history can show "Updated your plan from X to Y"
+-- rows. Changes that settle money in the charged window are NOT logged here - their
+-- settlement invoice already carries the description.
+CREATE TABLE subscription_change_log (
+  id          SERIAL PRIMARY KEY,
+  business_id INTEGER NOT NULL REFERENCES business(id) ON DELETE CASCADE,
+  description TEXT NOT NULL,
+  created_at  TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_subscription_change_log_business ON subscription_change_log (business_id, created_at DESC);
 
 
 -- ── Draws ─────────────────────────────────────────────────────────────────────

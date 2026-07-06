@@ -12,6 +12,7 @@ import {
   TIER_PRICE_MAP,
   updateSubscriptionPlan,
   getSubscriptionInvoices,
+  setSkipNextCampaign,
 } from './stripe.service.js';
 
 // GET /business/subscription/founding-availability  (public — no auth)
@@ -143,8 +144,45 @@ export const updatePlan = async (req: Request, res: Response) => {
     await updateSubscriptionPlan(userId, entries_per_location);
     res.json({ success: true });
   } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : '';
+    if (msg === 'CHARGE_FAILED') {
+      res.status(402).json({ error: 'We could not charge your card for the plan difference, so nothing was changed. Please try again.' });
+      return;
+    }
+    if (msg.startsWith('REFUND_INCOMPLETE')) {
+      res.status(502).json({ error: 'We could not process the refund for this change, so nothing was changed. Please try again or contact support.' });
+      return;
+    }
+    if (msg === 'Already on this tier') {
+      res.status(400).json({ error: 'You are already on this plan.' });
+      return;
+    }
     console.error('[stripe.updatePlan]', err);
     res.status(400).json({ error: 'Failed to update plan' });
+  }
+};
+
+// POST /business/subscription/skip-campaign
+// Body: { skip: boolean } — opt out of (or back into) the campaign already paid for.
+// Only available between the charge on the 24th and the campaign open. No refund.
+export const skipCampaign = async (req: Request, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const skip = req.body?.skip !== false; // default true
+    await setSkipNextCampaign(userId, skip);
+    res.json({ skipped: skip });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : '';
+    if (msg === 'SKIP_WINDOW_CLOSED') {
+      res.status(409).json({ error: 'The next campaign has already opened. Contact support to be removed from a running campaign.' });
+      return;
+    }
+    if (msg === 'No active subscription found') {
+      res.status(404).json({ error: 'No active subscription found.' });
+      return;
+    }
+    console.error('[stripe.skipCampaign]', err);
+    res.status(400).json({ error: 'Could not update campaign participation. Please try again.' });
   }
 };
 

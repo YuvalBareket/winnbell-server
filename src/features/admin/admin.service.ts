@@ -1,5 +1,7 @@
 import { getPool } from '../../shared/db/db.js';
-import { getPlatformSettings, invalidatePlatformSettings, invalidatePublicBusinessData } from '../../shared/cache/cache.js';
+import { getPlatformSettings, invalidatePlatformSettings, invalidatePublicBusinessData, invalidateUserAuth } from '../../shared/cache/cache.js';
+import { lastDayOfMonthNyMidnightUtc, nextCampaignOpensNy } from '../../shared/dates.js';
+import { sendFoundingFinalCampaignEmail } from '../../shared/email/email.service.js';
 import { decayAllUserRiskScores } from '../risk/risk.service.js';
 
 const logDrawAudit = async (
@@ -139,24 +141,8 @@ export const getAllDrawsService = async () => {
   return result.rows;
 };
 
-// Returns the UTC Date for midnight America/New_York on the LAST day of the given month (1-indexed
-// month). Uses the actual NY offset for that date (EDT -4 in summer, EST -5 in winter) from the
-// built-in Intl, so month-end draw dates are correct year-round instead of a hardcoded +4h offset
-// (which was an hour early Nov-March under EST).
-function lastDayOfMonthNyMidnightUtc(year: number, month: number): Date {
-  // Date.UTC treats month as 0-indexed, so (month, day 0) = the last day of the 1-indexed month.
-  const lastDay = new Date(Date.UTC(year, month, 0));
-  const y = lastDay.getUTCFullYear();
-  const m = lastDay.getUTCMonth();
-  const d = lastDay.getUTCDate();
-  // Probe the NY offset at noon UTC on that day (well inside it; a month-end is never a DST switch day).
-  const probe = new Date(Date.UTC(y, m, d, 12));
-  const gmt = new Intl.DateTimeFormat('en-US', { timeZone: 'America/New_York', timeZoneName: 'shortOffset' })
-    .formatToParts(probe).find((p) => p.type === 'timeZoneName')?.value ?? 'GMT-5';
-  const offsetHours = Math.abs(parseInt(gmt.replace('GMT', ''), 10)) || 5; // 4 (EDT) or 5 (EST)
-  // Midnight NY on that day == offsetHours into UTC of the same calendar day.
-  return new Date(Date.UTC(y, m, d, offsetHours, 0, 0));
-}
+// lastDayOfMonthNyMidnightUtc moved to shared/dates.ts — stripe.service needs the same
+// campaign-calendar math for the founding-to-regular transition window.
 
 export const updateDrawService = async (
   drawId: number,
@@ -311,10 +297,57 @@ export const getDrawBusinessesService = async (
 // (after month-end charges), so only paid businesses get in:
 //  - regular subs (stripe_subscription_id NOT NULL): Active/Trialing, plus Past_Due during
 //    Stripe's retry grace (the draw-time check at close removes any still-unpaid).
-//  - founding members (no stripe sub): only while their prepaid year still covers this draw's
-//    date (current_period_end >= draw_date) — expires them automatically after 12 months.
+//  - founding members (no stripe sub): enrolled in EVERY campaign that OPENS before their
+//    prepaid year ends (current_period_end >= NOW() at open time). A campaign that opens
+//    inside the year is fully included even if it draws after the expiry date — this is what
+//    makes "12 monthly campaigns" true for any purchase day. Expiry is automatic: the first
+//    open after current_period_end simply skips them.
 const openDrawInTx = async (client: import('pg').PoolClient, drawId: number): Promise<void> => {
   await client.query(`UPDATE draw SET status = 'Open', opened_at = NOW() WHERE id = $1`, [drawId]);
+  // Apply staged plan changes (founding-to-regular hand-off) at the campaign boundary,
+  // BEFORE enrollment snapshots tier/fee. A founding member who started a regular plan
+  // during their final prepaid month keeps founding terms through that campaign; the new
+  // plan's tier/fee were parked in pending_* and take effect here, as this campaign opens.
+  await client.query(`
+    UPDATE subscription
+    SET entries_per_location         = pending_entries_per_location,
+        fee_at_entry                 = COALESCE(pending_fee_at_entry, fee_at_entry),
+        pending_entries_per_location = NULL,
+        pending_fee_at_entry         = NULL,
+        updated_at                   = NOW()
+    WHERE pending_entries_per_location IS NOT NULL
+  `);
+  // Promote staged location changes at the same boundary: locations added during the
+  // previous campaign go live now, removed ones stop serving now. The running campaign
+  // was never touched — that is the whole point of staging.
+  await client.query(`
+    UPDATE business_location
+    SET is_active = TRUE, activate_at_open = FALSE, updated_at = NOW()
+    WHERE activate_at_open = TRUE
+  `);
+  const detached = await client.query(`
+    UPDATE business_location
+    SET is_active = FALSE, deactivate_at_open = FALSE, manager_user_id = NULL, updated_at = NOW()
+    WHERE deactivate_at_open = TRUE
+    RETURNING manager_user_id
+  `);
+  // Same demotion rule as an immediate location delete (business.service): a detached
+  // manager who owns no business and manages no other active location drops back to
+  // 'User', and their sessions are revoked so the next sign-in re-syncs the role.
+  const managerIds = [...new Set(
+    detached.rows.map((r) => r.manager_user_id as number | null).filter((id): id is number => id != null),
+  )];
+  if (managerIds.length > 0) {
+    await client.query(`
+      UPDATE "user" u SET role = 'User'
+      WHERE u.id = ANY($1::int[])
+        AND u.role != 'Admin'
+        AND NOT EXISTS (SELECT 1 FROM business WHERE user_id = u.id)
+        AND NOT EXISTS (SELECT 1 FROM business_location WHERE manager_user_id = u.id AND is_active = TRUE)
+    `, [managerIds]);
+    await client.query(`DELETE FROM refresh_token WHERE user_id = ANY($1::int[])`, [managerIds]);
+    for (const id of managerIds) invalidateUserAuth(id);
+  }
   await client.query(`
     INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, cap_at_entry, min_transaction_at_entry)
     SELECT d.id, b.id, COALESCE(s.fee_at_entry, 0), s.entries_per_location, b.min_transaction_amount
@@ -322,10 +355,53 @@ const openDrawInTx = async (client: import('pg').PoolClient, drawId: number): Pr
     JOIN subscription s ON s.status IN ('Active', 'Trialing', 'Past_Due')
     JOIN business b ON b.id = s.business_id
     WHERE d.id = $1
-      AND (s.stripe_subscription_id IS NOT NULL OR s.current_period_end >= d.draw_date)
+      AND (s.stripe_subscription_id IS NOT NULL OR s.current_period_end >= NOW())
+      AND s.skip_next_campaign = FALSE
     ON CONFLICT (draw_id, business_id) DO NOTHING
   `, [drawId]);
+  // Opt-outs are one campaign only: consume the flag so the business is back in next time.
+  await client.query(`
+    UPDATE subscription SET skip_next_campaign = FALSE, updated_at = NOW()
+    WHERE skip_next_campaign = TRUE
+  `);
   await logDrawAudit(client, drawId, 'opened');
+};
+
+// After a campaign opens, tell every founding member for whom THIS is the final campaign
+// covered by their prepaid year: their term won't cover the next campaign, so they must
+// start a regular plan before this month ends to be in it. Runs AFTER the open commits
+// and is non-fatal — a mail failure must never affect draw state.
+const notifyFoundingFinalCampaign = async (drawId: number): Promise<void> => {
+  try {
+    const pool = getPool();
+    // This campaign is a founding member's FINAL one when their year ends before the next
+    // campaign opens (founders are in every campaign that opens inside their year).
+    const nextOpensAt = nextCampaignOpensNy();
+    const result = await pool.query(`
+      SELECT u.email, b.name, s.current_period_end
+      FROM draw_entry de
+      JOIN business b ON b.id = de.business_id
+      JOIN "user" u ON u.id = b.user_id
+      JOIN subscription s ON s.business_id = b.id
+      JOIN founding_member fm ON fm.business_id = b.id
+      WHERE de.draw_id = $1
+        AND s.stripe_subscription_id IS NULL
+        AND s.current_period_end < $2
+    `, [drawId, nextOpensAt]);
+
+    for (const row of result.rows) {
+      try {
+        await sendFoundingFinalCampaignEmail(row.email, row.name, {
+          termEnd: new Date(row.current_period_end),
+          nextCampaignOpensAt: nextOpensAt,
+        });
+      } catch (err: unknown) {
+        console.error(`[Draw] founding final-campaign email to ${row.email} failed (non-fatal):`, err instanceof Error ? err.message : err);
+      }
+    }
+  } catch (err: unknown) {
+    console.error('[Draw] founding final-campaign notice query failed (non-fatal):', err instanceof Error ? err.message : err);
+  }
 };
 
 export const openDrawService = async (drawId: number): Promise<void> => {
@@ -355,6 +431,7 @@ export const openDrawService = async (drawId: number): Promise<void> => {
     await openDrawInTx(client, drawId);
     await client.query('COMMIT');
     invalidatePublicBusinessData();
+    await notifyFoundingFinalCampaign(drawId);
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
@@ -416,6 +493,7 @@ export const closeDrawService = async (drawId: number): Promise<void> => {
 
     await client.query('COMMIT');
     invalidatePublicBusinessData();
+    await notifyFoundingFinalCampaign(nextDrawId);
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;

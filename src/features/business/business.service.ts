@@ -56,7 +56,9 @@ export const getNearbyBusinessesService = async (
       b.logo_url
     FROM business_location loc
     INNER JOIN business b ON loc.business_id = b.id
-    JOIN subscription s ON s.business_id = b.id AND s.status IN ('Active', 'Trialing')
+    -- Participation = membership in the Open campaign (draw_entry), NOT subscription
+    -- status: billing runs on the 24th while campaigns run to month end, so a business
+    -- whose subscription ended on the 24th still owns the campaign it paid for.
     WHERE loc.is_active = true
       AND EXISTS (
         SELECT 1 FROM draw_entry de
@@ -204,6 +206,8 @@ export const getMyBusinessData = async (userId: number, managedLocationId?: numb
             'manager_id', bl.manager_user_id,
             'manager_name', u.full_name,
             'is_active', bl.is_active,
+            'activate_at_open', bl.activate_at_open,
+            'deactivate_at_open', bl.deactivate_at_open,
             'suite', bl.suite,
             'phone', bl.phone
           )), '[]'::json)
@@ -385,7 +389,13 @@ export const updateBusinessLocation = async (
   invalidatePublicLocation(locationId);
 };
 
-export const addBusinessLocation = async (ownerUserId: number, data: AddLocationInput): Promise<{ locationId: number }> => {
+export const addBusinessLocation = async (
+  ownerUserId: number,
+  data: AddLocationInput,
+  // While the business participates in the Open campaign, new locations are STAGED
+  // (inactive until the next campaign opens) — the running campaign is never changed.
+  stageForNextCampaign = false,
+): Promise<{ locationId: number }> => {
   const pool = getPool();
 
   const ownerCheck = await pool.query(`SELECT id FROM business WHERE user_id = $1`, [ownerUserId]);
@@ -394,13 +404,28 @@ export const addBusinessLocation = async (ownerUserId: number, data: AddLocation
   const businessId = ownerCheck.rows[0].id;
 
   const result = await pool.query(`
-    INSERT INTO business_location (business_id, name, address, suite, phone, latitude, longitude, is_active)
-    VALUES ($1, $2, $3, $4, $5, $6, $7, true)
+    INSERT INTO business_location (business_id, name, address, suite, phone, latitude, longitude, is_active, activate_at_open)
+    VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
     RETURNING id
-  `, [businessId, data.name, data.address, data.suite ?? null, data.phone ?? null, data.lat, data.lon]);
+  `, [businessId, data.name, data.address, data.suite ?? null, data.phone ?? null, data.lat, data.lon, !stageForNextCampaign, stageForNextCampaign]);
 
   invalidatePublicBusinessData();
   return { locationId: result.rows[0].id };
+};
+
+// Schedule a location to stop serving when the next campaign opens (used while the
+// business participates in the Open campaign — the running campaign keeps the location).
+export const scheduleLocationDeactivation = async (locationId: number, ownerUserId: number): Promise<void> => {
+  const pool = getPool();
+  const result = await pool.query(`
+    UPDATE business_location bl
+    SET deactivate_at_open = TRUE, updated_at = NOW()
+    FROM business b
+    WHERE bl.id = $1 AND bl.business_id = b.id AND b.user_id = $2 AND bl.is_active = TRUE
+    RETURNING bl.id
+  `, [locationId, ownerUserId]);
+  if (result.rowCount === 0) throw new Error('UNAUTHORIZED_OR_INVALID_LOCATION');
+  invalidatePublicBusinessData();
 };
 
 export const deleteBusinessLocation = async (locationId: number, ownerUserId: number): Promise<void> => {
@@ -458,7 +483,6 @@ export const getEntryModeService = async (): Promise<{ entry_mode: string }> => 
   const pool = getPool();
   const result = await pool.query(
     `SELECT b.entry_mode FROM business b
-     JOIN subscription s ON s.business_id = b.id AND s.status IN ('Active', 'Trialing')
      WHERE EXISTS (
        SELECT 1 FROM draw_entry de
        JOIN draw d ON d.id = de.draw_id
@@ -481,7 +505,6 @@ export const getParticipatingBusinessesService = async () => {
   const result = await pool.query(`
     SELECT b.id, b.name, b.sector, b.logo_url, b.entry_mode
     FROM business b
-    JOIN subscription s ON s.business_id = b.id AND s.status IN ('Active', 'Trialing')
     WHERE EXISTS (
       SELECT 1 FROM draw_entry de
       JOIN draw d ON d.id = de.draw_id
@@ -524,7 +547,7 @@ export const searchParticipatingLocationsService = async (query: string): Promis
       ) >= COALESCE(s.entries_per_location, (SELECT global_entry_cap FROM platform_settings WHERE id = 1)) AS cap_reached
     FROM business_location bl
     JOIN business b ON bl.business_id = b.id
-    JOIN subscription s ON s.business_id = b.id AND s.status IN ('Active', 'Trialing')
+    LEFT JOIN subscription s ON s.business_id = b.id
     WHERE bl.is_active = true
       AND EXISTS (
         SELECT 1 FROM draw_entry de
@@ -557,7 +580,6 @@ const fetchLocationProfile = async (
 
   const gate = participatingOnly
     ? `AND bl.is_active
-       AND EXISTS (SELECT 1 FROM subscription s WHERE s.business_id = b.id AND s.status IN ('Active', 'Trialing'))
        AND EXISTS (SELECT 1 FROM draw_entry de JOIN draw d ON d.id = de.draw_id WHERE de.business_id = b.id AND d.status = 'Open')`
     : '';
 
@@ -595,16 +617,17 @@ const fetchLocationProfile = async (
           AND t.draw_id = (SELECT id FROM open_draw)
           AND t.is_quarantined = FALSE
       ) >= COALESCE(
-            (SELECT entries_per_location FROM subscription WHERE business_id = b.id AND status IN ('Active', 'Trialing') LIMIT 1),
+            (SELECT entries_per_location FROM subscription WHERE business_id = b.id LIMIT 1),
             (SELECT global_entry_cap FROM platform_settings WHERE id = 1)
           ) AS cap_reached,
       (SELECT prize_pool FROM open_draw) AS draw_prize_amount,
       (SELECT draw_date FROM open_draw) AS draw_date,
-      -- active location + active subscription + enrolled in the open draw. On the unconditional
-      -- fetch this tells the client whether to show the "Submit a Receipt" action.
+      -- active location + enrolled in the open draw (draw_entry = the paid-participation
+      -- record; subscription status is NOT consulted, since a subscription that ended on
+      -- the 24th still owns the campaign it paid for). On the unconditional fetch this
+      -- tells the client whether to show the "Submit a Receipt" action.
       (
         bl.is_active
-        AND EXISTS (SELECT 1 FROM subscription s WHERE s.business_id = b.id AND s.status IN ('Active', 'Trialing'))
         AND EXISTS (SELECT 1 FROM draw_entry de JOIN draw d ON d.id = de.draw_id WHERE de.business_id = b.id AND d.status = 'Open')
       ) AS is_participating
     FROM business_location bl

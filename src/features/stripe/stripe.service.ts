@@ -3,6 +3,7 @@ import { Pool } from 'pg';
 import { getPool } from '../../shared/db/db.js';
 import { sendSubscriptionConfirmationEmail } from '../../shared/email/email.service.js';
 import { getPlatformSettings, publicCache, invalidatePublicBusinessData } from '../../shared/cache/cache.js';
+import { nextCampaignOpensNy, lastChargeAtNy, CHARGE_DAY_OF_MONTH } from '../../shared/dates.js';
 
 const stripeSecretKey = process.env.STRIPE_SECRET_KEY;
 if (!stripeSecretKey) throw new Error('STRIPE_SECRET_KEY is not configured — refusing to start the Stripe client.');
@@ -80,6 +81,101 @@ export function resolveMonthlyFee(
     }
   }
   return mapFee;
+}
+
+// ─── Charged-But-Not-Opened Window ────────────────────────────────────────────
+// Subscriptions bill on the 24th; each charge pays for the NEXT campaign, which opens on
+// the 1st. Between the charge and that open there is a window where the upcoming campaign
+// is already paid for. Inside it, any config change (tier, locations, a late signup) must
+// settle money immediately - charge the difference or refund it - because the 24th already
+// billed the old configuration. Outside it, no money moves: the next 24th simply bills the
+// new configuration. Detected as "the most recent charge moment is later than the moment
+// the current Open campaign opened" (also true if no campaign is open at all).
+export async function isChargedNotOpenedWindow(pool: Pool): Promise<boolean> {
+  const res = await pool.query(`SELECT opened_at FROM draw WHERE status = 'Open' ORDER BY opened_at DESC NULLS LAST LIMIT 1`);
+  const openedAt: Date | null = res.rows[0]?.opened_at ?? null;
+  if (!openedAt) return true; // charge ran, its campaign has not opened yet
+  return lastChargeAtNy().getTime() > new Date(openedAt).getTime();
+}
+
+// ─── Money Settlement Helpers (24th-to-open window) ───────────────────────────
+
+// Charge `amountDollars` right now against the customer's default card, attached to the
+// subscription so renewal webhooks (payment_succeeded / payment_failed) map it back to the
+// business. Returns true if paid. Idempotency keys make the webhook + verify-page double
+// call safe: Stripe returns the same invoice instead of charging twice.
+async function chargeNow(
+  customerId: string,
+  subscriptionId: string,
+  amountDollars: number,
+  description: string,
+  idempotencyTag: string,
+): Promise<boolean> {
+  await stripe.invoiceItems.create(
+    { customer: customerId, amount: Math.round(amountDollars * 100), currency: 'usd', description },
+    { idempotencyKey: `winnbell_item_${idempotencyTag}` },
+  );
+  const draft = await stripe.invoices.create(
+    { customer: customerId, subscription: subscriptionId, description, auto_advance: true },
+    { idempotencyKey: `winnbell_inv_${idempotencyTag}` },
+  );
+  if (!draft.id) throw new Error('Stripe did not return an invoice id');
+  let invoice = draft;
+  if (invoice.status === 'draft') {
+    invoice = await stripe.invoices.finalizeInvoice(draft.id);
+  }
+  if (invoice.status === 'paid') return true;
+  if (invoice.status === 'open') {
+    try {
+      const paid = await stripe.invoices.pay(draft.id);
+      return paid.status === 'paid';
+    } catch (err: unknown) {
+      const code = (err as { code?: string })?.code;
+      if (code === 'invoice_already_paid') return true;
+      // Card declined: leave the invoice open — auto_advance lets Stripe retry per its
+      // dunning schedule, and invoice.payment_succeeded flips the business Active later.
+      console.error(`[Stripe] immediate charge not paid (${description}):`, err instanceof Error ? err.message : err);
+      return false;
+    }
+  }
+  return false;
+}
+
+// Refund `amountDollars` of what was already paid for the upcoming campaign, drawing from
+// the subscription's most recent paid invoices (newest first). Throws if the full amount
+// cannot be refunded — the caller must then abort the change entirely.
+async function refundUpcomingCampaignDelta(subscriptionId: string, amountDollars: number, reason: string): Promise<void> {
+  let remainingCents = Math.round(amountDollars * 100);
+  const invoices = await stripe.invoices.list({ subscription: subscriptionId, status: 'paid', limit: 10 });
+  for (const invoice of invoices.data) {
+    if (remainingCents <= 0) break;
+    const piId = (invoice as unknown as { payment_intent?: string | { id?: string } | null }).payment_intent;
+    const paymentIntentId = typeof piId === 'string' ? piId : piId?.id;
+    if (!paymentIntentId) continue;
+    const pi = await stripe.paymentIntents.retrieve(paymentIntentId, { expand: ['latest_charge'] });
+    const charge = pi.latest_charge as Stripe.Charge | null;
+    if (!charge || typeof charge === 'string') continue;
+    const available = charge.amount - charge.amount_refunded;
+    if (available <= 0) continue;
+    const refundCents = Math.min(available, remainingCents);
+    await stripe.refunds.create({ payment_intent: paymentIntentId, amount: refundCents, metadata: { reason } });
+    remainingCents -= refundCents;
+  }
+  if (remainingCents > 0) {
+    throw new Error(`REFUND_INCOMPLETE: could not refund remaining $${(remainingCents / 100).toFixed(2)} for ${reason}`);
+  }
+}
+
+// ─── Founding Member: Transition Window ───────────────────────────────────────
+// A founding membership is a one-time payment with no Stripe subscription behind it, so
+// nothing ever flips its status off 'Active' — the year "ends" purely as a date. Founders
+// are in EVERY campaign that OPENS before their year ends, so their final included campaign
+// is the last one to open inside the year. From that month onward (year ends before the
+// next campaign opens — and forever after expiry) they may start a regular plan. Subscribing
+// inside this window puts them in that next campaign with no gap: the new subscription bills
+// on the last day of this month, which pays for next month's campaign.
+export function isFoundingTransitionWindow(currentPeriodEnd: Date): boolean {
+  return currentPeriodEnd.getTime() < nextCampaignOpensNy().getTime();
 }
 
 // ─── Founding Member: Checkout Session ────────────────────────────────────────
@@ -161,7 +257,7 @@ export const createCheckoutSession = async (
   businessId: number,
   userEmail: string,
   entriesPerLocation: number,
-): Promise<{ url: string; joinsNextCampaign: boolean; nextCampaignDate: string | null }> => {
+): Promise<{ url: string }> => {
   const tier = TIER_PRICE_MAP[entriesPerLocation];
   if (!tier) throw new Error('Invalid entries_per_location value');
 
@@ -169,23 +265,26 @@ export const createCheckoutSession = async (
   if (!priceId) throw new Error(`${tier.envKey} is not configured`);
 
   const pool = getPool();
+  // Block a second subscription — EXCEPT for a founding member inside the transition
+  // window (their prepaid year no longer covers the next campaign, or already ended).
+  // Their row stays 'Active' forever because no Stripe subscription backs it, so a plain
+  // status check would lock them out of ever subscribing again.
   const existing = await pool.query(
-    `SELECT id FROM subscription WHERE business_id = $1 AND status != 'Cancelled'`,
+    `SELECT s.stripe_subscription_id, s.current_period_end,
+            EXISTS(SELECT 1 FROM founding_member fm WHERE fm.business_id = s.business_id) AS is_founding
+     FROM subscription s
+     WHERE s.business_id = $1 AND s.status != 'Cancelled'`,
     [businessId],
   );
-  if (existing.rows.length > 0) throw new Error('This business already has an active subscription');
-
-  // Detect late-cycle signups (within 7 days of next campaign start).
-  // We still allow the subscription — but flag it so the client can inform the business
-  // they'll join the NEXT campaign rather than the current one.
-  const nowNY = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' }));
-  const nextCampaignStart = new Date(nowNY.getFullYear(), nowNY.getMonth() + 1, 1);
-  const msUntilNext = nextCampaignStart.getTime() - nowNY.getTime();
-  const daysUntilNext = msUntilNext / (1000 * 60 * 60 * 24);
-  const joinsNextCampaign = daysUntilNext <= CAMPAIGN_ONBOARDING_CUTOFF_DAYS;
-  const nextCampaignDate = joinsNextCampaign
-    ? new Date(nowNY.getFullYear(), nowNY.getMonth() + 2, 1).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })
-    : null;
+  const existingSub = existing.rows[0];
+  if (existingSub) {
+    const foundingInTransition =
+      existingSub.is_founding &&
+      !existingSub.stripe_subscription_id &&
+      existingSub.current_period_end &&
+      isFoundingTransitionWindow(new Date(existingSub.current_period_end));
+    if (!foundingInTransition) throw new Error('This business already has an active subscription');
+  }
 
   const locResult = await pool.query(
     `SELECT COUNT(*) AS cnt FROM business_location WHERE business_id = $1 AND is_active = true`,
@@ -195,10 +294,10 @@ export const createCheckoutSession = async (
 
   const baseUrl = process.env.FRONTEND_URL || 'http://localhost:8081';
 
-  // Setup mode: collect + save a card without charging now. The subscription
-  // itself is created server-side (createSubscriptionForSetupSession) so we can
-  // anchor billing to the last day of the month (day_of_month: 31) and make the
-  // first partial month free — neither of which Checkout's subscription mode allows.
+  // Setup mode: collect + save a card without charging at checkout. The subscription
+  // itself is created server-side (createSubscriptionForSetupSession) so we can anchor
+  // billing to the 24th of the month and, for signups after the 24th, charge the upcoming
+  // campaign immediately — neither of which Checkout's subscription mode allows.
   const planMetadata = {
     business_id: String(businessId),
     entries_per_location: String(entriesPerLocation),
@@ -218,7 +317,7 @@ export const createCheckoutSession = async (
     cancel_url: `${baseUrl}/subscribe`,
   });
 
-  return { url: session.url as string, joinsNextCampaign, nextCampaignDate };
+  return { url: session.url as string };
 };
 
 // ─── Verify Session ───────────────────────────────────────────────────────────
@@ -262,11 +361,20 @@ async function createSubscriptionForSetupSession(pool: Pool, session: Stripe.Che
   if (!businessId) throw new Error('Setup session missing business_id');
 
   // DB-level idempotency: a live subscription already exists for this business.
+  // A founding membership (no Stripe subscription behind it) does NOT count — the
+  // checkout guard only lets founding members reach setup mode inside their transition
+  // window, and this new subscription is what replaces the founding one. After the
+  // replacement the row has a stripe_subscription_id, so a duplicate webhook/verify
+  // call still returns here.
   const existing = await pool.query(
-    `SELECT id FROM subscription WHERE business_id = $1 AND status != 'Cancelled'`,
+    `SELECT s.stripe_subscription_id,
+            EXISTS(SELECT 1 FROM founding_member fm WHERE fm.business_id = s.business_id) AS is_founding
+     FROM subscription s
+     WHERE s.business_id = $1 AND s.status != 'Cancelled'`,
     [businessId],
   );
-  if (existing.rows.length > 0) return;
+  const existingSub = existing.rows[0];
+  if (existingSub && !(existingSub.is_founding && !existingSub.stripe_subscription_id)) return;
 
   const customerId = session.customer as string;
   const priceId = session.metadata?.price_id ?? '';
@@ -283,15 +391,15 @@ async function createSubscriptionForSetupSession(pool: Pool, session: Stripe.Che
     });
   }
 
-  // day_of_month:31 → bills the last day of every month (Stripe clamps short
-  // months). proration_behavior 'none' → no charge for the partial signup month;
-  // first charge lands on the next month-end and pays for next month's draw.
+  // Anchor on the 24th (the platform charge day). proration_behavior 'none' → Stripe
+  // itself charges nothing until the first 24th, and each charge pays for the NEXT
+  // month's campaign.
   const subscription = await stripe.subscriptions.create(
     {
       customer: customerId,
       items: [{ price: priceId, quantity }],
       default_payment_method: paymentMethodId ?? undefined,
-      billing_cycle_anchor_config: { day_of_month: 31 },
+      billing_cycle_anchor_config: { day_of_month: CHARGE_DAY_OF_MONTH },
       proration_behavior: 'none',
       metadata: {
         business_id: String(businessId),
@@ -308,7 +416,25 @@ async function createSubscriptionForSetupSession(pool: Pool, session: Stripe.Che
   const monthlyFee = resolveMonthlyFee(entriesPerLocation, item?.quantity ?? quantity, item?.price.unit_amount);
   const currentPeriodEnd = extractPeriodEnd(subscription);
 
-  await activateBusinessSubscription(pool, businessId, subscription.id, customerId, priceId, currentPeriodEnd, monthlyFee, entriesPerLocation);
+  // Signup between the 24th and the campaign open: the 24th charge already ran without
+  // them, so their upcoming campaign is paid RIGHT NOW at full price (a campaign is
+  // all-or-nothing — same product, same price, regardless of signup day). Their first
+  // recurring charge on the next 24th then pays for the campaign after. If the immediate
+  // charge fails, the business activates as Incomplete: it is NOT enrolled at open, and
+  // Stripe's retries (or a later manual payment) flip it Active via invoice webhooks.
+  let initialStatus: 'Active' | 'Incomplete' = 'Active';
+  if (await isChargedNotOpenedWindow(pool)) {
+    const paid = await chargeNow(
+      customerId,
+      subscription.id,
+      monthlyFee,
+      'Payment for the upcoming campaign',
+      session.id,
+    );
+    if (!paid) initialStatus = 'Incomplete';
+  }
+
+  await activateBusinessSubscription(pool, businessId, subscription.id, customerId, priceId, currentPeriodEnd, monthlyFee, entriesPerLocation, initialStatus);
   invalidatePublicBusinessData();
 }
 
@@ -718,6 +844,7 @@ async function activateBusinessSubscription(
   currentPeriodEnd: Date,
   monthlyFee: number,
   entriesPerLocation: number,
+  initialStatus: 'Active' | 'Incomplete' = 'Active',
 ): Promise<void> {
   console.log(`[Stripe] Activating business ${businessId} — entries/location: ${entriesPerLocation}...`);
 
@@ -728,22 +855,75 @@ async function activateBusinessSubscription(
   try {
     await client.query('BEGIN');
 
-    await client.query(`
-      INSERT INTO subscription
-        (business_id, stripe_customer_id, stripe_subscription_id, stripe_price_id, status, current_period_end, cancel_at_period_end, fee_at_entry, entries_per_location, billing_interval)
-      VALUES ($1, $2, $3, $4, 'Active', $5, false, $6, $7, $8)
-      ON CONFLICT (business_id) DO UPDATE
-        SET stripe_customer_id     = EXCLUDED.stripe_customer_id,
-            stripe_subscription_id = EXCLUDED.stripe_subscription_id,
-            stripe_price_id        = EXCLUDED.stripe_price_id,
-            status                 = 'Active',
-            current_period_end     = EXCLUDED.current_period_end,
-            cancel_at_period_end   = false,
-            fee_at_entry           = EXCLUDED.fee_at_entry,
-            entries_per_location   = EXCLUDED.entries_per_location,
-            billing_interval       = EXCLUDED.billing_interval,
-            updated_at             = NOW()
-    `, [businessId, customerId, subscriptionId, priceId, currentPeriodEnd, monthlyFee, entriesPerLocation || null, 'monthly']);
+    // ── Founding hand-off ─────────────────────────────────────────────────────
+    // If this business is a founding member, this activation is the transition to a
+    // regular plan. The founding seat ends here (row deleted; the $1,200 stays in the
+    // append-only founding_payment ledger). When the founding year still covers the
+    // currently OPEN campaign, the new tier/fee must NOT shrink benefits already paid
+    // for — they are staged in pending_* and applied by openDrawInTx when the next
+    // campaign opens. When nothing covered remains (expired), the new plan applies now.
+    const fmRes = await client.query(
+      `SELECT id FROM founding_member WHERE business_id = $1 FOR UPDATE`,
+      [businessId],
+    );
+    const wasFounding = (fmRes.rowCount ?? 0) > 0;
+    let deferToNextCampaign = false;
+    if (wasFounding) {
+      // The founding benefits cover the currently OPEN campaign iff the business is
+      // enrolled in it — enrollment at open is the single source of truth, and a founder
+      // is in every campaign that opened inside their year (even one that draws after
+      // the expiry date). An expired founder has no Open-draw entry, so the new plan
+      // applies immediately.
+      const covered = await client.query(
+        `SELECT 1
+         FROM draw_entry de
+         JOIN draw d ON d.id = de.draw_id
+         WHERE de.business_id = $1 AND d.status = 'Open'`,
+        [businessId],
+      );
+      deferToNextCampaign = (covered.rowCount ?? 0) > 0;
+      await client.query(`DELETE FROM founding_member WHERE business_id = $1`, [businessId]);
+      console.log(`[Stripe] Business ${businessId} founding hand-off (${deferToNextCampaign ? 'new plan staged for next campaign' : 'new plan applies immediately'})`);
+    }
+
+    if (deferToNextCampaign) {
+      // Keep the founding tier/fee live for the campaign that is still covered; park
+      // the new plan in pending_*. The row must already exist (they are founding).
+      await client.query(`
+        UPDATE subscription
+        SET stripe_customer_id           = $2,
+            stripe_subscription_id       = $3,
+            stripe_price_id              = $4,
+            status                       = $9,
+            current_period_end           = $5,
+            cancel_at_period_end         = false,
+            pending_fee_at_entry         = $6,
+            pending_entries_per_location = $7,
+            billing_interval             = $8,
+            updated_at                   = NOW()
+        WHERE business_id = $1
+      `, [businessId, customerId, subscriptionId, priceId, currentPeriodEnd, monthlyFee, entriesPerLocation || null, 'monthly', initialStatus]);
+    } else {
+      await client.query(`
+        INSERT INTO subscription
+          (business_id, stripe_customer_id, stripe_subscription_id, stripe_price_id, status, current_period_end, cancel_at_period_end, fee_at_entry, entries_per_location, billing_interval)
+        VALUES ($1, $2, $3, $4, $9, $5, false, $6, $7, $8)
+        ON CONFLICT (business_id) DO UPDATE
+          SET stripe_customer_id     = EXCLUDED.stripe_customer_id,
+              stripe_subscription_id = EXCLUDED.stripe_subscription_id,
+              stripe_price_id        = EXCLUDED.stripe_price_id,
+              status                 = EXCLUDED.status,
+              current_period_end     = EXCLUDED.current_period_end,
+              cancel_at_period_end   = false,
+              fee_at_entry           = EXCLUDED.fee_at_entry,
+              entries_per_location   = EXCLUDED.entries_per_location,
+              pending_fee_at_entry         = NULL,
+              pending_entries_per_location = NULL,
+              skip_next_campaign     = false,
+              billing_interval       = EXCLUDED.billing_interval,
+              updated_at             = NOW()
+      `, [businessId, customerId, subscriptionId, priceId, currentPeriodEnd, monthlyFee, entriesPerLocation || null, 'monthly', initialStatus]);
+    }
 
     await client.query('COMMIT');
     console.log(`[Stripe] subscription row upserted for business ${businessId}`);
@@ -757,23 +937,25 @@ async function activateBusinessSubscription(
   // No draw enrollment here. A new subscriber joins the next campaign when the
   // admin opens it — open is the single enrollment point.
 
-  // Send confirmation email — non-fatal
+  // Send confirmation email — non-fatal. Plan values come from THIS activation's
+  // parameters, not a re-read of the subscription row: during a founding hand-off the
+  // row still carries the founding tier/fee (the new plan is staged in pending_*), and
+  // the email must describe the plan the business just chose.
   try {
     const bizResult = await pool.query(
-      `SELECT b.name, u.email, s.entries_per_location, s.billing_interval, s.fee_at_entry,
+      `SELECT b.name, u.email,
               (SELECT COUNT(*) FROM business_location WHERE business_id = b.id AND is_active = true) AS location_count
        FROM business b
        JOIN "user" u ON u.id = b.user_id
-       JOIN subscription s ON s.business_id = b.id
        WHERE b.id = $1`,
       [businessId],
     );
     const biz = bizResult.rows[0];
     if (biz?.email) {
       await sendSubscriptionConfirmationEmail(biz.email, biz.name, {
-        entriesPerLocation: biz.entries_per_location,
-        billingInterval: biz.billing_interval,
-        monthlyFee: biz.fee_at_entry,
+        entriesPerLocation,
+        billingInterval: 'monthly',
+        monthlyFee,
         locationCount: Math.max(1, Number(biz.location_count)),
       });
     }
@@ -790,9 +972,14 @@ async function activateBusinessSubscription(
 // in draws they hadn't paid for.
 
 // ─── Sync Subscription Quantity ───────────────────────────────────────────────
-// Called after adding/removing a location to keep Stripe quantity in sync.
-// Skips silently for founding members (no stripe_subscription_id).
-export const syncSubscriptionQuantity = async (userId: number, newLocationCount: number, reason: 'location_added' | 'location_removed' = 'location_added'): Promise<void> => {
+// Called after scheduling a location add/remove. `newNextCampaignCount` is the location
+// count the NEXT campaign will run with (active minus scheduled removals plus scheduled
+// adds). Money model: no prorations ever. Stripe items update immediately so the next
+// 24th bills the new count; the fee is staged in pending_* and goes live at the next
+// campaign open. Inside the charged-but-not-opened window the difference for the already
+// paid campaign is settled on the spot (charged or refunded).
+// Skips silently for founding members (no stripe_subscription_id — flat price).
+export const syncSubscriptionQuantity = async (userId: number, newNextCampaignCount: number, reason: 'location_added' | 'location_removed' = 'location_added'): Promise<void> => {
   const pool = getPool();
 
   const result = await pool.query(`
@@ -800,6 +987,9 @@ export const syncSubscriptionQuantity = async (userId: number, newLocationCount:
       s.stripe_subscription_id,
       s.stripe_customer_id,
       s.entries_per_location,
+      s.fee_at_entry,
+      s.pending_entries_per_location,
+      s.pending_fee_at_entry,
       b.id AS business_id
     FROM business b
     JOIN subscription s ON s.business_id = b.id
@@ -810,66 +1000,87 @@ export const syncSubscriptionQuantity = async (userId: number, newLocationCount:
   if (!sub) return; // no subscription yet — nothing to sync
   if (!sub.stripe_subscription_id) return; // founding member, no Stripe sub — skip
 
-  const tierConfig = TIER_PRICE_MAP[sub.entries_per_location as number];
+  // The next campaign's tier: a staged plan change (or founding hand-off) takes precedence
+  // over the live tier — it is what Stripe bills and what the next campaign runs with.
+  const effectiveTier = (sub.pending_entries_per_location ?? sub.entries_per_location) as number;
+
+  const tierConfig = TIER_PRICE_MAP[effectiveTier];
   if (!tierConfig) throw new Error('Unknown tier');
 
   const priceId = process.env[tierConfig.envKey];
-  if (!priceId) throw new Error(`Stripe price ID not configured for tier ${sub.entries_per_location}`);
+  if (!priceId) throw new Error(`Stripe price ID not configured for tier ${effectiveTier}`);
 
-  const quantity = Math.max(1, newLocationCount);
+  const quantity = Math.max(1, newNextCampaignCount);
+  const newTotalFee = resolveMonthlyFee(effectiveTier, quantity);
+  // What the business is currently set to pay for the next campaign (already settled or
+  // queued for the next 24th). Every change settles its own delta against this baseline.
+  const baselineFee = Number(sub.pending_fee_at_entry ?? sub.fee_at_entry ?? 0);
+  const deltaDollars = newTotalFee - baselineFee;
 
   const stripeSub = await stripe.subscriptions.retrieve(sub.stripe_subscription_id, { expand: ['items'] });
   const item = stripeSub.items.data[0];
   if (!item) throw new Error('Stripe subscription item not found');
-
-  // fee_at_entry from the single TIER_PRICE_MAP source of truth (same helper as every
-  // other write-path). The post-update unit_amount isn't fetched here, so no cross-check.
-  const newTotalFee = resolveMonthlyFee(sub.entries_per_location as number, quantity);
-
-  const changeLabel = reason === 'location_added'
-    ? `You added a location. Your plan now covers ${quantity} location${quantity !== 1 ? 's' : ''}.`
-    : `You removed a location. Your plan now covers ${quantity} location${quantity !== 1 ? 's' : ''}.`;
-
   const originalQuantity = item.quantity ?? 1;
   const originalPriceId = item.price.id;
 
-  // Step 1 — queue proration items on Stripe (no invoice yet)
+  // Step 1 — point Stripe at the new configuration, no proration: the next 24th simply
+  // bills the new count.
   await stripe.subscriptions.update(sub.stripe_subscription_id, {
     items: [{ id: item.id, price: priceId, quantity }],
-    proration_behavior: 'create_prorations',
+    proration_behavior: 'none',
   });
 
+  // Step 2 — inside the charged window, settle the difference for the already-paid
+  // campaign now. Any failure rolls Stripe back so nothing changed anywhere.
+  let settled = false;
   try {
-    // Step 2 — create draft invoice with description, finalize, and pay
-    const draftInvoice = await stripe.invoices.create({
-      customer: sub.stripe_customer_id,
-      subscription: sub.stripe_subscription_id,
-      description: changeLabel,
-      auto_advance: false,
-    });
-    if (!draftInvoice.id) throw new Error('Stripe did not return an invoice id for the proration charge');
-    const finalizedInvoice = await stripe.invoices.finalizeInvoice(draftInvoice.id);
-    if (finalizedInvoice.status === 'open') {
-      await stripe.invoices.pay(draftInvoice.id);
+    if (deltaDollars !== 0 && await isChargedNotOpenedWindow(pool)) {
+      const label = reason === 'location_added'
+        ? `Added a location for the upcoming campaign (${quantity} location${quantity !== 1 ? 's' : ''} total)`
+        : `Removed a location for the upcoming campaign (${quantity} location${quantity !== 1 ? 's' : ''} total)`;
+      if (deltaDollars > 0) {
+        const paid = await chargeNow(sub.stripe_customer_id, sub.stripe_subscription_id, deltaDollars, label, `${sub.stripe_subscription_id}_${Date.now()}`);
+        if (!paid) throw new Error('CHARGE_FAILED');
+      } else {
+        await refundUpcomingCampaignDelta(sub.stripe_subscription_id, -deltaDollars, label);
+      }
+      settled = true;
     }
-  } catch (invoiceErr) {
-    // Roll back the subscription update so Stripe matches our DB
+  } catch (settleErr) {
     try {
       await stripe.subscriptions.update(sub.stripe_subscription_id, {
         items: [{ id: item.id, price: originalPriceId, quantity: originalQuantity }],
         proration_behavior: 'none',
       });
     } catch (rollbackErr: unknown) {
-      console.error('[Stripe] Rollback failed after invoice error:', rollbackErr instanceof Error ? rollbackErr.message : rollbackErr);
+      console.error('[Stripe] Rollback failed after settlement error:', rollbackErr instanceof Error ? rollbackErr.message : rollbackErr);
     }
-    throw invoiceErr;
+    throw settleErr;
   }
 
-  // Step 3 — only update DB after Stripe confirms everything succeeded
+  // Step 3 — stage the new fee (and tier, unchanged here) to go live at the next open.
   await pool.query(
-    `UPDATE subscription SET fee_at_entry = $1, updated_at = NOW() WHERE business_id = $2`,
-    [newTotalFee, sub.business_id],
+    `UPDATE subscription
+     SET pending_entries_per_location = $1, pending_fee_at_entry = $2, updated_at = NOW()
+     WHERE business_id = $3`,
+    [effectiveTier, newTotalFee, sub.business_id],
   );
+
+  // No money moved (pre-24th change): record it in the change log so the payment history
+  // still shows what happened. Settled changes skip this - their invoice tells the story.
+  if (!settled) {
+    try {
+      const logText = reason === 'location_added'
+        ? `Added a location. Your plan covers ${quantity} location${quantity !== 1 ? 's' : ''} from the next campaign.`
+        : `Removed a location. Your plan covers ${quantity} location${quantity !== 1 ? 's' : ''} from the next campaign.`;
+      await pool.query(
+        `INSERT INTO subscription_change_log (business_id, description) VALUES ($1, $2)`,
+        [sub.business_id, logText],
+      );
+    } catch (err: unknown) {
+      console.error('[Stripe] change-log write failed (non-fatal):', err instanceof Error ? err.message : err);
+    }
+  }
 };
 
 // ─── Update Subscription Plan ─────────────────────────────────────────────────
@@ -887,9 +1098,15 @@ export const updateSubscriptionPlan = async (userId: number, newEntriesPerLocati
       s.stripe_subscription_id,
       s.stripe_customer_id,
       s.entries_per_location AS current_entries_per_location,
+      s.fee_at_entry,
+      s.pending_entries_per_location,
+      s.pending_fee_at_entry,
       s.status,
       b.id AS business_id,
-      (SELECT COUNT(*)::int FROM business_location WHERE business_id = b.id AND is_active = TRUE) AS location_count
+      (SELECT COUNT(*)::int FROM business_location
+       WHERE business_id = b.id
+         AND ((is_active = TRUE AND deactivate_at_open = FALSE) OR activate_at_open = TRUE)
+      ) AS next_campaign_location_count
     FROM business b
     JOIN subscription s ON s.business_id = b.id
     WHERE b.user_id = $1
@@ -899,69 +1116,81 @@ export const updateSubscriptionPlan = async (userId: number, newEntriesPerLocati
   if (!sub) throw new Error('No subscription found');
   if (sub.status === 'Cancelled') throw new Error('Cannot update a cancelled subscription');
   if (!sub.stripe_subscription_id) throw new Error('No Stripe subscription on record');
-  if (sub.current_entries_per_location === newEntriesPerLocation) throw new Error('Already on this tier');
+
+  // Baseline = what the next campaign is currently set to run with (a staged change wins
+  // over the live tier). Changes never touch the RUNNING campaign; they retarget the next
+  // one, so comparing against the staged value keeps repeat changes settling correctly.
+  const baselineTier = (sub.pending_entries_per_location ?? sub.current_entries_per_location) as number;
+  if (baselineTier === newEntriesPerLocation) throw new Error('Already on this tier');
 
   const priceId = process.env[tierConfig.envKey];
   if (!priceId) throw new Error(`Stripe price ID not configured for tier ${newEntriesPerLocation}`);
 
-  const locationCount = Math.max(1, Number(sub.location_count));
-
-  // fee_at_entry from the single TIER_PRICE_MAP source of truth (same helper as every
-  // other write-path). The post-update unit_amount isn't fetched here, so no cross-check.
+  const locationCount = Math.max(1, Number(sub.next_campaign_location_count));
   const newTotalFee = resolveMonthlyFee(newEntriesPerLocation, locationCount);
+  const baselineFee = Number(sub.pending_fee_at_entry ?? sub.fee_at_entry ?? 0);
+  const deltaDollars = newTotalFee - baselineFee;
 
-  // Fetch current Stripe subscription to get the item
   const stripeSub = await stripe.subscriptions.retrieve(sub.stripe_subscription_id, { expand: ['items'] });
   const item = stripeSub.items.data[0];
   if (!item) throw new Error('Stripe subscription item not found');
-
-  const oldTier = sub.current_entries_per_location as number;
-  const direction = newEntriesPerLocation > oldTier ? 'upgraded' : 'downgraded';
-  const changeLabel = `You ${direction} your plan from ${oldTier.toLocaleString()} to ${newEntriesPerLocation.toLocaleString()} entries per location.`;
-
   const originalPriceId = item.price.id;
   const originalQuantity = item.quantity ?? 1;
 
-  // Step 1 — queue proration items on Stripe (no invoice yet)
+  // Step 1 — point Stripe at the new plan, no proration: the next 24th bills it.
   await stripe.subscriptions.update(sub.stripe_subscription_id, {
     items: [{ id: item.id, price: priceId, quantity: locationCount }],
-    proration_behavior: 'create_prorations',
+    proration_behavior: 'none',
   });
 
+  // Step 2 — inside the charged window (24th paid the old plan, campaign not open yet)
+  // settle the full-campaign difference now: upgrades charge it, downgrades refund it.
+  let settled = false;
   try {
-    // Step 2 — create draft invoice with description, finalize, and pay
-    const draftInvoice = await stripe.invoices.create({
-      customer: sub.stripe_customer_id,
-      subscription: sub.stripe_subscription_id,
-      description: changeLabel,
-      auto_advance: false,
-    });
-    if (!draftInvoice.id) throw new Error('Stripe did not return an invoice id for the plan-change charge');
-    const finalizedInvoice = await stripe.invoices.finalizeInvoice(draftInvoice.id);
-    if (finalizedInvoice.status === 'open') {
-      await stripe.invoices.pay(draftInvoice.id);
+    if (deltaDollars !== 0 && await isChargedNotOpenedWindow(pool)) {
+      const direction = newEntriesPerLocation > baselineTier ? 'upgraded' : 'downgraded';
+      const label = `Plan ${direction} for the upcoming campaign: ${baselineTier.toLocaleString()} to ${newEntriesPerLocation.toLocaleString()} entries per location`;
+      if (deltaDollars > 0) {
+        const paid = await chargeNow(sub.stripe_customer_id, sub.stripe_subscription_id, deltaDollars, label, `${sub.stripe_subscription_id}_${Date.now()}`);
+        if (!paid) throw new Error('CHARGE_FAILED');
+      } else {
+        await refundUpcomingCampaignDelta(sub.stripe_subscription_id, -deltaDollars, label);
+      }
+      settled = true;
     }
-  } catch (invoiceErr) {
-    // Roll back the subscription update so Stripe matches our DB
+  } catch (settleErr) {
     try {
       await stripe.subscriptions.update(sub.stripe_subscription_id, {
         items: [{ id: item.id, price: originalPriceId, quantity: originalQuantity }],
         proration_behavior: 'none',
       });
     } catch (rollbackErr: unknown) {
-      console.error('[Stripe] Rollback failed after invoice error:', rollbackErr instanceof Error ? rollbackErr.message : rollbackErr);
+      console.error('[Stripe] Rollback failed after settlement error:', rollbackErr instanceof Error ? rollbackErr.message : rollbackErr);
     }
-    throw invoiceErr;
+    throw settleErr;
   }
 
-  // Step 3 — only update DB after Stripe confirms everything succeeded.
-  // stripe_price_id is updated too so the DB never drifts from the live Stripe price.
+  // Step 3 — stage the plan to go live at the next campaign open. The running campaign
+  // keeps its tier; stripe_price_id tracks the live Stripe price (just changed).
   await pool.query(
     `UPDATE subscription
-     SET entries_per_location = $1, fee_at_entry = $2, stripe_price_id = $3, updated_at = NOW()
+     SET pending_entries_per_location = $1, pending_fee_at_entry = $2, stripe_price_id = $3, updated_at = NOW()
      WHERE business_id = $4`,
     [newEntriesPerLocation, newTotalFee, priceId, sub.business_id],
   );
+
+  // No money moved (pre-24th change): record it in the change log so the payment history
+  // still shows what happened. Settled changes skip this - their invoice tells the story.
+  if (!settled) {
+    try {
+      await pool.query(
+        `INSERT INTO subscription_change_log (business_id, description) VALUES ($1, $2)`,
+        [sub.business_id, `Updated your plan from ${baselineTier.toLocaleString()} to ${newEntriesPerLocation.toLocaleString()} entries per location. Takes effect with the next campaign.`],
+      );
+    } catch (err: unknown) {
+      console.error('[Stripe] change-log write failed (non-fatal):', err instanceof Error ? err.message : err);
+    }
+  }
 };
 
 // ─── Get Subscription Invoices ────────────────────────────────────────────────
@@ -1044,6 +1273,29 @@ export const getSubscriptionInvoices = async (userId: number): Promise<Subscript
     };
   });
 
+  // Plan/location changes that moved no money (pre-24th) exist only in our change log —
+  // merged in as zero-amount entries the client renders as change notes.
+  const changeLogResult = await pool.query(
+    `SELECT scl.id, scl.description, scl.created_at
+     FROM subscription_change_log scl
+     JOIN business b ON b.id = scl.business_id
+     WHERE b.user_id = $1
+     ORDER BY scl.created_at DESC
+     LIMIT 24`,
+    [userId],
+  );
+  const changeEntries: SubscriptionInvoice[] = changeLogResult.rows.map((row) => ({
+    id: `chg_${row.id}`,
+    date: Math.floor(new Date(row.created_at).getTime() / 1000),
+    amount_paid: 0,
+    amount_due: 0,
+    status: 'paid',
+    invoice_description: row.description as string,
+    description: [],
+    invoice_pdf: null,
+    hosted_invoice_url: null,
+  }));
+
   let stripeInvoices: SubscriptionInvoice[] = [];
   if (stripeCustomerId) {
     const invoiceList = await stripe.invoices.list({
@@ -1051,7 +1303,13 @@ export const getSubscriptionInvoices = async (userId: number): Promise<Subscript
       limit: 24,
       expand: ['data.lines'],
     });
-    stripeInvoices = invoiceList.data.map((invoice): SubscriptionInvoice => ({
+    stripeInvoices = invoiceList.data
+      // Drop Stripe accounting artifacts: subscription creation (and similar) produces a
+      // $0 invoice that Stripe instantly marks "paid". No money moved and there is no
+      // description to explain anything, so showing it as a payment only confuses the
+      // business. Zero-total invoices WITH a description (change notes) are kept.
+      .filter((invoice) => !(invoice.amount_due === 0 && invoice.amount_paid === 0 && !invoice.description))
+      .map((invoice): SubscriptionInvoice => ({
       id: invoice.id,
       date: invoice.created,
       amount_paid: invoice.amount_paid / 100,
@@ -1070,7 +1328,7 @@ export const getSubscriptionInvoices = async (userId: number): Promise<Subscript
     }));
   }
 
-  return [...foundingInvoices, ...stripeInvoices].sort((a, b) => b.date - a.date);
+  return [...foundingInvoices, ...changeEntries, ...stripeInvoices].sort((a, b) => b.date - a.date);
 };
 
 // ─── Get Subscription Details ─────────────────────────────────────────────────
@@ -1091,7 +1349,17 @@ export const getSubscriptionDetails = async (userId: number) => {
       fm.seat_number AS founding_seat_number,
       s.fee_at_entry,
       s.entries_per_location,
+      s.pending_fee_at_entry,
+      s.pending_entries_per_location,
+      s.skip_next_campaign,
+      (SELECT d5.opened_at FROM draw d5 WHERE d5.status = 'Open' ORDER BY d5.opened_at DESC NULLS LAST LIMIT 1) AS open_campaign_opened_at,
       (SELECT COUNT(*)::int FROM business_location WHERE business_id = b.id AND is_active = TRUE) AS active_location_count,
+      -- What the NEXT campaign runs with: live locations minus scheduled removals plus
+      -- staged adds. Shown alongside the staged plan so money and counts always agree.
+      (SELECT COUNT(*)::int FROM business_location
+       WHERE business_id = b.id
+         AND ((is_active = TRUE AND deactivate_at_open = FALSE) OR activate_at_open = TRUE)
+      ) AS next_campaign_location_count,
       (
         SELECT COUNT(*)::int
         FROM draw_entry de3
@@ -1130,7 +1398,48 @@ export const getSubscriptionDetails = async (userId: number) => {
        OR b.id IN (SELECT business_id FROM business_location WHERE manager_user_id = $1)
   `, [userId]);
 
-  return result.rows[0] ?? null;
+  const sub = result.rows[0] ?? null;
+  if (sub) {
+    // True while a founding member may start a regular plan (final included month or
+    // already expired). Computed with the SAME helper the checkout guard uses, so the
+    // client banner and the server guard can never disagree.
+    sub.founding_transition_available =
+      sub.is_founding === true &&
+      !sub.stripe_subscription_id &&
+      sub.current_period_end != null &&
+      isFoundingTransitionWindow(new Date(sub.current_period_end));
+    // True between the 24th charge and the paid campaign's open — the window where the
+    // business may opt out of the paid campaign (no refund) and where changes settle
+    // their difference immediately. Same rule the server mutations use.
+    const openedAt = sub.open_campaign_opened_at ? new Date(sub.open_campaign_opened_at).getTime() : null;
+    sub.in_charged_window = openedAt === null || lastChargeAtNy().getTime() > openedAt;
+    delete sub.open_campaign_opened_at;
+  }
+  return sub;
+};
+
+// ─── Skip the Paid Campaign (opt out, no refund) ──────────────────────────────
+// After the 24th charge a business cannot cancel the upcoming campaign, but it may opt
+// out of participating in it — no refund. The flag is consumed at the next campaign open
+// (enrollment skips the business, then resets it). Only available inside the charged
+// window; once the campaign opens, removal is an admin/support action.
+export const setSkipNextCampaign = async (userId: number, skip: boolean): Promise<void> => {
+  const pool = getPool();
+
+  if (skip && !(await isChargedNotOpenedWindow(pool))) {
+    throw new Error('SKIP_WINDOW_CLOSED');
+  }
+
+  const result = await pool.query(
+    `UPDATE subscription s
+     SET skip_next_campaign = $2, updated_at = NOW()
+     FROM business b
+     WHERE b.id = s.business_id AND b.user_id = $1 AND s.status != 'Cancelled'
+     RETURNING s.id`,
+    [userId, skip],
+  );
+  if (result.rowCount === 0) throw new Error('No active subscription found');
+  invalidatePublicBusinessData();
 };
 
 // ─── Resume Subscription ──────────────────────────────────────────────────────
@@ -1171,9 +1480,6 @@ export const resumeSubscription = async (userId: number): Promise<void> => {
 };
 
 // ─── Cancel Subscription ──────────────────────────────────────────────────────
-
-const ONBOARDING_CUTOFF_DAYS = 7;
-const CAMPAIGN_ONBOARDING_CUTOFF_DAYS = 7; // days before the 1st of next month where new signups are blocked
 
 export type CancelRefundType = 'full' | 'prorated' | 'none';
 

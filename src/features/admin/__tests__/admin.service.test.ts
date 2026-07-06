@@ -27,6 +27,13 @@ jest.mock('../../tickets/tickets.service.js', () => ({
   generateGlobalUniqueCode: jest.fn().mockResolvedValue('TESTCODE'),
 }));
 
+// email.service is imported for the founding final-campaign notice — stub it
+const mockSendFoundingFinalCampaignEmail = jest.fn();
+jest.mock('../../../shared/email/email.service.js', () => ({
+  sendSubscriptionConfirmationEmail: jest.fn(),
+  sendFoundingFinalCampaignEmail: (...args: unknown[]) => mockSendFoundingFinalCampaignEmail(...args),
+}));
+
 import { createDrawService, openDrawService, closeDrawService } from '../admin.service';
 
 // ─────────────────────────────────────────────
@@ -45,6 +52,10 @@ const setupClientQueries = (...responses: Array<{ rows: unknown[]; rowCount?: nu
 
 beforeEach(() => {
   jest.clearAllMocks();
+  // Default pool.query response (e.g. the non-fatal founding final-campaign notice that
+  // runs after a draw opens). Tests that need specific rows use mockResolvedValueOnce,
+  // which takes precedence over this default.
+  mockQuery.mockResolvedValue({ rows: [], rowCount: 0 });
 });
 
 // ─────────────────────────────────────────────
@@ -352,10 +363,17 @@ describe('openDrawService — enrollment', () => {
     expect(sql).toMatch(/JOIN subscription/);
     // Paid businesses + Past_Due during the retry grace window
     expect(sql).toMatch(/'Active',\s*'Trialing',\s*'Past_Due'/);
-    // Founding members (no stripe sub) only while their prepaid year covers the draw
+    // Founding members (no stripe sub) join every campaign that OPENS inside their year
     expect(sql).toMatch(/stripe_subscription_id IS NOT NULL/);
-    expect(sql).toMatch(/current_period_end >= d\.draw_date/);
+    expect(sql).toMatch(/current_period_end >= NOW\(\)/);
+    // Businesses that opted out of the paid campaign are skipped (flag consumed after)
+    expect(sql).toMatch(/skip_next_campaign = FALSE/);
     expect(enroll![1]).toEqual([5]);
+
+    const skipReset = mockClientQuery.mock.calls.find(
+      ([s]: [string]) => typeof s === 'string' && s.includes('SET skip_next_campaign = FALSE'),
+    );
+    expect(skipReset).toBeDefined();
   });
 
   test('refuses to open a second draw while one is already Open', async () => {
@@ -393,10 +411,15 @@ describe('closeDrawService — draw-time paid check', () => {
       { rows: [] },                            // BEGIN
       { rows: [] },                            // pg_advisory_xact_lock
       { rows: [{ id: 5, status: 'Open' }] },   // SELECT draw FOR UPDATE
+      { rows: [{ id: 6 }] },                   // SELECT next Upcoming draw FOR UPDATE (hand-off target)
       { rows: [] },                            // UPDATE -> Closed
-      { rows: [] },                            // logDrawAudit
+      { rows: [] },                            // logDrawAudit (closed)
       { rows: [], rowCount: 1 },               // DELETE draw_entry (unpaid)
       { rows: [] },                            // UPDATE business pending thresholds
+      { rows: [] },                            // openDrawInTx: UPDATE draw -> Open
+      { rows: [] },                            // openDrawInTx: apply staged plan changes
+      { rows: [], rowCount: 2 },               // openDrawInTx: INSERT INTO draw_entry (enroll next)
+      { rows: [] },                            // openDrawInTx: logDrawAudit (opened)
       { rows: [] },                            // COMMIT
     );
 
@@ -408,5 +431,57 @@ describe('closeDrawService — draw-time paid check', () => {
     expect(del).toBeDefined();
     expect(del![0]).toMatch(/'Past_Due',\s*'Incomplete'/);
     expect(del![1]).toEqual([5]);
+
+    // Hand-off: closing the current draw opens the next Upcoming one in the same transaction.
+    const openNext = mockClientQuery.mock.calls.find(
+      ([sql, params]: [string, unknown[]]) =>
+        typeof sql === 'string' && sql.includes(`SET status = 'Open'`) && Array.isArray(params) && params[0] === 6,
+    );
+    expect(openNext).toBeDefined();
+  });
+});
+
+describe('openDrawInTx — staged plan changes (founding hand-off)', () => {
+  test('applies pending tier/fee at open, BEFORE enrollment snapshots them', async () => {
+    setupClientQueries(
+      { rows: [] },                               // BEGIN
+      { rows: [] },                               // pg_advisory_xact_lock
+      { rows: [{ id: 5, status: 'Upcoming' }] },  // SELECT draw FOR UPDATE
+      { rows: [] },                               // SELECT open draw (none open)
+      { rows: [] },                               // UPDATE draw -> Open
+      { rows: [], rowCount: 1 },                  // apply staged plan changes
+      { rows: [], rowCount: 3 },                  // INSERT INTO draw_entry (enroll)
+      { rows: [] },                               // logDrawAudit
+      { rows: [] },                               // COMMIT
+    );
+
+    await openDrawService(5);
+
+    const calls = mockClientQuery.mock.calls;
+    const pendingIdx = calls.findIndex(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('pending_entries_per_location IS NOT NULL'),
+    );
+    const activateIdx = calls.findIndex(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('WHERE activate_at_open = TRUE'),
+    );
+    const deactivateIdx = calls.findIndex(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('WHERE deactivate_at_open = TRUE'),
+    );
+    const enrollIdx = calls.findIndex(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO draw_entry'),
+    );
+    expect(pendingIdx).toBeGreaterThan(-1);
+    expect(activateIdx).toBeGreaterThan(-1);
+    expect(deactivateIdx).toBeGreaterThan(-1);
+    expect(enrollIdx).toBeGreaterThan(-1);
+    // Staged plan AND staged location changes must be live before enrollment snapshots
+    // fee/cap and before the location count matters for the new campaign.
+    expect(pendingIdx).toBeLessThan(enrollIdx);
+    expect(activateIdx).toBeLessThan(enrollIdx);
+    expect(deactivateIdx).toBeLessThan(enrollIdx);
+    // It both promotes and clears the staged values.
+    const sql: string = calls[pendingIdx][0];
+    expect(sql).toMatch(/entries_per_location\s*=\s*pending_entries_per_location/);
+    expect(sql).toMatch(/pending_entries_per_location = NULL/);
   });
 });

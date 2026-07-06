@@ -63,7 +63,7 @@ describe('getNearbyBusinessesService', () => {
     expect(results[0]).toHaveProperty('name', 'Test Cafe');
   });
 
-  it('filters to active locations of subscribed businesses in an Open draw, within the bounding box', async () => {
+  it('filters to active locations of businesses in the Open draw, within the bounding box', async () => {
     setupPoolQueries({ rows: [] });
 
     await getNearbyBusinessesService(25.7, 25.8, -80.3, -80.1);
@@ -71,7 +71,10 @@ describe('getNearbyBusinessesService', () => {
     expect(mockQuery).toHaveBeenCalledTimes(1);
     const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]];
     expect(sql).toMatch(/loc\.is_active = true/);
-    expect(sql).toMatch(/'Active',\s*'Trialing'/);
+    // Participation = draw_entry in the Open campaign. Subscription status is deliberately
+    // NOT filtered: billing runs on the 24th while campaigns run to month end, so a
+    // business whose subscription ended on the 24th still owns the campaign it paid for.
+    expect(sql).not.toMatch(/'Active',\s*'Trialing'/);
     expect(sql).toMatch(/d\.status = 'Open'/);
     expect(sql).toMatch(/BETWEEN \$1 AND \$2/);
     expect(sql).toMatch(/BETWEEN \$3 AND \$4/);

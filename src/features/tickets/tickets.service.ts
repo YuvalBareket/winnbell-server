@@ -919,12 +919,17 @@ export const generateTicketService = async (user_id: number, location_id: number
   try {
     await client.query('BEGIN');
 
+    // Entitlement = membership in the OPEN campaign (draw_entry), NOT subscription status.
+    // Billing runs on the 24th while campaigns run to month end, so a business that
+    // cancelled (subscription ended on the 24th) still owns the campaign it paid for and
+    // must keep issuing entries until it closes. draw_entry only ever contains businesses
+    // that paid for the campaign, so it is the correct paid-access record.
     const authInfo = await client.query(`
       SELECT bl.business_id, bl.id as location_id,
              COALESCE(s.entries_per_location, ps.global_entry_cap) AS entries_per_location
       FROM business_location bl
       JOIN business b ON bl.business_id = b.id
-      JOIN subscription s ON s.business_id = b.id AND s.status IN ('Active', 'Trialing')
+      LEFT JOIN subscription s ON s.business_id = b.id
       LEFT JOIN platform_settings ps ON ps.id = 1
       WHERE bl.id = $1
         AND (b.user_id = $2 OR bl.manager_user_id = $2)
@@ -932,7 +937,7 @@ export const generateTicketService = async (user_id: number, location_id: number
         AND EXISTS (
           SELECT 1 FROM draw_entry de
           JOIN draw d ON d.id = de.draw_id
-          WHERE de.business_id = b.id AND d.status IN ('Open', 'Upcoming')
+          WHERE de.business_id = b.id AND d.status = 'Open'
         )
     `, [location_id, user_id]);
 

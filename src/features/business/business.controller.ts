@@ -17,6 +17,7 @@ import {
   getLocationProfileByIdService,
   getParticipatingLocationByIdService,
   removeLocationManagerService,
+  scheduleLocationDeactivation,
   searchParticipatingLocationsService,
   updateBusinessLocation,
   updateBusinessLogo,
@@ -360,7 +361,8 @@ export const addLocation = async (req: AuthRequest, res: Response): Promise<void
   try {
     const pool = getPool();
 
-    // Founding partners are limited to 3 locations
+    // Founding partners are limited to 3 locations (counted as the NEXT campaign will
+    // run: active minus scheduled removals plus scheduled adds).
     const foundingCheck = await pool.query(`
       SELECT fm.id FROM founding_member fm
       JOIN business b ON b.id = fm.business_id
@@ -371,7 +373,8 @@ export const addLocation = async (req: AuthRequest, res: Response): Promise<void
       const locCount = await pool.query(
         `SELECT COUNT(*)::int AS cnt FROM business_location bl
          JOIN business b ON b.id = bl.business_id
-         WHERE b.user_id = $1 AND bl.is_active = TRUE`,
+         WHERE b.user_id = $1
+           AND ((bl.is_active = TRUE AND bl.deactivate_at_open = FALSE) OR bl.activate_at_open = TRUE)`,
         [userId],
       );
       if (Number(locCount.rows[0]?.cnt ?? 0) >= 3) {
@@ -380,20 +383,34 @@ export const addLocation = async (req: AuthRequest, res: Response): Promise<void
       }
     }
 
-    const result = await addBusinessLocation(userId, { name, address, lat, lon, suite: suite ?? null, phone: phone ?? null });
+    // While the business participates in the Open campaign, the new location is staged:
+    // it goes live when the next campaign opens (changes never touch a running campaign).
+    // Businesses not in the Open campaign (new signups, expired, skipped) get it live now.
+    const participating = await pool.query(`
+      SELECT 1 FROM draw_entry de
+      JOIN draw d ON d.id = de.draw_id
+      JOIN business b ON b.id = de.business_id
+      WHERE b.user_id = $1 AND d.status = 'Open'
+      LIMIT 1
+    `, [userId]);
+    const stageForNextCampaign = participating.rows.length > 0;
+
+    const result = await addBusinessLocation(userId, { name, address, lat, lon, suite: suite ?? null, phone: phone ?? null }, stageForNextCampaign);
     locationId = result.locationId;
 
-    // Get new active location count and sync Stripe quantity
+    // Sync billing to the next campaign's location count (active - scheduled removals +
+    // scheduled adds). Inside the charged window this also settles the difference now.
     const countResult = await pool.query(
       `SELECT COUNT(*)::int AS cnt FROM business_location bl
        JOIN business b ON b.id = bl.business_id
-       WHERE b.user_id = $1 AND bl.is_active = TRUE`,
+       WHERE b.user_id = $1
+         AND ((bl.is_active = TRUE AND bl.deactivate_at_open = FALSE) OR bl.activate_at_open = TRUE)`,
       [userId],
     );
     const newCount = Number(countResult.rows[0]?.cnt ?? 1);
     await syncSubscriptionQuantity(userId, newCount, 'location_added');
 
-    res.status(201).json({ locationId });
+    res.status(201).json({ locationId, stagedForNextCampaign: stageForNextCampaign });
   } catch (error: unknown) {
     // Rollback: delete the newly created location if Stripe sync failed
     if (locationId !== null) {
@@ -406,6 +423,10 @@ export const addLocation = async (req: AuthRequest, res: Response): Promise<void
     }
     if (error instanceof Error && error.message === 'BUSINESS_NOT_FOUND') {
       res.status(404).json({ message: 'Business not found' });
+      return;
+    }
+    if (error instanceof Error && error.message === 'CHARGE_FAILED') {
+      res.status(402).json({ message: 'We could not charge your card for the added location, so it was not added. Please try again.' });
       return;
     }
     if (error instanceof Error && (error.message.includes('Stripe') || error.message.includes('subscription') || error.message.includes('tier'))) {
@@ -421,23 +442,33 @@ export const deleteLocation = async (req: AuthRequest, res: Response): Promise<v
   const locId = Number(req.params.locationId);
 
   try {
-    // Verify ownership + get current active location count before decrement
+    // Verify ownership; also fetch staging state — a location can be live, staged to
+    // activate at the next open, or already scheduled for deactivation.
     const pool = getPool();
     const ownerCheck = await pool.query(
-      `SELECT bl.id FROM business_location bl
+      `SELECT bl.id, bl.is_active, bl.activate_at_open, bl.deactivate_at_open
+       FROM business_location bl
        JOIN business b ON bl.business_id = b.id
-       WHERE bl.id = $1 AND b.user_id = $2 AND bl.is_active = TRUE`,
+       WHERE bl.id = $1 AND b.user_id = $2 AND (bl.is_active = TRUE OR bl.activate_at_open = TRUE)`,
       [locId, userId],
     );
-    if (ownerCheck.rows.length === 0) {
+    const loc = ownerCheck.rows[0];
+    if (!loc) {
       res.status(403).json({ message: 'Forbidden' });
       return;
     }
+    if (loc.deactivate_at_open) {
+      // Already scheduled to end with the current campaign — nothing more to do.
+      res.status(200).json({ success: true, scheduledForNextCampaign: true });
+      return;
+    }
 
+    // Next-campaign location count if this removal goes through.
     const countResult = await pool.query(
       `SELECT COUNT(*)::int AS cnt FROM business_location bl
        JOIN business b ON b.id = bl.business_id
-       WHERE b.user_id = $1 AND bl.is_active = TRUE`,
+       WHERE b.user_id = $1
+         AND ((bl.is_active = TRUE AND bl.deactivate_at_open = FALSE) OR bl.activate_at_open = TRUE)`,
       [userId],
     );
     const currentCount = Number(countResult.rows[0]?.cnt ?? 1);
@@ -447,15 +478,43 @@ export const deleteLocation = async (req: AuthRequest, res: Response): Promise<v
     }
     const newCount = currentCount - 1;
 
-    // Sync Stripe first — if it fails, abort without touching the DB
+    // Sync billing first (settles any already-charged difference) — if it fails, abort
+    // without touching the DB. No credits are ever issued for time already used; inside
+    // the charged window the not-yet-started campaign's difference is refunded in full.
     await syncSubscriptionQuantity(userId, newCount, 'location_removed');
 
-    // Stripe succeeded — now remove from DB
-    await deleteBusinessLocation(locId, userId);
-    res.status(200).json({ success: true });
+    if (loc.activate_at_open) {
+      // Staged add that never went live — just discard it.
+      await pool.query(`DELETE FROM business_location WHERE id = $1`, [locId]);
+      res.status(200).json({ success: true, scheduledForNextCampaign: false });
+      return;
+    }
+
+    // Live location: while the business participates in the Open campaign it keeps
+    // serving until the campaign ends (it was paid for), then stops at the boundary.
+    // Outside a campaign, removal is immediate.
+    const participating = await pool.query(`
+      SELECT 1 FROM draw_entry de
+      JOIN draw d ON d.id = de.draw_id
+      JOIN business b ON b.id = de.business_id
+      WHERE b.user_id = $1 AND d.status = 'Open'
+      LIMIT 1
+    `, [userId]);
+
+    if (participating.rows.length > 0) {
+      await scheduleLocationDeactivation(locId, userId);
+      res.status(200).json({ success: true, scheduledForNextCampaign: true });
+    } else {
+      await deleteBusinessLocation(locId, userId);
+      res.status(200).json({ success: true, scheduledForNextCampaign: false });
+    }
   } catch (error: unknown) {
     if (error instanceof Error && error.message === 'UNAUTHORIZED_OR_INVALID_LOCATION') {
       res.status(403).json({ message: 'Forbidden' });
+      return;
+    }
+    if (error instanceof Error && error.message.startsWith('REFUND_INCOMPLETE')) {
+      res.status(502).json({ message: 'We could not process the refund for this change, so the location was not removed. Please try again or contact support.' });
       return;
     }
     if (error instanceof Error && (error.message.includes('Stripe') || error.message.includes('subscription') || error.message.includes('tier'))) {
