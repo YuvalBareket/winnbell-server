@@ -322,59 +322,80 @@ export const refreshTokenController = async (req: Request, res: Response): Promi
     const pool = getPool();
     const hash = crypto.createHash('sha256').update(refreshToken).digest('hex');
 
-    // Consume with a grace window instead of hard-deleting. Rotation is single-use in
-    // spirit, but multiple app contexts (second tab, installed PWA window, restored mobile
-    // webview) share ONE persisted refresh token and race to refresh at access-token expiry.
-    // Hard delete made every racer after the first fail with 401 -> client dropped the
-    // account -> user kicked mid-session. Accepting a consumed token again within a short
-    // grace period lets every racer walk away with its own fresh pair, while a stolen token
-    // replayed later than the grace window is still rejected. COALESCE keeps the FIRST
-    // consume time so the window cannot be extended by repeated reuse; the UPDATE re-checks
-    // its predicate on the locked row, so concurrent consumers serialize safely.
-    const result = await pool.query(
-      `UPDATE refresh_token
-       SET consumed_at = COALESCE(consumed_at, NOW())
-       WHERE token_hash = $1 AND expires_at > NOW()
-         AND (consumed_at IS NULL OR consumed_at > NOW() - interval '60 seconds')
-       RETURNING id, user_id`,
-      [hash],
-    );
-    const row = result.rows[0];
-    if (!row) {
-      res.status(401).json({ message: 'Invalid or expired refresh token' });
-      return;
+    // Rotation is transactional (F3): consuming the old token and inserting the new one must be
+    // all-or-nothing on ONE connection. Previously each step ran on the pool (autocommit), so a
+    // crash / connection drop / restart AFTER the consume committed but BEFORE the new token was
+    // saved left the client holding only the now-consumed old token -> dead session past the grace
+    // window -> kicked. Wrapping in BEGIN/COMMIT means a failure ROLLs the consume back, leaving
+    // the old token fully valid for a clean retry. The UPDATE's row lock is now held until COMMIT,
+    // so concurrent racers on the same token serialize cleanly.
+    const client = await pool.connect();
+    try {
+      await client.query('BEGIN');
+
+      // Consume with a grace window instead of hard-deleting. Rotation is single-use in
+      // spirit, but multiple app contexts (second tab, installed PWA window, restored mobile
+      // webview) share ONE persisted refresh token and race to refresh at access-token expiry.
+      // Hard delete made every racer after the first fail with 401 -> client dropped the
+      // account -> user kicked mid-session. Accepting a consumed token again within a short
+      // grace period lets every racer walk away with its own fresh pair, while a stolen token
+      // replayed later than the grace window is still rejected. COALESCE keeps the FIRST
+      // consume time so the window cannot be extended by repeated reuse; the UPDATE re-checks
+      // its predicate on the locked row, so concurrent consumers serialize safely.
+      const result = await client.query(
+        `UPDATE refresh_token
+         SET consumed_at = COALESCE(consumed_at, NOW())
+         WHERE token_hash = $1 AND expires_at > NOW()
+           AND (consumed_at IS NULL OR consumed_at > NOW() - interval '60 seconds')
+         RETURNING id, user_id`,
+        [hash],
+      );
+      const row = result.rows[0];
+      if (!row) {
+        await client.query('ROLLBACK');
+        res.status(401).json({ message: 'Invalid or expired refresh token' });
+        return;
+      }
+
+      const userResult = await client.query(
+        `SELECT id, role, is_active, token_epoch FROM "user" WHERE id = $1`,
+        [row.user_id],
+      );
+      const user = userResult.rows[0];
+      if (!user || !user.is_active) {
+        // Deactivated: revoke every session. COMMIT so the deletion (and the consume) persist.
+        await client.query('DELETE FROM refresh_token WHERE user_id = $1', [row.user_id]);
+        await client.query('COMMIT');
+        res.status(401).json({ message: 'Account deactivated' });
+        return;
+      }
+
+      const locResult = await client.query(
+        `SELECT bl.id AS location_id FROM business_location bl WHERE bl.manager_user_id = $1 AND bl.is_active = TRUE LIMIT 1`,
+        [user.id],
+      );
+      const locationId = locResult.rows[0]?.location_id ?? null;
+
+      const newToken = jwt.sign(
+        { id: user.id, role: user.role, location_id: locationId, se: user.token_epoch ?? 0 },
+        process.env.JWT_SECRET as string,
+        { expiresIn: '1h' },
+      );
+
+      const newRefreshToken = crypto.randomBytes(40).toString('hex');
+      const newRefreshHash = crypto.createHash('sha256').update(newRefreshToken).digest('hex');
+      const newRefreshExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+
+      await authService.insertRefreshTokenCapped(client, user.id, newRefreshHash, newRefreshExpiry);
+
+      await client.query('COMMIT');
+      res.json({ token: newToken, refreshToken: newRefreshToken });
+    } catch (txErr) {
+      await client.query('ROLLBACK'); // undo the consume -> old token stays valid for a clean retry
+      throw txErr;
+    } finally {
+      client.release();
     }
-
-    const userResult = await pool.query(
-      `SELECT id, role, is_active, token_epoch FROM "user" WHERE id = $1`,
-      [row.user_id],
-    );
-    const user = userResult.rows[0];
-    if (!user || !user.is_active) {
-      await pool.query('DELETE FROM refresh_token WHERE user_id = $1', [row.user_id]);
-      res.status(401).json({ message: 'Account deactivated' });
-      return;
-    }
-
-    const locResult = await pool.query(
-      `SELECT bl.id AS location_id FROM business_location bl WHERE bl.manager_user_id = $1 AND bl.is_active = TRUE LIMIT 1`,
-      [user.id],
-    );
-    const locationId = locResult.rows[0]?.location_id ?? null;
-
-    const newToken = jwt.sign(
-      { id: user.id, role: user.role, location_id: locationId, se: user.token_epoch ?? 0 },
-      process.env.JWT_SECRET as string,
-      { expiresIn: '1h' },
-    );
-
-    const newRefreshToken = crypto.randomBytes(40).toString('hex');
-    const newRefreshHash = crypto.createHash('sha256').update(newRefreshToken).digest('hex');
-    const newRefreshExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
-
-    await authService.insertRefreshTokenCapped(pool, user.id, newRefreshHash, newRefreshExpiry);
-
-    res.json({ token: newToken, refreshToken: newRefreshToken });
   } catch (err: unknown) {
     console.error('[refreshToken]', err instanceof Error ? err.message : err);
     res.status(500).json({ message: 'Token refresh failed' });
