@@ -117,6 +117,11 @@ export const revokeAllSessions = async (req: Request, res: Response): Promise<vo
     const userRes = await pool.query(`SELECT id FROM "user" WHERE email = $1`, [email]);
     const userId = userRes.rows[0]?.id as number | undefined;
     if (userId) {
+      // INSTANT revocation: bump the session epoch so every already-issued internal JWT for
+      // this user (including a compromised one) is rejected on its next request, then delete
+      // the refresh tokens so none can be rotated, then clear the auth cache so the new epoch
+      // is read immediately (not up to 60s later).
+      await pool.query(`UPDATE "user" SET token_epoch = token_epoch + 1 WHERE id = $1`, [userId]);
       await pool.query(`DELETE FROM refresh_token WHERE user_id = $1`, [userId]);
       invalidateUserAuth(userId);
     }
@@ -237,7 +242,8 @@ export const deleteAccount = async (req: Request, res: Response): Promise<void> 
            email        = 'deleted_' || id::text || '@winnbell.invalid',
            phone_number = NULL,
            is_active    = FALSE,
-           role         = 'User'
+           role         = 'User',
+           token_epoch  = token_epoch + 1
          WHERE id = $1`,
         [userId],
       );
@@ -279,6 +285,32 @@ export const deleteAccount = async (req: Request, res: Response): Promise<void> 
   }
 };
 
+// POST /auth/logout  body: { refreshToken }
+// Server-side revocation of THIS device's session: deletes the one matching refresh token
+// so a logged-out (or compromised) token can never be refreshed again. Possessing the
+// refresh token is proof enough to invalidate it, so no auth middleware — same trust model
+// as /auth/refresh. Idempotent and never hard-fails: the client calls this fire-and-forget
+// while clearing local state, and a server hiccup must never block a logout.
+export const logoutController = async (req: Request, res: Response): Promise<void> => {
+  try {
+    const { refreshToken } = req.body;
+    if (!refreshToken || typeof refreshToken !== 'string') {
+      res.json({ revoked: false });
+      return;
+    }
+    const pool = getPool();
+    const hash = crypto.createHash('sha256').update(refreshToken).digest('hex');
+    const result = await pool.query(
+      'DELETE FROM refresh_token WHERE token_hash = $1 RETURNING id',
+      [hash],
+    );
+    res.json({ revoked: (result.rowCount ?? 0) > 0 });
+  } catch (err: unknown) {
+    console.error('[logout]', err instanceof Error ? err.message : err);
+    res.json({ revoked: false });
+  }
+};
+
 export const refreshTokenController = async (req: Request, res: Response): Promise<void> => {
   try {
     const { refreshToken } = req.body;
@@ -314,7 +346,7 @@ export const refreshTokenController = async (req: Request, res: Response): Promi
     }
 
     const userResult = await pool.query(
-      `SELECT id, role, is_active FROM "user" WHERE id = $1`,
+      `SELECT id, role, is_active, token_epoch FROM "user" WHERE id = $1`,
       [row.user_id],
     );
     const user = userResult.rows[0];
@@ -331,7 +363,7 @@ export const refreshTokenController = async (req: Request, res: Response): Promi
     const locationId = locResult.rows[0]?.location_id ?? null;
 
     const newToken = jwt.sign(
-      { id: user.id, role: user.role, location_id: locationId },
+      { id: user.id, role: user.role, location_id: locationId, se: user.token_epoch ?? 0 },
       process.env.JWT_SECRET as string,
       { expiresIn: '1h' },
     );

@@ -8,6 +8,9 @@ export interface UserPayload {
   id: number;
   role: string;
   location_id?: number | null;
+  // Session epoch the token was minted under. Rejected if below the user's current epoch
+  // (bumped on password reset / revoke-sessions / deletion). Absent on pre-epoch tokens → 0.
+  se?: number;
 }
 
 // 2. Extend the standard Request to include 'user'
@@ -89,7 +92,9 @@ async function getGuardData(userId: number, res: Response): Promise<GuardData | 
       [userId],
     );
     const guard: GuardData = result.rows[0] ?? { is_active: false, is_phone_verified: false };
-    userCache.set(cacheKey, guard);
+    // Cache write is best-effort: node-cache throws ECACHEFULL at maxKeys, and a full
+    // cache must degrade to per-request DB reads, never to a 503.
+    try { userCache.set(cacheKey, guard); } catch { /* serve uncached */ }
     return guard;
   } catch {
     res.status(503).json({ message: 'Service temporarily unavailable.' });
@@ -100,7 +105,7 @@ async function getGuardData(userId: number, res: Response): Promise<GuardData | 
 // Cached current role + whether the user still actively manages a location.
 // Used to detect stale elevated sessions (e.g. a manager removed from a location
 // whose 1h JWT still claims Business + location_id).
-type RoleState = { role: string; managedLocationIds: number[] };
+type RoleState = { role: string; managedLocationIds: number[]; tokenEpoch: number };
 
 async function getRoleState(userId: number): Promise<RoleState | null> {
   const cacheKey = `user:role:${userId}`;
@@ -110,7 +115,7 @@ async function getRoleState(userId: number): Promise<RoleState | null> {
   try {
     const pool = getPool();
     const result = await pool.query(
-      `SELECT u.role,
+      `SELECT u.role, u.token_epoch,
               COALESCE(
                 (SELECT array_agg(bl.id) FROM business_location bl
                  WHERE bl.manager_user_id = $1 AND bl.is_active = TRUE),
@@ -123,8 +128,11 @@ async function getRoleState(userId: number): Promise<RoleState | null> {
     const state: RoleState = {
       role: result.rows[0].role,
       managedLocationIds: (result.rows[0].managed_location_ids ?? []).map(Number),
+      tokenEpoch: Number(result.rows[0].token_epoch ?? 0),
     };
-    userCache.set(cacheKey, state);
+    // Best-effort cache write: a full cache (ECACHEFULL at maxKeys) must degrade to
+    // per-request DB reads — NOT silently skip the revocation/role checks below.
+    try { userCache.set(cacheKey, state); } catch { /* serve uncached */ }
     return state;
   } catch {
     return null; // fail open on transient DB errors; mutation guards still apply
@@ -160,18 +168,24 @@ export const authenticateToken = async (
     if (!jwtSecret) throw new Error('JWT_SECRET is not configured');
     const decoded = jwt.verify(token, jwtSecret) as UserPayload;
 
-    // Detect stale elevated sessions. Only business/manager tokens pay the (cached)
-    // DB lookup; regular-user tokens pass straight through. If the token claims a
-    // privileged role or a managed location that the DB no longer backs (e.g. the
-    // manager was removed), reject so the client refreshes -> refresh token was
-    // revoked -> hard logout and re-login as a regular user.
-    if (decoded.role !== 'Admin' && (decoded.role === 'Business' || decoded.location_id != null)) {
-      const fresh = await getRoleState(decoded.id);
-      if (fresh) {
+    // One cached (60s) DB read per authenticated request drives two checks:
+    //  (a) INSTANT session revocation for EVERY role, including Admin: a token whose epoch
+    //      is below the user's current token_epoch (bumped on password reset / revoke-
+    //      sessions / deletion) is dead immediately. The cache is invalidated on bump, so a
+    //      compromised token is rejected on its very next request, not after the 1h expiry.
+    //  (b) Stale elevated sessions (Business/Manager only): a token claiming a role or a
+    //      specific managed location the DB no longer backs (e.g. a removed manager).
+    const fresh = await getRoleState(decoded.id);
+    if (fresh) {
+      if ((decoded.se ?? 0) < fresh.tokenEpoch) {
+        res.status(401).json({ message: 'Session no longer valid. Please sign in again.' });
+        return;
+      }
+      if (decoded.role === 'Business' || decoded.location_id != null) {
         const roleMatches = fresh.role === decoded.role;
-        // Must still manage the SPECIFIC location the token was scoped to — not just "any" location.
-        // Prevents a manager reassigned to another business from reading their old business's data
-        // with a stale token (they'd still manage some location, which the old "any" check allowed).
+        // Must still manage the SPECIFIC location the token was scoped to — not just "any"
+        // location. Prevents a manager reassigned to another business from reading their old
+        // business's data with a stale token.
         const locationStillValid = decoded.location_id == null || fresh.managedLocationIds.includes(decoded.location_id);
         if (!roleMatches || !locationStillValid) {
           console.info(`[auth] stale elevated session rejected: userId=${decoded.id} tokenRole=${decoded.role} dbRole=${fresh.role} tokenLoc=${decoded.location_id ?? 'none'} managedLocs=[${fresh.managedLocationIds.join(',')}]`);

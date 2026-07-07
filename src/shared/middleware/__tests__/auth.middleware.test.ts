@@ -40,7 +40,7 @@ import { userCache, invalidateUserAuth } from '../../cache/cache.js';
 
 /** Create a signed JWT with the given payload. */
 const makeToken = (
-  payload: { id: number; role: string; location_id?: number | null },
+  payload: { id: number; role: string; location_id?: number | null; se?: number },
   expiresIn: jwt.SignOptions['expiresIn'] = '1h',
 ) => jwt.sign(payload, JWT_SECRET, { expiresIn });
 
@@ -63,9 +63,9 @@ const makeNext = (): NextFunction => jest.fn();
  * managed_location_ids = the active locations the user manages; the middleware validates the
  * token's SPECIFIC location_id against this array (not just "manages anything").
  */
-const setupRoleState = (role: string, managedLocationIds: number[] = []) => {
+const setupRoleState = (role: string, managedLocationIds: number[] = [], tokenEpoch = 0) => {
   mockPoolQuery.mockResolvedValueOnce({
-    rows: [{ role, managed_location_ids: managedLocationIds }],
+    rows: [{ role, managed_location_ids: managedLocationIds, token_epoch: tokenEpoch }],
   });
 };
 
@@ -79,9 +79,10 @@ beforeEach(() => {
 // 1. User-role tokens bypass the DB lookup entirely
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe('authenticateToken — User role (no DB lookup)', () => {
-  it('should pass a valid User token without hitting the DB', async () => {
-    const token = makeToken({ id: 1, role: 'User' });
+describe('authenticateToken — User role (epoch checked, one cached DB read)', () => {
+  it('should pass a valid User token whose epoch matches', async () => {
+    setupRoleState('User', [], 0);
+    const token = makeToken({ id: 1, role: 'User', se: 0 });
     const req = makeReq(token);
     const res = makeRes();
     const next = makeNext();
@@ -90,12 +91,13 @@ describe('authenticateToken — User role (no DB lookup)', () => {
 
     expect(next).toHaveBeenCalled();
     expect(res.status).not.toHaveBeenCalled();
-    // No DB query issued — User tokens are not elevated
-    expect(mockPoolQuery).not.toHaveBeenCalled();
+    // Now EVERY role pays the (cached) DB read — this is what enables instant revocation.
+    expect(mockPoolQuery).toHaveBeenCalledTimes(1);
   });
 
   it('should attach decoded user payload to req.user for a User token', async () => {
-    const token = makeToken({ id: 5, role: 'User' });
+    setupRoleState('User', [], 0);
+    const token = makeToken({ id: 5, role: 'User', se: 0 });
     const req = makeReq(token) as any;
     const res = makeRes();
     const next = makeNext();
@@ -103,6 +105,67 @@ describe('authenticateToken — User role (no DB lookup)', () => {
     await authenticateToken(req, res, next);
 
     expect(req.user).toMatchObject({ id: 5, role: 'User' });
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Session epoch — instant revocation (password reset / revoke-sessions / deletion)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('authenticateToken — session epoch (instant revocation)', () => {
+  it('rejects a token whose epoch is BELOW the user current epoch (session revoked)', async () => {
+    setupRoleState('User', [], 1); // epoch bumped to 1 by a password reset
+    const token = makeToken({ id: 50, role: 'User', se: 0 }); // minted before the bump
+    const req = makeReq(token);
+    const res = makeRes();
+    const next = makeNext();
+
+    await authenticateToken(req, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(401);
+    expect(res.json).toHaveBeenCalledWith(
+      expect.objectContaining({ message: expect.stringContaining('Session no longer valid') }),
+    );
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it('passes a freshly-minted token carrying the new epoch', async () => {
+    setupRoleState('User', [], 2);
+    const token = makeToken({ id: 51, role: 'User', se: 2 });
+    const req = makeReq(token);
+    const res = makeRes();
+    const next = makeNext();
+
+    await authenticateToken(req, res, next);
+
+    expect(next).toHaveBeenCalled();
+    expect(res.status).not.toHaveBeenCalled();
+  });
+
+  it('rejects an ADMIN token with a stale epoch (F4: admin sessions are now checked)', async () => {
+    setupRoleState('Admin', [], 1);
+    const token = makeToken({ id: 1, role: 'Admin', se: 0 });
+    const req = makeReq(token);
+    const res = makeRes();
+    const next = makeNext();
+
+    await authenticateToken(req, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(401);
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it('lets a pre-epoch token (no se claim) through while the user epoch is still 0', async () => {
+    setupRoleState('User', [], 0);
+    const token = makeToken({ id: 60, role: 'User' }); // no se claim (issued before this feature)
+    const req = makeReq(token);
+    const res = makeRes();
+    const next = makeNext();
+
+    await authenticateToken(req, res, next);
+
+    expect(next).toHaveBeenCalled();
+    expect(res.status).not.toHaveBeenCalled();
   });
 });
 

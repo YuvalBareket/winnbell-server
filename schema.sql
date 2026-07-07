@@ -51,6 +51,12 @@ CREATE TABLE "user" (
   password_hash        TEXT,
   role                 user_role_enum NOT NULL DEFAULT 'User',
   is_active            BOOLEAN NOT NULL DEFAULT TRUE,
+  -- Session epoch for INSTANT revocation of stateless internal JWTs. Every minted internal
+  -- token carries the epoch it was issued under (claim `se`); the auth middleware rejects any
+  -- token whose `se` is below this value. Bumped on password reset / revoke-sessions / account
+  -- deletion so a compromised token dies on its very next request (cache is invalidated too),
+  -- not after the 1h JWT expiry.
+  token_epoch          INTEGER NOT NULL DEFAULT 0,
   is_email_verified    BOOLEAN NOT NULL DEFAULT FALSE,
   registration_ip      INET NULL,
   -- Fraud risk scoring: 0-9 = low, 10-19 = medium (image required), 20+ = high (throttled + quarantined)

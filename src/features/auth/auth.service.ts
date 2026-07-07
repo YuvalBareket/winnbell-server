@@ -182,7 +182,7 @@ export const registerUser = async (
     const result = await client.query(
       `INSERT INTO "user" (full_name, email, password_hash, role, registration_ip)
        VALUES ($1, $2, $3, 'User', $4)
-       RETURNING id, role, full_name, email, is_phone_verified`,
+       RETURNING id, role, full_name, email, is_phone_verified, token_epoch`,
       [fullName, email, passwordHash, registrationIp ?? null],
     );
     const newUser = result.rows[0];
@@ -242,7 +242,7 @@ export const registerUser = async (
     invalidateUserAuth(newUser.id);
 
     const token = jwt.sign(
-      { id: newUser.id, role: newUser.role, location_id: locationId },
+      { id: newUser.id, role: newUser.role, location_id: locationId, se: newUser.token_epoch ?? 0 },
       process.env.JWT_SECRET as string,
       { expiresIn: '1h' },
     );
@@ -278,7 +278,7 @@ export const loginUser = async (
   email = email.toLowerCase().trim();
 
   const result = await pool.query(
-    `SELECT id, email, password_hash, full_name, role, is_phone_verified FROM "user" WHERE email = $1 AND is_active = true`,
+    `SELECT id, email, password_hash, full_name, role, is_phone_verified, token_epoch FROM "user" WHERE email = $1 AND is_active = true`,
     [email],
   );
   const user = result.rows[0];
@@ -366,7 +366,7 @@ export const loginUser = async (
   }
 
   const token = jwt.sign(
-    { id: user.id, role: user.role, location_id: locationId },
+    { id: user.id, role: user.role, location_id: locationId, se: user.token_epoch ?? 0 },
     process.env.JWT_SECRET as string,
     { expiresIn: '1h' },
   );
@@ -485,7 +485,7 @@ export const syncExternalUser = async (
              registration_ip = COALESCE("user".registration_ip, EXCLUDED.registration_ip),
              city = COALESCE("user".city, EXCLUDED.city),
              updated_at = NOW()
-       RETURNING id, role, full_name AS "fullName", email`,
+       RETURNING id, role, full_name AS "fullName", email, token_epoch`,
       [externalId, email, fullName, role, detectedState, safeIp, detectedCity],
     );
     const dbUser = upsertResult.rows[0];
@@ -566,7 +566,7 @@ export const syncExternalUser = async (
     }
 
     const internalToken = jwt.sign(
-      { id: dbUser.id, role: dbUser.role, location_id: locationId },
+      { id: dbUser.id, role: dbUser.role, location_id: locationId, se: dbUser.token_epoch ?? 0 },
       process.env.JWT_SECRET as string,
       { expiresIn: '1h' },
     );
