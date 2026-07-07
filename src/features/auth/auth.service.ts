@@ -356,7 +356,9 @@ export const loginUser = async (
       `SELECT b.id, b.logo_url, (s.status IN ('Active', 'Trialing')) AS is_subscribed
        FROM business b
        LEFT JOIN subscription s ON s.business_id = b.id
-       WHERE b.user_id = $1`,
+       WHERE b.user_id = $1
+       ORDER BY b.id
+       LIMIT 1`,
       [user.id],
     );
     hasBusiness = bizResult.rows.length > 0;

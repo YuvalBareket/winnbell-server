@@ -213,6 +213,14 @@ export const setupBusiness = async (req: AuthRequest, res: Response): Promise<vo
       businessId: result.businessId,
     });
   } catch (error: unknown) {
+    // One user = one business. The explicit guard throws BUSINESS_ALREADY_EXISTS; the
+    // UNIQUE(business.user_id) constraint is the race-safe backstop (Postgres code 23505).
+    const msg = error instanceof Error ? error.message : '';
+    const pgCode = (error as { code?: string })?.code;
+    if (msg === 'BUSINESS_ALREADY_EXISTS' || pgCode === '23505') {
+      res.status(409).json({ message: 'You already have a business set up.' });
+      return;
+    }
     res.status(500).json({ message: 'Internal Server Error' });
   }
 };

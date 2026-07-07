@@ -146,6 +146,19 @@ export const createFullBusinessProfile = async (userId: number, data: BusinessSe
   try {
     await client.query('BEGIN');
 
+    // One user = one business (enforced by UNIQUE(business.user_id) at the schema level). Guard
+    // here so a double-submit / retry / direct API call returns a clean "already exists" instead
+    // of silently creating a duplicate. The UNIQUE constraint is the race-safe backstop; the
+    // controller also maps its 23505 violation to the same 409.
+    const existing = await client.query(
+      `SELECT id FROM business WHERE user_id = $1 LIMIT 1`,
+      [userId],
+    );
+    if (existing.rows.length > 0) {
+      // Let the shared catch ROLLBACK the (empty) transaction and release the client.
+      throw new Error('BUSINESS_ALREADY_EXISTS');
+    }
+
     const businessResult = await client.query(
       `INSERT INTO business (user_id, name, sector, description, website_url, logo_url, min_transaction_amount)
        VALUES ($1, $2, $3, $4, $5, $6, $7)

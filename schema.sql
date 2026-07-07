@@ -97,7 +97,9 @@ CREATE TABLE IF NOT EXISTS phone_otp (
 
 CREATE TABLE business (
   id                              SERIAL PRIMARY KEY,
-  user_id                         INTEGER NOT NULL REFERENCES "user"(id) ON DELETE RESTRICT,
+  -- One user = one business (a business owner IS a user). UNIQUE makes the 1:1 relationship a
+  -- hard DB guarantee so login's business/subscription lookup is provably single-row.
+  user_id                         INTEGER NOT NULL UNIQUE REFERENCES "user"(id) ON DELETE RESTRICT,
   name                            TEXT NOT NULL,
   sector                          TEXT NOT NULL CHECK (sector IN ('Food','Coffee','Bakery','Grocery','Retail','Beauty','Health','Gym','Auto','Entertainment','Education','Service','Free')),
   description                     TEXT,
@@ -535,9 +537,8 @@ CREATE INDEX IF NOT EXISTS idx_ticket_business_time
 
 -- ── business ──────────────────────────────────────────────────────────────────
 
--- Owner lookup: find all businesses belonging to a user (L3)
-CREATE INDEX IF NOT EXISTS idx_business_user
-  ON business (user_id);
+-- Owner lookup (find a user's business) is served by the UNIQUE(user_id) constraint's index;
+-- no separate index needed.
 
 -- Partial index for closeDrawService: it applies queued threshold changes via
 -- WHERE pending_min_transaction_amount IS NOT NULL. Almost every business has NULL,
