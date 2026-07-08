@@ -166,7 +166,7 @@ export const authenticateToken = async (
   try {
     const jwtSecret = process.env.JWT_SECRET;
     if (!jwtSecret) throw new Error('JWT_SECRET is not configured');
-    const decoded = jwt.verify(token, jwtSecret) as UserPayload;
+    const decoded = jwt.verify(token, jwtSecret, { algorithms: ['HS256'] }) as UserPayload;
 
     // One cached (60s) DB read per authenticated request drives two checks:
     //  (a) INSTANT session revocation for EVERY role, including Admin: a token whose epoch
@@ -205,6 +205,9 @@ export const authenticateToken = async (
 // Populates req.user when a valid Bearer token is present, but NEVER rejects. For public routes
 // that must stay open to anonymous callers yet want to know the user when they are logged in
 // (e.g. attributing a profile view to a real User and excluding Business/Manager accounts).
+// WARNING: signature-only — it does NOT check token_epoch (instant revocation) or role liveness.
+// A revoked token still populates req.user here. Never use optionalAuth for any gate,
+// entitlement, or personalized-data decision; authenticateToken is the security boundary.
 export const optionalAuth = (
   req: AuthRequest,
   _res: Response,
@@ -215,7 +218,7 @@ export const optionalAuth = (
   if (token) {
     try {
       const jwtSecret = process.env.JWT_SECRET;
-      if (jwtSecret) req.user = jwt.verify(token, jwtSecret) as UserPayload;
+      if (jwtSecret) req.user = jwt.verify(token, jwtSecret, { algorithms: ['HS256'] }) as UserPayload;
     } catch {
       // invalid/expired token — treat as anonymous, do not block the request
     }

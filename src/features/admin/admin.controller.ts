@@ -80,6 +80,14 @@ export const createBusiness = async (req: Request, res: Response) => {
     const business = await createBusinessService(req.body);
     res.status(201).json(business);
   } catch (error: unknown) {
+    // One user = one business: the service guard throws BUSINESS_ALREADY_EXISTS; the
+    // UNIQUE(business.user_id) constraint is the race-safe backstop (Postgres 23505).
+    const msg = error instanceof Error ? error.message : '';
+    const pgCode = (error as { code?: string })?.code;
+    if (msg === 'BUSINESS_ALREADY_EXISTS' || pgCode === '23505') {
+      res.status(409).json({ message: 'This user already has a business.' });
+      return;
+    }
     console.error('[admin.createBusiness]', error);
     res.status(500).json({ message: 'Failed to create business' });
   }

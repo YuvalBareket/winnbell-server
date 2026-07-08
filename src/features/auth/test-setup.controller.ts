@@ -76,9 +76,11 @@ export const testSetup = async (req: Request, res: Response): Promise<void> => {
 
     if (existing.rows.length > 0) {
       userId = existing.rows[0].id;
-      // Ensure role is correct
+      // Ensure role is correct. Also reset token_epoch to 0: the JWT minted below carries
+      // se: 0, and a persona whose epoch was bumped by a prior revoke-sessions test run would
+      // otherwise get an instantly-rejected token ("Session no longer valid").
       await client.query(
-        `UPDATE "user" SET role = $1, full_name = $2 WHERE id = $3`,
+        `UPDATE "user" SET role = $1, full_name = $2, token_epoch = 0 WHERE id = $3`,
         [config.role, config.fullName, userId],
       );
     } else {
@@ -182,7 +184,8 @@ export const testSetup = async (req: Request, res: Response): Promise<void> => {
 
     // ── Issue fresh JWT ────────────────────────────────────────────────────────
     const token = jwt.sign(
-      { id: userId, role: userRole, location_id: null },
+      // se: 0 matches the token_epoch reset above (INSERT branch defaults to 0 via schema).
+      { id: userId, role: userRole, location_id: null, se: 0 },
       process.env.JWT_SECRET as string,
       { expiresIn: '7d' },
     );

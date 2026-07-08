@@ -101,6 +101,15 @@ export const createBusinessService = async (data: {
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
+    // One user = one business (UNIQUE business.user_id). Same guard as the self-serve setup
+    // path so the admin gets a clean 409 instead of a raw constraint violation.
+    const existing = await client.query(
+      `SELECT id FROM business WHERE user_id = $1 LIMIT 1`,
+      [data.owner_user_id],
+    );
+    if (existing.rows.length > 0) {
+      throw new Error('BUSINESS_ALREADY_EXISTS');
+    }
     const bizResult = await client.query(
       `INSERT INTO business (user_id, name, sector) VALUES ($1, $2, $3) RETURNING *`,
       [data.owner_user_id, data.name, data.sector],

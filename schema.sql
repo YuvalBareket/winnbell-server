@@ -609,6 +609,10 @@ CREATE INDEX idx_push_sub_user
 
 CREATE INDEX idx_refresh_token_user ON refresh_token (user_id);
 CREATE INDEX idx_refresh_token_hash ON refresh_token (token_hash);
+-- Drive the 6-hourly cleanupExpiredRefreshTokens DELETEs (split into two single-column predicates
+-- so each is index-driven instead of a full scan).
+CREATE INDEX idx_refresh_token_expires ON refresh_token (expires_at);
+CREATE INDEX idx_refresh_token_consumed ON refresh_token (consumed_at);
 
 -- ── promotional_entry ─────────────────────────────────────────────────────────
 

@@ -52,13 +52,17 @@ const makeReq = (refreshToken: unknown = 'a-valid-looking-refresh-token') =>
   ({ body: { refreshToken } } as unknown as Parameters<typeof refreshTokenController>[0]);
 
 /** Dispatch client.query by SQL, with a live user + no managed location by default. */
-const defaultClient = (overrides: { user?: unknown; consumeRow?: unknown } = {}) => {
+const defaultClient = (overrides: { user?: unknown; consumeRow?: unknown; preselectRow?: unknown } = {}) => {
   const user = 'user' in overrides ? overrides.user : { id: 713, role: 'Business', is_active: true, token_epoch: 0 };
   const consumeRow = 'consumeRow' in overrides ? overrides.consumeRow : { id: 1, user_id: 713 };
+  // The advisory-lock pre-select: which user's lock to take. Defaults to found.
+  const preselectRow = 'preselectRow' in overrides ? overrides.preselectRow : { user_id: 713 };
   mockClientQuery.mockImplementation((sql: string) => {
     if (/^\s*BEGIN/i.test(sql)) return Promise.resolve({ rows: [] });
     if (/^\s*COMMIT/i.test(sql)) return Promise.resolve({ rows: [] });
     if (/^\s*ROLLBACK/i.test(sql)) return Promise.resolve({ rows: [] });
+    if (/pg_advisory_xact_lock/i.test(sql)) return Promise.resolve({ rows: [] });
+    if (/SELECT user_id FROM refresh_token/i.test(sql)) return Promise.resolve({ rows: preselectRow ? [preselectRow] : [] });
     if (/UPDATE refresh_token/i.test(sql)) return Promise.resolve({ rows: consumeRow ? [consumeRow] : [] });
     if (/FROM "user"/i.test(sql)) return Promise.resolve({ rows: user ? [user] : [] });
     if (/business_location/i.test(sql)) return Promise.resolve({ rows: [] });
@@ -90,6 +94,8 @@ describe('refreshTokenController — transactional rotation (F3)', () => {
     expect(mockInsertCapped).toHaveBeenCalledTimes(1);
     // insert must run on the SAME transactional client, not the pool
     expect(mockInsertCapped.mock.calls[0][0]).toBe(mockClient);
+    // the per-user advisory lock (serializes vs revokeAllSessions/deleteAccount) was taken
+    expect(sqlCalls().some((s) => /pg_advisory_xact_lock/i.test(s))).toBe(true);
     const body = res.json.mock.calls[0][0];
     expect(typeof body.token).toBe('string');
     expect(typeof body.refreshToken).toBe('string');
@@ -107,6 +113,20 @@ describe('refreshTokenController — transactional rotation (F3)', () => {
     expect(committed()).toBe(false);   // nothing partial was persisted
     expect(res.statusCode).toBe(500);
     expect(mockRelease).toHaveBeenCalledTimes(1); // connection always returned to the pool
+  });
+
+  test('completely unknown token: 401 at the pre-select, before any lock or consume', async () => {
+    defaultClient({ preselectRow: null }); // token hash not in the table at all
+    const res = makeRes();
+
+    await refreshTokenController(makeReq(), res as unknown as Parameters<typeof refreshTokenController>[1]);
+
+    expect(rolledBack()).toBe(true);
+    expect(committed()).toBe(false);
+    expect(res.statusCode).toBe(401);
+    expect(sqlCalls().some((s) => /pg_advisory_xact_lock/i.test(s))).toBe(false); // never locked
+    expect(sqlCalls().some((s) => /^UPDATE refresh_token/i.test(s))).toBe(false); // never consumed
+    expect(mockRelease).toHaveBeenCalledTimes(1);
   });
 
   test('invalid/expired token: rolls back and returns 401 (nothing persisted)', async () => {

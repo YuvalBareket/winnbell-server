@@ -90,6 +90,21 @@ const registrationLimiter = rateLimit({
   message: { message: 'Too many registration attempts from this IP. Please try again later.' },
 });
 
+// /auth/check-email tells the register form whether an email is taken — inherently an existence
+// oracle. It can't be removed without hurting the "email already registered" UX, so cap it tightly
+// on its OWN per-IP bucket (F15): enough for a wired office NAT where several people register in
+// the same window (one call per form submit), far too slow to enumerate a user base. Stacked on
+// top of the general authLimiter.
+const checkEmailLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 30,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: getClientIpKey,
+  store: makeRateLimitStore('check-email'),
+  message: { message: 'Too many requests, please try again later.' },
+});
+
 const ticketsLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
   max: 30,
@@ -150,6 +165,7 @@ app.use(express.json());
 //   if (process.env.NODE_ENV !== 'production') app.post('/auth/test-setup', testSetup);
 // Registration gets its own tighter limiter stacked on top of the general auth limiter
 app.use('/auth/register', registrationLimiter);
+app.use('/auth/check-email', checkEmailLimiter); // F15: tighter, dedicated bucket for the email oracle
 app.use('/auth/refresh', refreshLimiter); // authLimiter skips /refresh (see limiter defs)
 app.use('/auth', authLimiter, authRoutes);
 

@@ -10,24 +10,38 @@ const getAllowedStates = async (): Promise<string[]> => {
   return settings.allowed_states ?? [];
 };
 
-// Cap on simultaneously-live refresh tokens per user. Each login/auth inserts a 30-day
-// token; without a cap a user accumulates unlimited live "remember me" sessions (row
-// bloat + a larger stolen-token surface). Keep only the N most recent, prune the rest.
-const MAX_REFRESH_TOKENS_PER_USER = 5;
+// Cap on simultaneously-live refresh tokens per user, BY ROLE. Each login/auth inserts a 30-day
+// token; without a cap a user accumulates unlimited live "remember me" sessions (row bloat + a
+// larger stolen-token surface). Business owners and their location managers (both stored as the
+// 'Business' role) legitimately sign in from more devices (POS tablet, back-office PC, phone), so
+// they get a higher cap than a regular consumer. Admins (internal) share the elevated cap. Once a
+// user exceeds their cap, the oldest live session is evicted on the next login. Keep only the N
+// most recent live tokens, prune the rest.
+const REFRESH_TOKEN_CAP_DEFAULT = 3; // regular 'User'
+const REFRESH_TOKEN_CAP_ELEVATED = 8; // 'Business' (owners + location managers) and 'Admin'
+
+export const refreshTokenCapForRole = (role: string): number =>
+  role === 'Business' || role === 'Admin' ? REFRESH_TOKEN_CAP_ELEVATED : REFRESH_TOKEN_CAP_DEFAULT;
+
+// Fixed bcrypt hash (cost 10, matching real password hashes) used to equalize login timing:
+// when the email is unknown we still run one bcrypt.compare against this so a missing account is
+// indistinguishable from a wrong password by response latency (defeats a user-enumeration oracle).
+const DUMMY_PASSWORD_HASH = '$2b$10$0iDLekLjcXu10uYk5lh3XuOHYX/1xLaMJQOh59Kj95LDnZ6KUUhW6';
 
 // Accepts a Pool or a transaction PoolClient (both expose .query).
 type DbExecutor = { query: (text: string, params: unknown[]) => Promise<unknown> };
 
 /**
- * Insert a refresh token, then prune the user's tokens down to the most recent N.
- * Bounds live sessions per user. The just-inserted token is always among the newest,
- * so it survives; the oldest (least-recently-active) sessions beyond N are evicted.
+ * Insert a refresh token, then prune the user's tokens down to the most recent N for their role.
+ * Bounds live sessions per user. The just-inserted token is always among the newest, so it
+ * survives; the oldest (least-recently-active) sessions beyond the role cap are evicted.
  */
 export const insertRefreshTokenCapped = async (
   exec: DbExecutor,
   userId: number,
   tokenHash: string,
   expiresAt: Date,
+  role: string,
 ): Promise<void> => {
   await exec.query(
     `INSERT INTO refresh_token (user_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
@@ -45,7 +59,7 @@ export const insertRefreshTokenCapped = async (
            AND (consumed_at IS NULL OR consumed_at > NOW() - interval '60 seconds')
          ORDER BY id DESC LIMIT $2
        )`,
-    [userId, MAX_REFRESH_TOKENS_PER_USER],
+    [userId, refreshTokenCapForRole(role)],
   );
 };
 
@@ -198,6 +212,7 @@ export const registerUser = async (
         const decoded = jwt.verify(
           inviteToken,
           process.env.JWT_SECRET as string,
+          { algorithms: ['HS256'] },
         ) as ManagerInvitePayload;
 
         if (decoded.type === 'MANAGER_INVITE' && decoded.locationId) {
@@ -236,7 +251,7 @@ export const registerUser = async (
     const refreshHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
     const refreshExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
-    await insertRefreshTokenCapped(client, newUser.id, refreshHash, refreshExpiry);
+    await insertRefreshTokenCapped(client, newUser.id, refreshHash, refreshExpiry, newUser.role);
 
     await client.query('COMMIT');
     invalidateUserAuth(newUser.id);
@@ -282,7 +297,12 @@ export const loginUser = async (
     [email],
   );
   const user = result.rows[0];
-  if (!user) throw new Error('Invalid credentials');
+  if (!user) {
+    // Equalize timing: run one dummy compare so an unknown email costs the same as a wrong
+    // password, preventing account enumeration via response latency. (See DUMMY_PASSWORD_HASH.)
+    await bcrypt.compare(password, DUMMY_PASSWORD_HASH);
+    throw new Error('Invalid credentials');
+  }
 
   const isMatch = await bcrypt.compare(password, user.password_hash);
   if (!isMatch) throw new Error('Invalid credentials');
@@ -297,6 +317,7 @@ export const loginUser = async (
       const decoded = jwt.verify(
         inviteToken,
         process.env.JWT_SECRET as string,
+        { algorithms: ['HS256'] },
       ) as ManagerInvitePayload;
       if (decoded.type === 'MANAGER_INVITE' && decoded.locationId) {
         await client.query('BEGIN');
@@ -377,7 +398,7 @@ export const loginUser = async (
   const refreshHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
   const refreshExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
-  await insertRefreshTokenCapped(pool, user.id, refreshHash, refreshExpiry);
+  await insertRefreshTokenCapped(pool, user.id, refreshHash, refreshExpiry, user.role);
 
   return {
     message: 'Login successful',
@@ -507,6 +528,7 @@ export const syncExternalUser = async (
         const decoded = jwt.verify(
           inviteToken,
           process.env.JWT_SECRET as string,
+          { algorithms: ['HS256'] },
         ) as ManagerInvitePayload;
 
         if (decoded.type === 'MANAGER_INVITE' && decoded.locationId) {
@@ -558,7 +580,9 @@ export const syncExternalUser = async (
         `SELECT b.id, b.logo_url, (s.status IN ('Active', 'Trialing')) AS is_subscribed
          FROM business b
          LEFT JOIN subscription s ON s.business_id = b.id
-         WHERE b.user_id = $1`,
+         WHERE b.user_id = $1
+         ORDER BY b.id
+         LIMIT 1`,
         [dbUser.id],
       );
       hasBusiness = bizResult.rows.length > 0;
@@ -577,7 +601,7 @@ export const syncExternalUser = async (
     const refreshHash = crypto.createHash('sha256').update(refreshToken).digest('hex');
     const refreshExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
-    await insertRefreshTokenCapped(client, dbUser.id, refreshHash, refreshExpiry);
+    await insertRefreshTokenCapped(client, dbUser.id, refreshHash, refreshExpiry, dbUser.role);
 
     await client.query('COMMIT');
     invalidateUserAuth(dbUser.id);
@@ -605,9 +629,11 @@ export const syncExternalUser = async (
 
 export const cleanupExpiredRefreshTokens = async (): Promise<void> => {
   const pool = getPool();
+  // Two separate DELETEs, not one with an OR: an OR across two columns cannot use either
+  // single-column index, forcing a full table scan every 6h. Split so each half is index-driven
+  // (idx_refresh_token_expires / idx_refresh_token_consumed).
+  await pool.query(`DELETE FROM refresh_token WHERE expires_at < NOW()`);
   await pool.query(
-    `DELETE FROM refresh_token
-     WHERE expires_at < NOW()
-        OR consumed_at < NOW() - interval '60 seconds'`,
+    `DELETE FROM refresh_token WHERE consumed_at < NOW() - interval '60 seconds'`,
   );
 };

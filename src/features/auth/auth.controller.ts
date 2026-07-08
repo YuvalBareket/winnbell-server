@@ -9,6 +9,24 @@ import { getPlatformSettings, invalidateUserAuth } from '../../shared/cache/cach
 import { validateLengths } from '../../shared/validation.js';
 import { getClientIp } from '../../shared/clientIp.js';
 
+// F7: createRemoteJWKSet returns a CACHING key resolver. Instantiate it ONCE at module scope so
+// Supabase's signing keys are fetched once and reused; instantiating per-request threw the cache
+// away and hit Supabase's JWKS endpoint on every sync/revoke, so a Supabase JWKS blip failed all
+// sign-ins. Lazy so SUPABASE_URL is read at first use (after env load), not at import time.
+let jwksResolver: ReturnType<typeof createRemoteJWKSet> | null = null;
+const getJWKS = (): ReturnType<typeof createRemoteJWKSet> => {
+  if (!jwksResolver) {
+    jwksResolver = createRemoteJWKSet(
+      new URL(`${process.env.SUPABASE_URL}/auth/v1/.well-known/jwks.json`),
+    );
+  }
+  return jwksResolver;
+};
+
+// Minimum password length for the legacy direct-register endpoint (F18). The primary sign-up
+// path is Supabase, which enforces its own policy; this guards /auth/register's own hashing path.
+const MIN_PASSWORD_LENGTH = 8;
+
 export const register = async (
   req: Request<{}, {}, RegisterRequest>,
   res: Response<AuthResponse>,
@@ -27,6 +45,10 @@ export const register = async (
       ['Password', password, 128],
     ]);
     if (lenErr) { res.status(400).json({ message: lenErr }); return; }
+    if (typeof password !== 'string' || password.length < MIN_PASSWORD_LENGTH) {
+      res.status(400).json({ message: `Password must be at least ${MIN_PASSWORD_LENGTH} characters.` });
+      return;
+    }
 
     const result = await authService.registerUser(fullName, email, password, role, inviteToken, getClientIp(req));
     res.status(201).json(result);
@@ -96,10 +118,7 @@ export const revokeAllSessions = async (req: Request, res: Response): Promise<vo
 
   let email = '';
   try {
-    const JWKS = createRemoteJWKSet(
-      new URL(`${process.env.SUPABASE_URL}/auth/v1/.well-known/jwks.json`),
-    );
-    const { payload } = await jwtVerify(token, JWKS);
+    const { payload } = await jwtVerify(token, getJWKS());
     email = (((payload as Record<string, unknown>)['email'] as string) ?? '').toLowerCase().trim();
   } catch (err: unknown) {
     console.error('Revoke sessions: token verify failed:', err instanceof Error ? err.message : err);
@@ -120,9 +139,24 @@ export const revokeAllSessions = async (req: Request, res: Response): Promise<vo
       // INSTANT revocation: bump the session epoch so every already-issued internal JWT for
       // this user (including a compromised one) is rejected on its next request, then delete
       // the refresh tokens so none can be rotated, then clear the auth cache so the new epoch
-      // is read immediately (not up to 60s later).
-      await pool.query(`UPDATE "user" SET token_epoch = token_epoch + 1 WHERE id = $1`, [userId]);
-      await pool.query(`DELETE FROM refresh_token WHERE user_id = $1`, [userId]);
+      // is read immediately (not up to 60s later). One transaction + the per-user advisory
+      // lock shared with /auth/refresh: a refresh racing this revoke either completes fully
+      // BEFORE it (its new token is then visible to our DELETE and wiped; its access token
+      // carries the pre-bump epoch and dies on next request) or waits and finds its refresh
+      // token already deleted. No token can slip through the wipe.
+      const client = await pool.connect();
+      try {
+        await client.query('BEGIN');
+        await client.query(`SELECT pg_advisory_xact_lock(11, $1)`, [userId]);
+        await client.query(`UPDATE "user" SET token_epoch = token_epoch + 1 WHERE id = $1`, [userId]);
+        await client.query(`DELETE FROM refresh_token WHERE user_id = $1`, [userId]);
+        await client.query('COMMIT');
+      } catch (txErr) {
+        await client.query('ROLLBACK');
+        throw txErr;
+      } finally {
+        client.release();
+      }
       invalidateUserAuth(userId);
     }
     // Always 200 - never reveal whether the email maps to an account.
@@ -144,10 +178,7 @@ export const syncUser = async (req: Request, res: Response): Promise<void> => {
 
   let payload: Record<string, unknown>;
   try {
-    const JWKS = createRemoteJWKSet(
-      new URL(`${process.env.SUPABASE_URL}/auth/v1/.well-known/jwks.json`),
-    );
-    const { payload: verified } = await jwtVerify(token, JWKS);
+    const { payload: verified } = await jwtVerify(token, getJWKS());
     payload = verified as Record<string, unknown>;
   } catch (err: unknown) {
     console.error('JWT verify failed:', err instanceof Error ? err.message : err);
@@ -235,6 +266,9 @@ export const deleteAccount = async (req: Request, res: Response): Promise<void> 
     const client = await pool.connect();
     try {
       await client.query('BEGIN');
+      // Same per-user advisory lock as /auth/refresh and revokeAllSessions: a refresh racing
+      // this deletion cannot commit a new token that our DELETE would miss (MVCC snapshot).
+      await client.query(`SELECT pg_advisory_xact_lock(11, $1)`, [userId]);
       await client.query(`DELETE FROM refresh_token WHERE user_id = $1`, [userId]);
       await client.query(
         `UPDATE "user" SET
@@ -333,6 +367,24 @@ export const refreshTokenController = async (req: Request, res: Response): Promi
     try {
       await client.query('BEGIN');
 
+      // Serialize against revocation (revokeAllSessions / deleteAccount) with a per-user
+      // advisory lock. Without it, a refresh in flight at the exact moment of a password reset
+      // could commit a NEW refresh token after the revoke's DELETE took its snapshot (READ
+      // COMMITTED MVCC) - the fresh token would survive the wipe. Lock ordering everywhere is
+      // advisory(user) FIRST, then refresh_token rows, so no deadlock. The user_id is read with
+      // a plain SELECT (no consume) purely to know which lock to take; the consuming UPDATE
+      // below re-checks its full predicate after the lock is acquired.
+      const who = await client.query(
+        `SELECT user_id FROM refresh_token WHERE token_hash = $1`,
+        [hash],
+      );
+      if (who.rows.length === 0) {
+        await client.query('ROLLBACK');
+        res.status(401).json({ message: 'Invalid or expired refresh token' });
+        return;
+      }
+      await client.query(`SELECT pg_advisory_xact_lock(11, $1)`, [who.rows[0].user_id]);
+
       // Consume with a grace window instead of hard-deleting. Rotation is single-use in
       // spirit, but multiple app contexts (second tab, installed PWA window, restored mobile
       // webview) share ONE persisted refresh token and race to refresh at access-token expiry.
@@ -386,7 +438,7 @@ export const refreshTokenController = async (req: Request, res: Response): Promi
       const newRefreshHash = crypto.createHash('sha256').update(newRefreshToken).digest('hex');
       const newRefreshExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
-      await authService.insertRefreshTokenCapped(client, user.id, newRefreshHash, newRefreshExpiry);
+      await authService.insertRefreshTokenCapped(client, user.id, newRefreshHash, newRefreshExpiry, user.role);
 
       await client.query('COMMIT');
       res.json({ token: newToken, refreshToken: newRefreshToken });
