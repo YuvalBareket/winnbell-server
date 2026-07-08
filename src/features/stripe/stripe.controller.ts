@@ -50,7 +50,7 @@ export const createCheckout = async (req: Request, res: Response) => {
     // ── Regular recurring subscription flow ────────────────────────────────
     const entriesPerLocation = Number(req.body.entries_per_location);
     if (!TIER_PRICE_MAP[entriesPerLocation]) {
-      res.status(400).json({ error: 'Invalid entries_per_location. Must be 250–3000 in steps of 250.' });
+      res.status(400).json({ error: 'Invalid entries_per_location. Must be 1000, 2500, or 5000.' });
       return;
     }
     const result = await createCheckoutSession(business.id, business.email, entriesPerLocation);

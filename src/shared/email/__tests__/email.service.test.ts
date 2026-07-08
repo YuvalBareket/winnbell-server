@@ -32,10 +32,11 @@ import { sendSubscriptionConfirmationEmail } from '../email.service';
 const TEST_EMAIL = 'owner@coffeecorner.com';
 const TEST_BUSINESS = 'Coffee Corner';
 const TEST_PLAN = {
-  entriesPerLocation: 250,
-  billingInterval: 'monthly' as const,
-  monthlyFee: 490,
+  planName: 'Growth',
+  entriesPerLocation: 2500,
+  monthlyFee: 900,
   locationCount: 2,
+  chargedToday: false,
 };
 
 // ─────────────────────────────────────────────
@@ -96,8 +97,8 @@ describe('sendSubscriptionConfirmationEmail', () => {
     await sendSubscriptionConfirmationEmail(TEST_EMAIL, TEST_BUSINESS, TEST_PLAN);
 
     const callArgs = mockSendMail.mock.calls[0][0];
-    // The html contains the plan's entriesPerLocation value (e.g. "250 entries / location")
-    expect(callArgs.html).toContain(String(TEST_PLAN.entriesPerLocation));
+    // The html contains the plan's entriesPerLocation value, locale-formatted ("2,500 entries per location")
+    expect(callArgs.html).toContain(TEST_PLAN.entriesPerLocation.toLocaleString('en-US'));
   });
 
   it('should set the `to` field to the email address passed in', async () => {
@@ -132,8 +133,38 @@ describe('sendSubscriptionConfirmationEmail', () => {
     await sendSubscriptionConfirmationEmail(TEST_EMAIL, TEST_BUSINESS, TEST_PLAN);
 
     const callArgs = mockSendMail.mock.calls[0][0];
-    // The fee is rendered as e.g. "$490.00 / month"
-    expect(callArgs.html).toContain('490');
+    // The fee is rendered as e.g. "$900 / mo"
+    expect(callArgs.html).toContain('$900');
+  });
+
+  it('should include the plan name in the email html', async () => {
+    process.env.SMTP_HOST = 'smtp.test.com';
+
+    await sendSubscriptionConfirmationEmail(TEST_EMAIL, TEST_BUSINESS, TEST_PLAN);
+
+    const callArgs = mockSendMail.mock.calls[0][0];
+    expect(callArgs.html).toContain(TEST_PLAN.planName);
+  });
+
+  it('should say NO charge was made today when chargedToday is false (normal signup)', async () => {
+    process.env.SMTP_HOST = 'smtp.test.com';
+
+    await sendSubscriptionConfirmationEmail(TEST_EMAIL, TEST_BUSINESS, { ...TEST_PLAN, chargedToday: false });
+
+    const callArgs = mockSendMail.mock.calls[0][0];
+    expect(callArgs.html).toContain('No charge was made today');
+    expect(callArgs.html).toContain('not an invoice');
+    expect(callArgs.html).toContain('billed on the 24th');
+  });
+
+  it('should say the card WAS charged today when chargedToday is true (window signup)', async () => {
+    process.env.SMTP_HOST = 'smtp.test.com';
+
+    await sendSubscriptionConfirmationEmail(TEST_EMAIL, TEST_BUSINESS, { ...TEST_PLAN, chargedToday: true });
+
+    const callArgs = mockSendMail.mock.calls[0][0];
+    expect(callArgs.html).toContain('charged $900 today');
+    expect(callArgs.html).not.toContain('No charge was made today');
   });
 
   it('should not call sendMail when SMTP_HOST is an empty string', async () => {

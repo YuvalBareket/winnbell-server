@@ -27,19 +27,10 @@ export const getBusinessForCheckout = async (userId: number): Promise<{ id: numb
 // (Stripe is what actually charges the card). When a price changes, update the
 // Stripe price object AND this map together — this is the only place the app
 // stores prices, so the change propagates to fees and the client display.
-export const TIER_PRICE_MAP: Record<number, { envKey: string; price: number }> = {
-  250:  { envKey: 'STRIPE_PRICE_ID_250',  price: 250  },
-  500:  { envKey: 'STRIPE_PRICE_ID_500',  price: 490  },
-  750:  { envKey: 'STRIPE_PRICE_ID_750',  price: 730  },
-  1000: { envKey: 'STRIPE_PRICE_ID_1000', price: 920  },
-  1250: { envKey: 'STRIPE_PRICE_ID_1250', price: 1140 },
-  1500: { envKey: 'STRIPE_PRICE_ID_1500', price: 1360 },
-  1750: { envKey: 'STRIPE_PRICE_ID_1750', price: 1500 },
-  2000: { envKey: 'STRIPE_PRICE_ID_2000', price: 1710 },
-  2250: { envKey: 'STRIPE_PRICE_ID_2250', price: 1910 },
-  2500: { envKey: 'STRIPE_PRICE_ID_2500', price: 2050 },
-  2750: { envKey: 'STRIPE_PRICE_ID_2750', price: 2250 },
-  3000: { envKey: 'STRIPE_PRICE_ID_3000', price: 2460 },
+export const TIER_PRICE_MAP: Record<number, { envKey: string; price: number; name: string }> = {
+  1000: { envKey: 'STRIPE_PRICE_ID_1000', price: 250, name: 'Starter' },
+  2500: { envKey: 'STRIPE_PRICE_ID_2500', price: 450, name: 'Growth' },  // most popular
+  5000: { envKey: 'STRIPE_PRICE_ID_5000', price: 750, name: 'Pro' },
 };
 
 /**
@@ -602,6 +593,7 @@ async function createSubscriptionForSetupSession(pool: Pool, session: Stripe.Che
   // charge fails, the business activates as Incomplete: it is NOT enrolled at open, and
   // Stripe's retries (or a later manual payment) flip it Active via invoice webhooks.
   let initialStatus: 'Active' | 'Incomplete' = 'Active';
+  let chargedToday = false;
   if (await isChargedNotOpenedWindow(pool)) {
     const paid = await chargeNow(
       customerId,
@@ -612,9 +604,10 @@ async function createSubscriptionForSetupSession(pool: Pool, session: Stripe.Che
       'signup_charge',
     );
     if (!paid) initialStatus = 'Incomplete';
+    else chargedToday = true;
   }
 
-  await activateBusinessSubscription(pool, businessId, subscription.id, customerId, priceId, currentPeriodEnd, monthlyFee, entriesPerLocation, initialStatus);
+  await activateBusinessSubscription(pool, businessId, subscription.id, customerId, priceId, currentPeriodEnd, monthlyFee, entriesPerLocation, initialStatus, chargedToday);
   invalidatePublicBusinessData();
 }
 
@@ -1239,6 +1232,7 @@ async function activateBusinessSubscription(
   monthlyFee: number,
   entriesPerLocation: number,
   initialStatus: 'Active' | 'Incomplete' = 'Active',
+  chargedToday = false,
 ): Promise<void> {
   console.log(`[Stripe] Activating business ${businessId} — entries/location: ${entriesPerLocation}...`);
 
@@ -1336,6 +1330,9 @@ async function activateBusinessSubscription(
   // parameters, not a re-read of the subscription row: during a founding hand-off the
   // row still carries the founding tier/fee (the new plan is staged in pending_*), and
   // the email must describe the plan the business just chose.
+  // Incomplete activations (window signup whose immediate charge failed) get no congrats
+  // email: the business is not enrolled yet, and the payment-failed flow messages them.
+  if (initialStatus !== 'Active') return;
   try {
     const bizResult = await pool.query(
       `SELECT b.name, u.email,
@@ -1348,10 +1345,11 @@ async function activateBusinessSubscription(
     const biz = bizResult.rows[0];
     if (biz?.email) {
       await sendSubscriptionConfirmationEmail(biz.email, biz.name, {
+        planName: TIER_PRICE_MAP[entriesPerLocation]?.name ?? 'Winnbell',
         entriesPerLocation,
-        billingInterval: 'monthly',
         monthlyFee,
         locationCount: Math.max(1, Number(biz.location_count)),
+        chargedToday,
       });
     }
   } catch (err: unknown) {

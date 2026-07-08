@@ -21,45 +21,11 @@ services:
         sync: false
       - key: STRIPE_WEBHOOK_SECRET
         sync: false
-      - key: STRIPE_PRICE_ID_250
-        sync: false
-      - key: STRIPE_PRICE_ID_500
-        sync: false
-      - key: STRIPE_PRICE_ID_750
-        sync: false
       - key: STRIPE_PRICE_ID_1000
-        sync: false
-      - key: STRIPE_PRICE_ID_1250
-        sync: false
-      - key: STRIPE_PRICE_ID_1500
-        sync: false
-      - key: STRIPE_PRICE_ID_1750
-        sync: false
-      - key: STRIPE_PRICE_ID_2000
-        sync: false
-      - key: STRIPE_PRICE_ID_2250
         sync: false
       - key: STRIPE_PRICE_ID_2500
         sync: false
-      - key: STRIPE_PRICE_ID_250_YEARLY
-        sync: false
-      - key: STRIPE_PRICE_ID_500_YEARLY
-        sync: false
-      - key: STRIPE_PRICE_ID_750_YEARLY
-        sync: false
-      - key: STRIPE_PRICE_ID_1000_YEARLY
-        sync: false
-      - key: STRIPE_PRICE_ID_1250_YEARLY
-        sync: false
-      - key: STRIPE_PRICE_ID_1500_YEARLY
-        sync: false
-      - key: STRIPE_PRICE_ID_1750_YEARLY
-        sync: false
-      - key: STRIPE_PRICE_ID_2000_YEARLY
-        sync: false
-      - key: STRIPE_PRICE_ID_2250_YEARLY
-        sync: false
-      - key: STRIPE_PRICE_ID_2500_YEARLY
+      - key: STRIPE_PRICE_ID_5000
         sync: false
       - key: GOOGLE_PLACES_API
         sync: false

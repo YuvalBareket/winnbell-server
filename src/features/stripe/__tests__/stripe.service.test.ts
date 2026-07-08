@@ -73,9 +73,9 @@ jest.mock('../../../shared/db/db.js', () => ({
 
 // Set required env vars before importing the service
 process.env.STRIPE_SECRET_KEY = 'sk_test_dummy';
-process.env.STRIPE_PRICE_ID_250 = 'price_test_250';
-process.env.STRIPE_PRICE_ID_500 = 'price_test_500';
 process.env.STRIPE_PRICE_ID_1000 = 'price_test_1000';
+process.env.STRIPE_PRICE_ID_2500 = 'price_test_2500';
+process.env.STRIPE_PRICE_ID_5000 = 'price_test_5000';
 
 import { createCheckoutSession, createFoundingMemberCheckoutSession, cancelSubscription, verifyAndActivateSession, resumeSubscription, resolveMonthlyFee, isFoundingTransitionWindow, updateSubscriptionPlan } from '../stripe.service';
 import { invalidatePlatformSettings } from '../../../shared/cache/cache';
@@ -87,21 +87,21 @@ describe('resolveMonthlyFee', () => {
   afterEach(() => jest.restoreAllMocks());
 
   it('returns the TIER_PRICE_MAP value × quantity when no Stripe amount is given', () => {
-    // tier 500 → $490/location
-    expect(resolveMonthlyFee(500, 3)).toBe(1470); // 490 × 3
+    // tier 2500 (Growth) → $450/location
+    expect(resolveMonthlyFee(2500, 3)).toBe(1350); // 450 × 3
   });
 
   it('returns the map value and does NOT log when Stripe unit_amount agrees', () => {
     const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
-    // 49000 cents = $490, matches the map
-    expect(resolveMonthlyFee(500, 2, 49000)).toBe(980);
+    // 45000 cents = $450, matches the map
+    expect(resolveMonthlyFee(2500, 2, 45000)).toBe(900);
     expect(errSpy).not.toHaveBeenCalled();
   });
 
   it('logs CRITICAL drift but still returns the map value when Stripe disagrees', () => {
     const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
-    // Stripe says $500 (50000c), map says $490 → drift
-    expect(resolveMonthlyFee(500, 1, 50000)).toBe(490);
+    // Stripe says $500 (50000c), map says $450 → drift
+    expect(resolveMonthlyFee(2500, 1, 50000)).toBe(450);
     expect(errSpy).toHaveBeenCalledWith(expect.stringMatching(/CRITICAL: fee drift/));
   });
 
@@ -112,7 +112,7 @@ describe('resolveMonthlyFee', () => {
   });
 
   it('clamps quantity to at least 1', () => {
-    expect(resolveMonthlyFee(500, 0)).toBe(490);
+    expect(resolveMonthlyFee(2500, 0)).toBe(450);
   });
 });
 
@@ -173,7 +173,7 @@ describe('createCheckoutSession — setup session', () => {
   it('creates a setup-mode session and returns its url', async () => {
     mockSessionsCreate.mockResolvedValue({ url: 'https://checkout.stripe.com/test' });
 
-    const res = await createCheckoutSession(42, 'owner@test.com', 250);
+    const res = await createCheckoutSession(42, 'owner@test.com', 1000);
 
     expect(res.url).toBe('https://checkout.stripe.com/test');
     const [params] = mockSessionsCreate.mock.calls[0];
@@ -339,7 +339,7 @@ describe('verifyAndActivateSession — setup-mode subscription creation', () => 
     status: 'complete',
     customer: 'cus_1',
     setup_intent: 'seti_1',
-    metadata: { business_id: '42', price_id: 'price_x', quantity: '2', entries_per_location: '750', billing_interval: 'monthly' },
+    metadata: { business_id: '42', price_id: 'price_x', quantity: '2', entries_per_location: '1000', billing_interval: 'monthly' },
   };
 
   it('creates a subscription anchored on the 24th with no proration', async () => {
@@ -350,7 +350,7 @@ describe('verifyAndActivateSession — setup-mode subscription creation', () => 
     mockSubscriptionsCreate.mockResolvedValue({
       id: 'sub_new',
       current_period_end: Math.floor(new RealDate('2026-08-24T00:00:00.000Z').getTime() / 1000),
-      items: { data: [{ price: { unit_amount: 94000, recurring: { interval: 'month' } }, quantity: 2 }] },
+      items: { data: [{ price: { unit_amount: 25000, recurring: { interval: 'month' } }, quantity: 2 }] },
     });
     mockQuery
       .mockResolvedValueOnce({ rows: [{ id: 42 }] })                    // business lookup
@@ -382,7 +382,7 @@ describe('verifyAndActivateSession — setup-mode subscription creation', () => 
     mockSubscriptionsCreate.mockResolvedValue({
       id: 'sub_new',
       current_period_end: Math.floor(new RealDate('2026-08-24T00:00:00.000Z').getTime() / 1000),
-      items: { data: [{ price: { unit_amount: 73000, recurring: { interval: 'month' } }, quantity: 2 }] },
+      items: { data: [{ price: { unit_amount: 25000, recurring: { interval: 'month' } }, quantity: 2 }] },
     });
     mockInvoiceItemsCreate.mockResolvedValue({});
     mockInvoicesCreate.mockResolvedValue({ id: 'in_first', status: 'draft' });
@@ -395,9 +395,9 @@ describe('verifyAndActivateSession — setup-mode subscription creation', () => 
 
     await verifyAndActivateSession('cs_1', 7);
 
-    // Full campaign price for tier 750 × 2 locations = $1,460 → 146000 cents, right now.
+    // Full campaign price for tier 1000 × 2 locations = $500 → 50000 cents, right now.
     expect(mockInvoiceItemsCreate).toHaveBeenCalledTimes(1);
-    expect(mockInvoiceItemsCreate.mock.calls[0][0].amount).toBe(146000);
+    expect(mockInvoiceItemsCreate.mock.calls[0][0].amount).toBe(50000);
     // The business activates as Active (charge succeeded).
     const upsert = mockClientQuery.mock.calls.find(
       ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO subscription'),
@@ -413,7 +413,7 @@ describe('verifyAndActivateSession — setup-mode subscription creation', () => 
     mockSubscriptionsCreate.mockResolvedValue({
       id: 'sub_new',
       current_period_end: Math.floor(new RealDate('2026-08-24T00:00:00.000Z').getTime() / 1000),
-      items: { data: [{ price: { unit_amount: 73000, recurring: { interval: 'month' } }, quantity: 2 }] },
+      items: { data: [{ price: { unit_amount: 25000, recurring: { interval: 'month' } }, quantity: 2 }] },
     });
     mockInvoiceItemsCreate.mockResolvedValue({});
     mockInvoicesCreate.mockResolvedValue({ id: 'in_first', status: 'draft' });
@@ -422,8 +422,8 @@ describe('verifyAndActivateSession — setup-mode subscription creation', () => 
     mockQuery
       .mockResolvedValueOnce({ rows: [{ id: 42 }] })
       .mockResolvedValueOnce({ rows: [] })
-      .mockResolvedValueOnce({ rows: [{ open_opened_at: null, any_draw: true }] }) // IN window
-      .mockResolvedValueOnce({ rows: [] });
+      .mockResolvedValueOnce({ rows: [{ open_opened_at: null, any_draw: true }] }); // IN window
+    // No email lookup queued: an Incomplete activation sends no congrats email.
 
     await verifyAndActivateSession('cs_1', 7);
 
@@ -495,7 +495,7 @@ describe('updateSubscriptionPlan — staged change with window settlement', () =
 
   const stripeItemMocks = () => {
     mockSubscriptionsRetrieve.mockResolvedValue({
-      items: { data: [{ id: 'si_1', price: { id: 'price_test_500' }, quantity: 1 }] },
+      items: { data: [{ id: 'si_1', price: { id: 'price_test_1000' }, quantity: 1 }] },
     });
     mockSubscriptionsUpdate.mockResolvedValue({});
   };
@@ -503,16 +503,16 @@ describe('updateSubscriptionPlan — staged change with window settlement', () =
   it('outside the window: updates Stripe with no proration and stages the plan, no money moves', async () => {
     stripeItemMocks();
     mockQuery
-      .mockResolvedValueOnce({ rows: [SUB_ROW(500, '490.00')] })          // sub row
+      .mockResolvedValueOnce({ rows: [SUB_ROW(1000, '250.00')] })          // sub row
       .mockResolvedValueOnce({ rows: [{ open_opened_at: new RealDate(), any_draw: true }] })   // campaign opened after last charge → NOT in window
       .mockResolvedValueOnce({ rows: [], rowCount: 1 });                  // staging UPDATE
 
-    await updateSubscriptionPlan(7, 1000);
+    await updateSubscriptionPlan(7, 2500);
 
     const [subId, params] = mockSubscriptionsUpdate.mock.calls[0];
     expect(subId).toBe('sub_1');
     expect(params.proration_behavior).toBe('none');
-    expect(params.items).toEqual([{ id: 'si_1', price: 'price_test_1000', quantity: 1 }]);
+    expect(params.items).toEqual([{ id: 'si_1', price: 'price_test_2500', quantity: 1 }]);
     // No settlement outside the window — the next 24th simply bills the new plan.
     expect(mockInvoiceItemsCreate).not.toHaveBeenCalled();
     expect(mockRefundsCreate).not.toHaveBeenCalled();
@@ -521,14 +521,14 @@ describe('updateSubscriptionPlan — staged change with window settlement', () =
       ([sql]: [string]) => typeof sql === 'string' && sql.includes('pending_entries_per_location = $1'),
     );
     expect(staging).toBeDefined();
-    expect(staging![1]).toEqual([1000, 920, 'price_test_1000', 42]);
+    expect(staging![1]).toEqual([2500, 450, 'price_test_2500', 42]);
     // With no settlement invoice, the change is recorded in the change log so the
     // payment history still shows what happened.
     const log = mockQuery.mock.calls.find(
       ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO subscription_change_log'),
     );
     expect(log).toBeDefined();
-    expect(log![1][1]).toMatch(/from 500 to 1,000 entries per location/);
+    expect(log![1][1]).toMatch(/from 1,000 to 2,500 entries per location/);
   });
 
   it('inside the window: an upgrade charges the full-campaign difference immediately', async () => {
@@ -537,41 +537,41 @@ describe('updateSubscriptionPlan — staged change with window settlement', () =
     mockInvoicesCreate.mockResolvedValue({ id: 'in_up', status: 'draft' });
     mockInvoicesFinalize.mockResolvedValue({ id: 'in_up', status: 'paid' });
     mockQuery
-      .mockResolvedValueOnce({ rows: [SUB_ROW(500, '490.00')] })
+      .mockResolvedValueOnce({ rows: [SUB_ROW(1000, '250.00')] })
       .mockResolvedValueOnce({ rows: [{ open_opened_at: null, any_draw: true }] }) // no campaign opened since the charge → IN window
       .mockResolvedValueOnce({ rows: [], rowCount: 1 });                  // staging UPDATE
 
-    await updateSubscriptionPlan(7, 1000);
+    await updateSubscriptionPlan(7, 2500);
 
-    // $920 - $490 = $430 difference charged now.
+    // $450 - $250 = $200 difference charged now.
     expect(mockInvoiceItemsCreate).toHaveBeenCalledTimes(1);
-    expect(mockInvoiceItemsCreate.mock.calls[0][0].amount).toBe(43000);
+    expect(mockInvoiceItemsCreate.mock.calls[0][0].amount).toBe(20000);
   });
 
   it('inside the window: a downgrade refunds the full-campaign difference from the paid invoice', async () => {
     mockSubscriptionsRetrieve.mockResolvedValue({
-      items: { data: [{ id: 'si_1', price: { id: 'price_test_1000' }, quantity: 1 }] },
+      items: { data: [{ id: 'si_1', price: { id: 'price_test_2500' }, quantity: 1 }] },
     });
     mockSubscriptionsUpdate.mockResolvedValue({});
-    mockInvoicesList.mockResolvedValue({ data: [{ id: 'in_cycle', amount_paid: 92000, payment_intent: 'pi_9' }] });
-    mockPaymentIntentsRetrieve.mockResolvedValue({ latest_charge: { amount: 92000, amount_refunded: 0 } });
+    mockInvoicesList.mockResolvedValue({ data: [{ id: 'in_cycle', amount_paid: 45000, payment_intent: 'pi_9' }] });
+    mockPaymentIntentsRetrieve.mockResolvedValue({ latest_charge: { amount: 45000, amount_refunded: 0 } });
     mockRefundsCreate.mockResolvedValue({ id: 're_1' });
     mockQuery
-      .mockResolvedValueOnce({ rows: [SUB_ROW(1000, '920.00')] })
+      .mockResolvedValueOnce({ rows: [SUB_ROW(2500, '450.00')] })
       .mockResolvedValueOnce({ rows: [{ open_opened_at: null, any_draw: true }] }) // IN window
       .mockResolvedValueOnce({ rows: [], rowCount: 1 });
 
-    await updateSubscriptionPlan(7, 500);
+    await updateSubscriptionPlan(7, 1000);
 
-    // $920 - $490 = $430 refunded from the invoice that paid the upcoming campaign.
+    // $450 - $250 = $200 refunded from the invoice that paid the upcoming campaign.
     expect(mockRefundsCreate).toHaveBeenCalledTimes(1);
-    expect(mockRefundsCreate.mock.calls[0][0]).toMatchObject({ payment_intent: 'pi_9', amount: 43000 });
+    expect(mockRefundsCreate.mock.calls[0][0]).toMatchObject({ payment_intent: 'pi_9', amount: 20000 });
   });
 
   it('refuses any plan change while payment is broken (Past_Due) — fix the card first', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [{ ...SUB_ROW(500, '490.00'), status: 'Past_Due' }] });
+    mockQuery.mockResolvedValueOnce({ rows: [{ ...SUB_ROW(1000, '250.00'), status: 'Past_Due' }] });
 
-    await expect(updateSubscriptionPlan(7, 1000)).rejects.toThrow('PAYMENT_ISSUE');
+    await expect(updateSubscriptionPlan(7, 2500)).rejects.toThrow('PAYMENT_ISSUE');
 
     // Nothing was touched at Stripe.
     expect(mockSubscriptionsRetrieve).not.toHaveBeenCalled();
@@ -585,15 +585,15 @@ describe('updateSubscriptionPlan — staged change with window settlement', () =
     mockInvoicesFinalize.mockResolvedValue({ id: 'in_fail', status: 'open' });
     mockInvoicesPay.mockRejectedValue(Object.assign(new Error('declined'), { code: 'card_declined' }));
     mockQuery
-      .mockResolvedValueOnce({ rows: [SUB_ROW(500, '490.00')] })
+      .mockResolvedValueOnce({ rows: [SUB_ROW(1000, '250.00')] })
       .mockResolvedValueOnce({ rows: [{ open_opened_at: null, any_draw: true }] }); // IN window
 
-    await expect(updateSubscriptionPlan(7, 1000)).rejects.toThrow('CHARGE_FAILED');
+    await expect(updateSubscriptionPlan(7, 2500)).rejects.toThrow('CHARGE_FAILED');
 
     // Second subscriptions.update call restored the original price/quantity.
     expect(mockSubscriptionsUpdate).toHaveBeenCalledTimes(2);
     const [, rollbackParams] = mockSubscriptionsUpdate.mock.calls[1];
-    expect(rollbackParams.items).toEqual([{ id: 'si_1', price: 'price_test_500', quantity: 1 }]);
+    expect(rollbackParams.items).toEqual([{ id: 'si_1', price: 'price_test_1000', quantity: 1 }]);
     // The staging UPDATE never ran.
     const staging = mockQuery.mock.calls.find(
       ([sql]: [string]) => typeof sql === 'string' && sql.includes('pending_entries_per_location = $1'),
@@ -636,7 +636,7 @@ describe('isFoundingTransitionWindow', () => {
 // createCheckoutSession — founding transition guard
 // ─────────────────────────────────────────────
 describe('createCheckoutSession — founding transition guard', () => {
-  const call = () => createCheckoutSession(42, 'biz@test.com', 250);
+  const call = () => createCheckoutSession(42, 'biz@test.com', 1000);
 
   it('allows a founding member in their final included month to start a regular plan', async () => {
     mockDateNow(nyDate(2026, 8, 6)); // August; year ends Aug 10 → September open not covered
@@ -805,7 +805,7 @@ describe('verifyAndActivateSession — founding hand-off', () => {
     status: 'complete',
     customer: 'cus_1',
     setup_intent: 'seti_1',
-    metadata: { business_id: '42', price_id: 'price_x', quantity: '2', entries_per_location: '750', billing_interval: 'monthly' },
+    metadata: { business_id: '42', price_id: 'price_x', quantity: '2', entries_per_location: '1000', billing_interval: 'monthly' },
   };
 
   const stripeSetupMocks = () => {
@@ -868,7 +868,7 @@ describe('verifyAndActivateSession — founding hand-off', () => {
     );
     expect(staged).toBeDefined();
     // params: businessId, customer, sub id, price, period end, fee, tier, interval
-    expect(staged![1][6]).toBe(750);
+    expect(staged![1][6]).toBe(1000);
     // The plain upsert (which would overwrite the live tier) must NOT run.
     expect(sqls.some((s) => s.includes('INSERT INTO subscription'))).toBe(false);
   });
