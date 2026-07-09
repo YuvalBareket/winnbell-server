@@ -79,7 +79,8 @@ export const sendSubscriptionConfirmationEmail = async (
        <strong style="color:#0f2747;">${totalLabel}</strong> will be charged on
        <strong style="color:#0f2747;">${fmtNyDate(nextCharge)}</strong>, and it covers the
        <strong style="color:#0f2747;">${openMonth} campaign</strong>. After that, each charge on the 24th pays
-       for the campaign that opens on the 1st of the following month. You can cancel anytime from your dashboard.`;
+       for the campaign that opens on the 1st of the following month. If you cancel from your dashboard, your plan stays
+       active through the paid period and simply does not renew after that.`;
 
   const steps: Array<{ title: string; body: string }> = [
     {
@@ -99,10 +100,10 @@ export const sendSubscriptionConfirmationEmail = async (
   const stepsHtml = steps.map((s, i) => `
                 <tr>
                   <td style="padding:0 0 16px;vertical-align:top;width:44px;">
-                    <div style="width:30px;height:30px;border-radius:9px;background:#e9f2fd;color:#1565c0;font-size:13px;font-weight:800;text-align:center;line-height:30px;">${i + 1}</div>
+                    <div style="width:30px;height:30px;border-radius:9px;background:#e9f2fd;color:#1565c0;font-size:13px;font-weight:700;text-align:center;line-height:30px;">${i + 1}</div>
                   </td>
                   <td style="padding:0 0 16px;vertical-align:top;">
-                    <div style="font-size:14px;font-weight:800;color:#0f2747;">${s.title}</div>
+                    <div style="font-size:14px;font-weight:700;color:#0f2747;">${s.title}</div>
                     <div style="font-size:13px;color:#475569;line-height:1.6;margin-top:2px;">${s.body}</div>
                   </td>
                 </tr>`).join('');
@@ -142,9 +143,9 @@ export const sendSubscriptionConfirmationEmail = async (
                 <tr>
                   <td align="center">
                     <div style="width:74px;height:74px;border-radius:50%;background:rgba(255,255,255,.16);border:2px solid rgba(255,255,255,.32);margin:0 auto 18px;text-align:center;">
-                      <div style="width:52px;height:52px;border-radius:50%;background:#ffffff;margin:11px auto 0;text-align:center;line-height:52px;font-size:26px;font-weight:800;color:#2e7d32;">&#10003;</div>
+                      <div style="width:52px;height:52px;border-radius:50%;background:#ffffff;margin:11px auto 0;text-align:center;line-height:52px;font-size:26px;font-weight:700;color:#2e7d32;">&#10003;</div>
                     </div>
-                    <div style="font-size:27px;font-weight:800;letter-spacing:-0.02em;color:#ffffff;line-height:1.2;">You're all set, ${businessName}!</div>
+                    <div style="font-size:27px;font-weight:700;letter-spacing:-0.02em;color:#ffffff;line-height:1.2;">You're all set, ${businessName}!</div>
                     <div style="font-size:14px;color:rgba(255,255,255,.82);font-weight:500;line-height:1.6;max-width:400px;margin:10px auto 0;">Welcome to Winnbell. Your business is officially part of the local rewards network that brings customers back.</div>
                   </td>
                 </tr>
@@ -165,16 +166,16 @@ export const sendSubscriptionConfirmationEmail = async (
                 </tr>
                 <tr>
                   <td colspan="2" style="padding:20px 22px 0;">
-                    <div style="font-size:11px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;color:#94a3b8;">Your plan</div>
+                    <div style="font-size:11px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:#94a3b8;">Your plan</div>
                   </td>
                 </tr>
                 <tr>
                   <td style="padding:14px 0 20px 22px;vertical-align:bottom;">
-                    <div style="font-size:17px;font-weight:800;color:#0f2747;">${plan.planName} &middot; ${locationLabel}</div>
+                    <div style="font-size:17px;font-weight:700;color:#0f2747;">${plan.planName} &middot; ${locationLabel}</div>
                     <div style="font-size:12.5px;color:#94a3b8;font-weight:600;margin-top:3px;">${plan.entriesPerLocation.toLocaleString('en-US')} entries per location, every campaign</div>
                   </td>
                   <td align="right" style="padding:14px 22px 20px 0;vertical-align:bottom;">
-                    <div style="font-size:22px;font-weight:900;letter-spacing:-0.02em;color:#0f2747;">${totalLabel}<span style="font-size:12.5px;font-weight:600;color:#94a3b8;"> / mo</span></div>
+                    <div style="font-size:22px;font-weight:700;letter-spacing:-0.02em;color:#0f2747;">${totalLabel}<span style="font-size:12.5px;font-weight:600;color:#94a3b8;"> / mo</span></div>
                     <div style="font-size:11.5px;color:#94a3b8;font-weight:600;">billed on the 24th</div>
                   </td>
                 </tr>
@@ -184,14 +185,14 @@ export const sendSubscriptionConfirmationEmail = async (
               <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:16px;background:#f4f8ff;border:1px solid #dcebfb;border-radius:14px;">
                 <tr>
                   <td style="padding:16px 20px;">
-                    <div style="font-size:13px;font-weight:800;color:#0f2747;margin-bottom:6px;">About your payment</div>
+                    <div style="font-size:13px;font-weight:700;color:#0f2747;margin-bottom:6px;">About your payment</div>
                     <div style="font-size:13px;color:#475569;line-height:1.65;">${billingHtml}</div>
                   </td>
                 </tr>
               </table>
 
               <!-- what happens next -->
-              <div style="margin-top:28px;font-size:15px;font-weight:800;color:#0f2747;">What happens next</div>
+              <div style="margin-top:28px;font-size:15px;font-weight:700;color:#0f2747;">What happens next</div>
               <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:16px;">
 ${stepsHtml}
               </table>
@@ -200,7 +201,7 @@ ${stepsHtml}
               <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:14px;">
                 <tr>
                   <td align="center">
-                    <a href="${baseUrl}/campaign" style="display:inline-block;background:linear-gradient(135deg,#1565c0,#0f3a6b);color:#ffffff;text-decoration:none;font-size:15px;font-weight:800;border-radius:13px;padding:15px 30px;box-shadow:0 10px 24px -8px rgba(21,101,192,.5);">Go to your Dashboard</a>
+                    <a href="${baseUrl}/campaign" style="display:inline-block;background:linear-gradient(135deg,#1565c0,#0f3a6b);color:#ffffff;text-decoration:none;font-size:15px;font-weight:700;border-radius:13px;padding:15px 30px;box-shadow:0 10px 24px -8px rgba(21,101,192,.5);">Go to your Dashboard</a>
                   </td>
                 </tr>
               </table>
@@ -219,7 +220,7 @@ ${stepsHtml}
           <!-- footer -->
           <tr>
             <td style="padding:24px 40px 30px;background:#f7f9fc;border-top:1px solid #eef2f7;" align="center">
-              <div style="font-size:13px;font-weight:800;color:#0f2747;">Winnbell</div>
+              <div style="font-size:13px;font-weight:700;color:#0f2747;">Winnbell</div>
               <div style="font-size:11px;color:#b0bccb;margin-top:14px;">You're receiving this because you subscribed to Winnbell for Business.</div>
             </td>
           </tr>
@@ -269,7 +270,7 @@ export const sendFoundingWelcomeEmail = async (
   const includedHtml = included.map((item) => `
                 <tr>
                   <td style="padding:0 0 11px;vertical-align:top;width:26px;">
-                    <span style="font-size:15px;font-weight:800;color:#f59e0b;">&#10003;</span>
+                    <span style="font-size:15px;font-weight:700;color:#f59e0b;">&#10003;</span>
                   </td>
                   <td style="padding:0 0 11px;vertical-align:top;">
                     <span style="font-size:13.5px;color:#334155;line-height:1.5;">${item}</span>
@@ -293,10 +294,10 @@ export const sendFoundingWelcomeEmail = async (
   const stepsHtml = steps.map((s, i) => `
                 <tr>
                   <td style="padding:0 0 16px;vertical-align:top;width:44px;">
-                    <div style="width:30px;height:30px;border-radius:9px;background:#fdf3d8;color:#b45309;font-size:13px;font-weight:800;text-align:center;line-height:30px;">${i + 1}</div>
+                    <div style="width:30px;height:30px;border-radius:9px;background:#fdf3d8;color:#b45309;font-size:13px;font-weight:700;text-align:center;line-height:30px;">${i + 1}</div>
                   </td>
                   <td style="padding:0 0 16px;vertical-align:top;">
-                    <div style="font-size:14px;font-weight:800;color:#0f2747;">${s.title}</div>
+                    <div style="font-size:14px;font-weight:700;color:#0f2747;">${s.title}</div>
                     <div style="font-size:13px;color:#475569;line-height:1.6;margin-top:2px;">${s.body}</div>
                   </td>
                 </tr>`).join('');
@@ -336,9 +337,9 @@ export const sendFoundingWelcomeEmail = async (
                 <tr>
                   <td align="center">
                     <div style="width:74px;height:74px;border-radius:50%;background:rgba(255,255,255,.16);border:2px solid rgba(251,191,36,.55);margin:0 auto 18px;text-align:center;">
-                      <div style="width:52px;height:52px;border-radius:50%;background:#ffffff;margin:11px auto 0;text-align:center;line-height:52px;font-size:26px;font-weight:800;color:#f59e0b;">&#10003;</div>
+                      <div style="width:52px;height:52px;border-radius:50%;background:#ffffff;margin:11px auto 0;text-align:center;line-height:52px;font-size:26px;font-weight:700;color:#f59e0b;">&#10003;</div>
                     </div>
-                    <div style="font-size:27px;font-weight:800;letter-spacing:-0.02em;color:#ffffff;line-height:1.2;">Welcome aboard, ${businessName}!</div>
+                    <div style="font-size:27px;font-weight:700;letter-spacing:-0.02em;color:#ffffff;line-height:1.2;">Welcome aboard, ${businessName}!</div>
                     <div style="font-size:14px;color:rgba(255,255,255,.82);font-weight:500;line-height:1.6;max-width:400px;margin:10px auto 0;">You're officially a Winnbell Founding Partner. A full year of campaigns, one payment, locked in.</div>
                   </td>
                 </tr>
@@ -359,23 +360,23 @@ export const sendFoundingWelcomeEmail = async (
                 </tr>
                 <tr>
                   <td colspan="2" style="padding:20px 22px 0;">
-                    <div style="font-size:11px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;color:#94a3b8;">Your founding membership</div>
+                    <div style="font-size:11px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:#94a3b8;">Your founding membership</div>
                   </td>
                 </tr>
                 <tr>
                   <td style="padding:14px 0 16px 22px;vertical-align:bottom;">
-                    <div style="font-size:17px;font-weight:800;color:#0f2747;">Founding Partner &middot; seat #${details.seatNumber}</div>
+                    <div style="font-size:17px;font-weight:700;color:#0f2747;">Founding Partner &middot; seat #${details.seatNumber}</div>
                     <div style="font-size:12.5px;color:#94a3b8;font-weight:600;margin-top:3px;">1,000 entries per location, every campaign</div>
                   </td>
                   <td align="right" style="padding:14px 22px 16px 0;vertical-align:bottom;">
-                    <div style="font-size:22px;font-weight:900;letter-spacing:-0.02em;color:#0f2747;">$1,200<span style="font-size:12.5px;font-weight:600;color:#94a3b8;"> one-time</span></div>
+                    <div style="font-size:22px;font-weight:700;letter-spacing:-0.02em;color:#0f2747;">$1,200<span style="font-size:12.5px;font-weight:600;color:#94a3b8;"> one-time</span></div>
                     <div style="font-size:11.5px;color:#94a3b8;font-weight:600;">then $0 / month for 12 months</div>
                   </td>
                 </tr>
                 <tr>
                   <td colspan="2" style="padding:0 22px 18px;">
                     <div style="border-top:1px solid #f1f5f9;padding-top:14px;">
-                      <div style="font-size:11px;font-weight:800;letter-spacing:0.06em;text-transform:uppercase;color:#94a3b8;margin-bottom:10px;">What's included</div>
+                      <div style="font-size:11px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:#94a3b8;margin-bottom:10px;">What's included</div>
                       <table width="100%" cellpadding="0" cellspacing="0">
 ${includedHtml}
                       </table>
@@ -388,7 +389,7 @@ ${includedHtml}
               <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:16px;background:#fffbf0;border:1px solid #f5e3b8;border-radius:14px;">
                 <tr>
                   <td style="padding:16px 20px;">
-                    <div style="font-size:13px;font-weight:800;color:#0f2747;margin-bottom:6px;">About your payment</div>
+                    <div style="font-size:13px;font-weight:700;color:#0f2747;margin-bottom:6px;">About your payment</div>
                     <div style="font-size:13px;color:#475569;line-height:1.65;"><strong style="color:#0f2747;">Your card was charged $1,200 today, and that is the only charge.</strong>
                     This email is your confirmation, not an invoice. Nothing is billed monthly, and your membership does not auto-renew.
                     It covers every campaign that opens before <strong style="color:#0f2747;">${termEndLabel}</strong>.
@@ -398,7 +399,7 @@ ${includedHtml}
               </table>
 
               <!-- what happens next -->
-              <div style="margin-top:28px;font-size:15px;font-weight:800;color:#0f2747;">What happens next</div>
+              <div style="margin-top:28px;font-size:15px;font-weight:700;color:#0f2747;">What happens next</div>
               <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:16px;">
 ${stepsHtml}
               </table>
@@ -407,7 +408,7 @@ ${stepsHtml}
               <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:14px;">
                 <tr>
                   <td align="center">
-                    <a href="${baseUrl}/campaign" style="display:inline-block;background:linear-gradient(135deg,#fcd34d,#f59e0b);color:#3a2606;text-decoration:none;font-size:15px;font-weight:800;border-radius:13px;padding:15px 30px;box-shadow:0 10px 24px -8px rgba(245,158,11,.55);">Go to your Dashboard</a>
+                    <a href="${baseUrl}/campaign" style="display:inline-block;background:linear-gradient(135deg,#fcd34d,#f59e0b);color:#3a2606;text-decoration:none;font-size:15px;font-weight:700;border-radius:13px;padding:15px 30px;box-shadow:0 10px 24px -8px rgba(245,158,11,.55);">Go to your Dashboard</a>
                   </td>
                 </tr>
               </table>
@@ -426,7 +427,7 @@ ${stepsHtml}
           <!-- footer -->
           <tr>
             <td style="padding:24px 40px 30px;background:#f7f9fc;border-top:1px solid #eef2f7;" align="center">
-              <div style="font-size:13px;font-weight:800;color:#0f2747;">Winnbell</div>
+              <div style="font-size:13px;font-weight:700;color:#0f2747;">Winnbell</div>
               <div style="font-size:11px;color:#b0bccb;margin-top:14px;">You're receiving this because you subscribed to Winnbell for Business.</div>
             </td>
           </tr>

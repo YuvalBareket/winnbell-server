@@ -140,7 +140,7 @@ export const getOverviewAnalytics = async (
   const empty = {
     total_participants: 0, total_entries: 0, avg_entries_per_participant: 0,
     new_participants: 0, returning_participants: 0, new_pct: 0, returning_pct: 0,
-    entry_cap: { used: 0, cap: null as number | null, pct: 0 },
+    entry_cap: { used: 0, cap: null as number | null, pct: 0, enrolled: false },
     draw_capacity: [] as { draw_id: number; label: string; status: string; used: number; cap: number | null; pct: number }[],
     series: [] as ReturnType<typeof num>[] & unknown[],
     bucket: 'day' as SeriesBucket,
@@ -158,7 +158,12 @@ export const getOverviewAnalytics = async (
               AND t.activated_by_user_id IS NOT NULL
               AND t.draw_id=(SELECT id FROM draw WHERE status='Open' ORDER BY draw_date ASC LIMIT 1)) AS used,
          (SELECT s.entries_per_location FROM subscription s WHERE s.business_id=$1) AS per_loc,
-         (SELECT COUNT(*) FROM business_location WHERE business_id=$1 AND is_active=TRUE) AS loc_count`,
+         (SELECT COUNT(*) FROM business_location WHERE business_id=$1 AND is_active=TRUE) AS loc_count,
+         -- Enrolled in the currently-Open draw? The cap gauge is only meaningful once the
+         -- business is actually in a live campaign; before that (a fresh subscriber who
+         -- joins at the next open) there is no draw allowance to show.
+         EXISTS(SELECT 1 FROM draw_entry de JOIN draw d ON d.id=de.draw_id
+                WHERE de.business_id=$1 AND d.status='Open') AS enrolled_open`,
       [businessId, loc],
     ),
     // Per-draw capacity for every draw this business had activity in during the selected window.
@@ -186,7 +191,10 @@ export const getOverviewAnalytics = async (
 
   const perLoc = capRes.rows[0]?.per_loc != null ? Number(capRes.rows[0].per_loc) : null;
   const locCount = num(capRes.rows[0]?.loc_count);
-  const entryCap = perLoc != null ? perLoc * (loc ? 1 : Math.max(locCount, 1)) : null;
+  const enrolledOpen = capRes.rows[0]?.enrolled_open === true;
+  // Only surface a cap when the business is actually in the live campaign. A fresh
+  // subscriber who has not yet been enrolled at an open has no draw allowance to show.
+  const entryCap = enrolledOpen && perLoc != null ? perLoc * (loc ? 1 : Math.max(locCount, 1)) : null;
   const used = num(capRes.rows[0]?.used);
   const drawCapacity = drawCapsRes.rows.map((r) => {
     // Live subscription is the source of truth for the current OPEN draw; closed draws use the
@@ -212,7 +220,7 @@ export const getOverviewAnalytics = async (
     new_participants, returning_participants,
     new_pct: pct(new_participants, new_participants + returning_participants),
     returning_pct: pct(returning_participants, new_participants + returning_participants),
-    entry_cap: { used, cap: entryCap, pct: pct(used, entryCap ?? 0) },
+    entry_cap: { used, cap: entryCap, pct: pct(used, entryCap ?? 0), enrolled: enrolledOpen },
     draw_capacity: drawCapacity,
     series: seriesRes.series,
     bucket: seriesRes.bucket,
