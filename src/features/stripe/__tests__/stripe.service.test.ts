@@ -77,8 +77,9 @@ process.env.STRIPE_PRICE_ID_1000 = 'price_test_1000';
 process.env.STRIPE_PRICE_ID_2500 = 'price_test_2500';
 process.env.STRIPE_PRICE_ID_5000 = 'price_test_5000';
 
-import { createCheckoutSession, createFoundingMemberCheckoutSession, cancelSubscription, verifyAndActivateSession, resumeSubscription, resolveMonthlyFee, isFoundingTransitionWindow, updateSubscriptionPlan } from '../stripe.service';
+import { createCheckoutSession, createFoundingMemberCheckoutSession, cancelSubscription, verifyAndActivateSession, resumeSubscription, resolveMonthlyFee, isFoundingTransitionWindow, updateSubscriptionPlan, invoicePaymentIntentId } from '../stripe.service';
 import { invalidatePlatformSettings } from '../../../shared/cache/cache';
+import { CHARGE_DAY_OF_MONTH } from '../../../shared/dates';
 
 // ─────────────────────────────────────────────
 // resolveMonthlyFee — fee_at_entry single source of truth (TIER_PRICE_MAP) + drift guard
@@ -342,7 +343,7 @@ describe('verifyAndActivateSession — setup-mode subscription creation', () => 
     metadata: { business_id: '42', price_id: 'price_x', quantity: '2', entries_per_location: '1000', billing_interval: 'monthly' },
   };
 
-  it('creates a subscription anchored on the 24th with no proration', async () => {
+  it('creates a subscription anchored on the platform charge day with no proration', async () => {
     mockClientQuery.mockResolvedValue({ rows: [] }); // BEGIN / INSERT / COMMIT in activateBusinessSubscription
     mockSessionsRetrieve.mockResolvedValue(SETUP_SESSION);
     mockSetupIntentsRetrieve.mockResolvedValue({ payment_method: 'pm_1' });
@@ -362,7 +363,7 @@ describe('verifyAndActivateSession — setup-mode subscription creation', () => 
 
     expect(mockSubscriptionsCreate).toHaveBeenCalledTimes(1);
     const [params, opts] = mockSubscriptionsCreate.mock.calls[0];
-    expect(params.billing_cycle_anchor_config).toEqual({ day_of_month: 24 });
+    expect(params.billing_cycle_anchor_config).toEqual({ day_of_month: CHARGE_DAY_OF_MONTH });
     expect(params.proration_behavior).toBe('none');
     expect(params.customer).toBe('cus_1');
     expect(params.items).toEqual([{ price: 'price_x', quantity: 2 }]);
@@ -886,5 +887,53 @@ describe('verifyAndActivateSession — founding hand-off', () => {
     expect(insert).toBeDefined();
     // Immediate path also clears any stale staged values.
     expect(insert).toMatch(/pending_fee_at_entry\s*=\s*NULL/);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// invoicePaymentIntentId — cross-API-version PaymentIntent resolution
+// Basil (2025+) removed invoice.payment_intent and put the payment under
+// invoice.payments.data[].payment.payment_intent. The refund path breaks silently if
+// this resolver stops handling either shape, so lock every shape down here.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('invoicePaymentIntentId — Basil + legacy PaymentIntent resolution', () => {
+  // Cast helper: the tests model raw Stripe payloads that the SDK types do not fully expose.
+  const asInvoice = (o: unknown) => o as Parameters<typeof invoicePaymentIntentId>[0];
+
+  it('reads the Basil shape with a string payment_intent', () => {
+    const inv = asInvoice({ payments: { data: [{ payment: { payment_intent: 'pi_basil' } }] } });
+    expect(invoicePaymentIntentId(inv)).toBe('pi_basil');
+  });
+
+  it('reads the Basil shape with an expanded {id} payment_intent object', () => {
+    const inv = asInvoice({ payments: { data: [{ payment: { payment_intent: { id: 'pi_obj' } } }] } });
+    expect(invoicePaymentIntentId(inv)).toBe('pi_obj');
+  });
+
+  it('skips a null Basil payment entry and takes the next valid one', () => {
+    const inv = asInvoice({ payments: { data: [{ payment: { payment_intent: null } }, { payment: { payment_intent: 'pi_second' } }] } });
+    expect(invoicePaymentIntentId(inv)).toBe('pi_second');
+  });
+
+  it('falls back to the legacy string invoice.payment_intent', () => {
+    const inv = asInvoice({ payment_intent: 'pi_legacy' });
+    expect(invoicePaymentIntentId(inv)).toBe('pi_legacy');
+  });
+
+  it('falls back to the legacy {id} invoice.payment_intent object', () => {
+    const inv = asInvoice({ payment_intent: { id: 'pi_legacy_obj' } });
+    expect(invoicePaymentIntentId(inv)).toBe('pi_legacy_obj');
+  });
+
+  it('prefers the Basil payments shape over the legacy field when both exist', () => {
+    const inv = asInvoice({ payments: { data: [{ payment: { payment_intent: 'pi_new' } }] }, payment_intent: 'pi_old' });
+    expect(invoicePaymentIntentId(inv)).toBe('pi_new');
+  });
+
+  it('returns undefined when neither shape carries a PaymentIntent', () => {
+    expect(invoicePaymentIntentId(asInvoice({}))).toBeUndefined();
+    expect(invoicePaymentIntentId(asInvoice({ payments: { data: [] } }))).toBeUndefined();
+    expect(invoicePaymentIntentId(asInvoice({ payments: { data: [{ payment: {} }] } }))).toBeUndefined();
   });
 });

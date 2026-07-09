@@ -1,6 +1,15 @@
 import nodemailer from 'nodemailer';
 import { WINNBELL_LOGO_BASE64 } from './winnbell-logo.data.js';
-import { nextChargeAtNy, nextCampaignOpensNy } from '../dates.js';
+import { nextChargeAtNy, nextCampaignOpensNy, CHARGE_DAY_OF_MONTH } from '../dates.js';
+
+// "9" -> "9th", "21" -> "21st", "24" -> "24th". Keeps the billing copy in sync with the
+// actual charge day (CHARGE_DAY_OF_MONTH) so the email never names the wrong date.
+const ordinal = (n: number): string => {
+  const s = ['th', 'st', 'nd', 'rd'];
+  const v = n % 100;
+  return `${n}${s[(v - 20) % 10] ?? s[v] ?? s[0]}`;
+};
+const CHARGE_DAY_LABEL = `the ${ordinal(CHARGE_DAY_OF_MONTH)}`;
 
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
@@ -70,7 +79,7 @@ export const sendSubscriptionConfirmationEmail = async (
   // The one paragraph that kills the billing confusion. Both variants are exact.
   const billingHtml = plan.chargedToday
     ? `<strong style="color:#0f2747;">Your card was charged ${totalLabel} today.</strong> Because this month's
-       billing day (the 24th) had already passed when you signed up, today's payment covers the
+       billing day (${CHARGE_DAY_LABEL}) had already passed when you signed up, today's payment covers the
        <strong style="color:#0f2747;">${openMonth} campaign</strong> directly. Your next charge will be on
        <strong style="color:#0f2747;">${fmtNyDate(nextCharge)}</strong> and pays for the campaign after.
        This email is your confirmation, not an invoice.`
@@ -78,7 +87,7 @@ export const sendSubscriptionConfirmationEmail = async (
        email is your confirmation, not an invoice. Your first payment of
        <strong style="color:#0f2747;">${totalLabel}</strong> will be charged on
        <strong style="color:#0f2747;">${fmtNyDate(nextCharge)}</strong>, and it covers the
-       <strong style="color:#0f2747;">${openMonth} campaign</strong>. After that, each charge on the 24th pays
+       <strong style="color:#0f2747;">${openMonth} campaign</strong>. After that, each charge on ${CHARGE_DAY_LABEL} pays
        for the campaign that opens on the 1st of the following month. If you cancel from your dashboard, your plan stays
        active through the paid period and simply does not renew after that.`;
 
@@ -176,7 +185,7 @@ export const sendSubscriptionConfirmationEmail = async (
                   </td>
                   <td align="right" style="padding:14px 22px 20px 0;vertical-align:bottom;">
                     <div style="font-size:22px;font-weight:700;letter-spacing:-0.02em;color:#0f2747;">${totalLabel}<span style="font-size:12.5px;font-weight:600;color:#94a3b8;"> / mo</span></div>
-                    <div style="font-size:11.5px;color:#94a3b8;font-weight:600;">billed on the 24th</div>
+                    <div style="font-size:11.5px;color:#94a3b8;font-weight:600;">billed on ${CHARGE_DAY_LABEL}</div>
                   </td>
                 </tr>
               </table>

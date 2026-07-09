@@ -24,6 +24,7 @@ jest.mock('nodemailer', () => ({
 }));
 
 import { sendSubscriptionConfirmationEmail } from '../email.service';
+import { CHARGE_DAY_OF_MONTH } from '../../dates';
 
 // ─────────────────────────────────────────────
 // Shared fixtures
@@ -154,7 +155,10 @@ describe('sendSubscriptionConfirmationEmail', () => {
     const callArgs = mockSendMail.mock.calls[0][0];
     expect(callArgs.html).toContain('No charge was made today');
     expect(callArgs.html).toContain('not an invoice');
-    expect(callArgs.html).toContain('billed on the 24th');
+    // Derives from the configured charge day, WITH the ordinal suffix, so a bad ordinal
+    // (e.g. "24st") would fail here too - not just a wrong day number.
+    const ord = (n: number) => { const s = ['th', 'st', 'nd', 'rd']; const v = n % 100; return `${n}${s[(v - 20) % 10] ?? s[v] ?? s[0]}`; };
+    expect(callArgs.html).toContain(`billed on the ${ord(CHARGE_DAY_OF_MONTH)}`);
   });
 
   it('should say the card WAS charged today when chargedToday is true (window signup)', async () => {

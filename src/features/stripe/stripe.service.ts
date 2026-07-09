@@ -7,7 +7,10 @@ import { nextCampaignOpensNy, lastChargeAtNy, CHARGE_DAY_OF_MONTH } from '../../
 
 const stripeSecretKey = process.env.STRIPE_SECRET_KEY;
 if (!stripeSecretKey) throw new Error('STRIPE_SECRET_KEY is not configured — refusing to start the Stripe client.');
-const stripe = new Stripe(stripeSecretKey);
+// Pin the API version explicitly (matches the SDK v21 default the code is typed against and
+// the version live-tested against) so a future SDK bump can't silently move field shapes.
+// Changing this is now a deliberate, reviewable edit - not a side effect of `npm install`.
+const stripe = new Stripe(stripeSecretKey, { apiVersion: '2026-03-25.dahlia' });
 
 // ─── Get Business For Checkout ────────────────────────────────────────────────
 
@@ -178,15 +181,33 @@ async function chargeNow(
 // ($0 invoices from credits/coupons), proceed without the missing part — no refund is
 // owed. But if paid invoices exist whose payments we could not access (structural / API
 // shape issue), throw so the change aborts instead of silently skipping an owed refund.
+// Resolve an invoice's PaymentIntent id across Stripe API versions. Pre-2025 ("acacia")
+// exposed `invoice.payment_intent`; the 2025 "Basil" API removed it and moved the payment
+// under `invoice.payments.data[].payment.payment_intent`. Read the new shape first, fall
+// back to the legacy field, so refunds keep working on either.
+export function invoicePaymentIntentId(invoice: Stripe.Invoice): string | undefined {
+  const payments = (invoice as unknown as {
+    payments?: { data?: Array<{ payment?: { payment_intent?: string | { id?: string } | null } }> };
+  }).payments;
+  const fromPayments = payments?.data
+    ?.map((p) => p.payment?.payment_intent)
+    .map((pi) => (typeof pi === 'string' ? pi : pi?.id))
+    .find(Boolean);
+  if (fromPayments) return fromPayments;
+  const legacy = (invoice as unknown as { payment_intent?: string | { id?: string } | null }).payment_intent;
+  return typeof legacy === 'string' ? legacy : legacy?.id;
+}
+
 async function refundUpcomingCampaignDelta(subscriptionId: string, amountDollars: number, reason: string): Promise<void> {
   let remainingCents = Math.round(amountDollars * 100);
   let inaccessiblePaidInvoice = false;
-  const invoices = await stripe.invoices.list({ subscription: subscriptionId, status: 'paid', limit: 10 });
+  // Expand payments so the PaymentIntent is available under the Basil API shape (the top-level
+  // invoice.payment_intent field no longer exists).
+  const invoices = await stripe.invoices.list({ subscription: subscriptionId, status: 'paid', limit: 10, expand: ['data.payments'] });
   for (const invoice of invoices.data) {
     if (remainingCents <= 0) break;
     if ((invoice.amount_paid ?? 0) <= 0) continue; // nothing was paid — nothing to refund
-    const piId = (invoice as unknown as { payment_intent?: string | { id?: string } | null }).payment_intent;
-    const paymentIntentId = typeof piId === 'string' ? piId : piId?.id;
+    const paymentIntentId = invoicePaymentIntentId(invoice);
     if (!paymentIntentId) { inaccessiblePaidInvoice = true; continue; }
     const pi = await stripe.paymentIntents.retrieve(paymentIntentId, { expand: ['latest_charge'] });
     const charge = pi.latest_charge as Stripe.Charge | null;
@@ -1742,7 +1763,41 @@ export const getSubscriptionInvoices = async (userId: number): Promise<Subscript
     }));
   }
 
-  return [...foundingInvoices, ...changeEntries, ...stripeInvoices].sort((a, b) => b.date - a.date);
+  // Refunds on regular (Stripe-invoice) charges. In-window downgrades and location removals
+  // refund against the ORIGINAL charge's PaymentIntent — that does not change the already-paid
+  // invoice, so the refund would otherwise be invisible in history. Surface each succeeded
+  // refund as its own entry. Founding refunds are already shown via the founding_payment
+  // ledger above, so skip any PaymentIntent that belongs to a founding payment.
+  const foundingPIs = new Set(foundingRows.map((r) => r.stripe_payment_intent_id as string));
+  let refundEntries: SubscriptionInvoice[] = [];
+  if (stripeCustomerId) {
+    const chargeList = await stripe.charges.list({ customer: stripeCustomerId, limit: 24, expand: ['data.refunds'] });
+    for (const charge of chargeList.data) {
+      const refunds = (charge as unknown as { refunds?: { data?: Stripe.Refund[] } }).refunds?.data ?? [];
+      for (const refund of refunds) {
+        if (refund.status !== 'succeeded') continue;
+        const rpi = typeof refund.payment_intent === 'string' ? refund.payment_intent : refund.payment_intent?.id;
+        if (rpi && foundingPIs.has(rpi)) continue; // founding refund already shown via the ledger
+        const reason = (refund.metadata?.reason as string | undefined) || 'Refund for a plan change';
+        const amt = refund.amount / 100;
+        refundEntries.push({
+          id: refund.id,
+          date: refund.created,
+          amount_paid: 0,
+          amount_due: amt,
+          status: 'void', // client renders 'void' as a grey "Refunded" chip
+          invoice_description: null,
+          // period_start === period_end marks this a one-off line so the client shows the
+          // description verbatim instead of synthesizing a per-location monthly breakdown.
+          description: [{ description: `Refund: ${reason}`, quantity: 1, amount: -amt, period_start: refund.created, period_end: refund.created }],
+          invoice_pdf: null,
+          hosted_invoice_url: null,
+        });
+      }
+    }
+  }
+
+  return [...foundingInvoices, ...changeEntries, ...stripeInvoices, ...refundEntries].sort((a, b) => b.date - a.date);
 };
 
 // ─── Get Subscription Details ─────────────────────────────────────────────────
@@ -1963,18 +2018,34 @@ function getInvoiceSubscriptionId(invoice: Stripe.Invoice): string | null {
   return null;
 }
 
+/**
+ * Read the current period end off a subscription across Stripe API versions.
+ * Pre-2025 ("acacia") exposed `subscription.current_period_end`; the 2025 "Basil" API
+ * moved it onto the subscription ITEM (`subscription.items.data[0].current_period_end`).
+ * Read the item first (Basil), then the legacy root. Throw rather than fabricate a date:
+ * this value is the system-of-record for when the paid period ends and drives the founding
+ * transition + payment-recovery logic, so a silently wrong date would cause real misbilling.
+ */
 function extractPeriodEnd(subscription: Stripe.Subscription): Date {
-  const raw =
-    (subscription as any).current_period_end ??
-    (subscription.items?.data?.[0] as any)?.current_period_end ??
-    (subscription as any).billing_cycle_anchor;
+  // Structural cast (not `any`): models both API shapes without depending on which one the
+  // installed Stripe SDK types declare.
+  const sub = subscription as unknown as {
+    current_period_end?: number | null;
+    items?: { data?: Array<{ current_period_end?: number | null }> };
+  };
+  const fromItem = sub.items?.data?.[0]?.current_period_end;
+  const fromRoot = sub.current_period_end;
+  const raw = typeof fromItem === 'number' && fromItem > 0 ? fromItem
+    : typeof fromRoot === 'number' && fromRoot > 0 ? fromRoot
+    : null;
 
-  if (raw && typeof raw === 'number' && raw > 0) {
-    return new Date(raw * 1000);
+  if (raw == null) {
+    throw new Error(
+      `Stripe subscription ${subscription.id} has no readable current_period_end ` +
+      '(checked items[0] and root). Refusing to fabricate a billing period.',
+    );
   }
-
-  console.warn('[Stripe] could not read current_period_end, defaulting to 30 days from now');
-  return new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
+  return new Date(raw * 1000);
 }
 
 function mapStripeStatus(stripeStatus: string): string {
