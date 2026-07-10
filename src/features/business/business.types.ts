@@ -63,7 +63,7 @@ export interface MyBusinessData {
 }
 
 export interface UpdateCampaignSettingsInput {
-  min_transaction_amount: number; // mandatory — a specific threshold is required
+  min_transaction_amount?: number; // optional — only present when the threshold is being changed
   receipt_example_image_url?: string | null;
 }
 

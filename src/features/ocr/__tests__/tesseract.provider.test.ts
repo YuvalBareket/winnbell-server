@@ -175,14 +175,16 @@ describe('Business name match', () => {
     expect(result.businessNameFound).toBe(true);
   });
 
-  test('businessNameFound is false when no significant word from business name appears', async () => {
+  test('businessNameFound is null when no significant word from business name appears', async () => {
+    // matchBusinessName never returns false: not finding the name does not prove it is the
+    // wrong business (logos, abbreviations). Absent -> null ("cannot confirm, let it slide").
     setupOcr('ACME CORP RECEIPT TOTAL 12.00 PAID RCPT003 PURCHASE SUBTOTAL THANK YOU');
     const result = await provider.validate(IMAGE_URL, {
       identifier: 'RCPT003',
       amount: 12,
       businessName: 'Starbucks Coffee',
     });
-    expect(result.businessNameFound).toBe(false);
+    expect(result.businessNameFound).toBeNull();
   });
 
   test('businessNameFound is null when no businessName is provided in expected', async () => {
@@ -223,14 +225,16 @@ describe('Date match', () => {
     expect(result.dateMatches).toBe(true);
   });
 
-  test('dateMatches is false when date is absent from OCR text', async () => {
+  test('dateMatches is null when no date is visible in the OCR text', async () => {
+    // Absent date -> null ("cannot verify, let it slide"). It only returns false when a
+    // DIFFERENT date is visible on the receipt (a real contradiction / fraud signal).
     setupOcr('RECEIPT TOTAL 30.00 PAID RCPT004 PURCHASE SUBTOTAL THANK YOU SOMETHING HERE');
     const result = await provider.validate(IMAGE_URL, {
       identifier: 'RCPT004',
       amount: 30,
       date: '2026-04-22',
     });
-    expect(result.dateMatches).toBe(false);
+    expect(result.dateMatches).toBeNull();
   });
 
   test('dateMatches is null when no date is provided in expected', async () => {

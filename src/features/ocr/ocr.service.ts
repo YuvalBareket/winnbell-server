@@ -53,7 +53,11 @@ export const recoverStaleOcrJobs = async (): Promise<void> => {
     console.log(`[OCR] Fixed ${fixRes.rowCount} sibling ticket(s) with stale quarantine reason.`);
   }
 
-  // Re-queue tickets where the OCR job itself was never completed (server restart mid-flight)
+  // Re-queue OCR for two cases:
+  //  - 'pending': the job was never completed (server restart mid-flight).
+  //  - 'ocr_error': the OCR PROVIDER errored (network / Vision down / rate limit) - NOT the
+  //    customer's fault. Retrying self-heals once the provider recovers, so an honest entry is
+  //    not held forever by an infrastructure blip. (Genuine 'failed' validations are NOT retried.)
   const result = await pool.query(`
     SELECT
       t.id AS ticket_id,
@@ -66,8 +70,11 @@ export const recoverStaleOcrJobs = async (): Promise<void> => {
       b.name AS business_name
     FROM ticket t
     LEFT JOIN business b ON b.id = t.business_id
-    WHERE t.image_validation_status = 'pending'
-      AND t.activated_at < NOW() - INTERVAL '2 minutes'
+    WHERE (
+        (t.image_validation_status = 'pending' AND t.activated_at < NOW() - INTERVAL '2 minutes')
+        OR t.image_validation_status = 'ocr_error'
+      )
+      AND t.receipt_image_url IS NOT NULL
   `);
 
   if (result.rows.length === 0) return;
@@ -121,14 +128,15 @@ export const validateReceiptAsync = (
           `UPDATE ticket SET image_validation_status = 'passed', risk_score_delta = risk_score_delta + $2 WHERE id = $1`,
           [ticketId, riskDelta],
         );
-        // Unquarantine anchor + siblings only if they were pending OCR review
+        // Unquarantine anchor + siblings that were held for OCR (either awaiting the first pass
+        // or held after a provider error that a retry has now cleared).
         await pool.query(
           `UPDATE ticket
            SET is_quarantined    = FALSE,
                quarantine_reason = NULL,
                quarantined_at    = NULL
            WHERE (id = $1 OR anchor_ticket_id = $1)
-             AND quarantine_reason = 'ocr_pending'`,
+             AND quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review')`,
           [ticketId],
         );
         await updateUserRiskScore(userId, riskDelta);
@@ -144,7 +152,7 @@ export const validateReceiptAsync = (
                quarantine_reason = 'ocr_validation_failed',
                quarantined_at    = NOW()
            WHERE (id = $1 OR anchor_ticket_id = $1)
-             AND quarantine_reason = 'ocr_pending'`,
+             AND quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review')`,
           [ticketId],
         );
         await updateUserRiskScore(userId, 2);

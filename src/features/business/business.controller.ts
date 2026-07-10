@@ -275,23 +275,36 @@ export const updateBusiness = async (req: AuthRequest, res: Response): Promise<v
 export const updateCampaignSettingsController = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const { min_transaction_amount, receipt_example_image_url } = req.body as {
-      min_transaction_amount: number | null;
+      min_transaction_amount?: number | null;
       receipt_example_image_url?: string | null;
     };
 
-    // A specific minimum is mandatory — null/"no minimum" is no longer allowed.
-    if (
-      typeof min_transaction_amount !== 'number' || Number.isNaN(min_transaction_amount) ||
-      min_transaction_amount <= 0 || min_transaction_amount > 100000
-    ) {
-      res.status(400).json({ message: 'A minimum transaction amount is required (a positive number up to 100,000).' });
+    // The threshold and the receipt example are independent settings — a request may update
+    // either or both. Only validate a field when it is actually being changed, so saving the
+    // receipt guide never requires (re)sending the minimum, and vice versa.
+    const hasMin = 'min_transaction_amount' in req.body;
+    const hasReceipt = 'receipt_example_image_url' in req.body;
+
+    if (!hasMin && !hasReceipt) {
+      res.status(400).json({ message: 'Nothing to update.' });
       return;
     }
 
-    const data: { min_transaction_amount: number; receipt_example_image_url?: string | null } = {
-      min_transaction_amount,
-    };
-    if ('receipt_example_image_url' in req.body) {
+    const data: { min_transaction_amount?: number; receipt_example_image_url?: string | null } = {};
+
+    if (hasMin) {
+      // A specific minimum is mandatory — null/"no minimum" is not allowed when setting it.
+      if (
+        typeof min_transaction_amount !== 'number' || Number.isNaN(min_transaction_amount) ||
+        min_transaction_amount <= 0 || min_transaction_amount > 100000
+      ) {
+        res.status(400).json({ message: 'A minimum transaction amount is required (a positive number up to 100,000).' });
+        return;
+      }
+      data.min_transaction_amount = min_transaction_amount;
+    }
+
+    if (hasReceipt) {
       if (receipt_example_image_url) {
         const r2Base = process.env.R2_PUBLIC_URL;
         if (!r2Base || !String(receipt_example_image_url).startsWith(r2Base + '/')) {

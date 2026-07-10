@@ -36,6 +36,12 @@ const startServer = async () => {
     setInterval(() => {
       cleanupExpiredRefreshTokens().catch(err => console.error('[cleanup] refresh token purge failed:', err));
     }, 6 * 60 * 60 * 1000);
+
+    // Retry lost / provider-errored OCR jobs every 30 minutes so a Google Vision blip never
+    // permanently holds an honest entry (it self-heals well before the month-end draw).
+    setInterval(() => {
+      recoverStaleOcrJobs().catch(err => console.error('[OCR] periodic recovery failed:', err));
+    }, 30 * 60 * 1000);
   } catch (error) {
     console.error('Failed to start server:', error);
     process.exit(1);

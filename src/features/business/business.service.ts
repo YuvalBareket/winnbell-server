@@ -672,55 +672,58 @@ export const updateCampaignSettings = async (
 ): Promise<{ isPending: boolean }> => {
   const pool = getPool();
 
-  // Only defer to pending if the business is actually enrolled in the open draw
-  const drawCheck = await pool.query(
-    `SELECT de.id FROM draw_entry de
-     JOIN draw d ON d.id = de.draw_id
-     JOIN business b ON b.id = de.business_id
-     WHERE d.status = 'Open' AND b.user_id = $1
-     LIMIT 1`,
-    [ownerUserId],
-  );
-  const hasOpenDraw = drawCheck.rows.length > 0;
-
+  const updateMin = data.min_transaction_amount !== undefined;
   const updateExampleImage = 'receipt_example_image_url' in data;
 
-  let result;
-  if (hasOpenDraw) {
-    // Business is in an active campaign — store as pending, takes effect when draw closes
-    result = await pool.query(
-      `UPDATE business
-       SET pending_min_transaction_amount = $1,
-           receipt_example_image_url = CASE WHEN $2 THEN $3 ELSE receipt_example_image_url END
-       WHERE user_id = $4`,
-      [
-        data.min_transaction_amount,
-        updateExampleImage,
-        data.receipt_example_image_url ?? null,
-        ownerUserId,
-      ],
+  if (!updateMin && !updateExampleImage) return { isPending: false };
+
+  // Only the threshold is deferred to "next campaign"; the receipt example always applies now.
+  // So we only need the open-draw check when the minimum is actually changing.
+  let hasOpenDraw = false;
+  if (updateMin) {
+    const drawCheck = await pool.query(
+      `SELECT de.id FROM draw_entry de
+       JOIN draw d ON d.id = de.draw_id
+       JOIN business b ON b.id = de.business_id
+       WHERE d.status = 'Open' AND b.user_id = $1
+       LIMIT 1`,
+      [ownerUserId],
     );
-  } else {
-    // No active campaign — apply immediately
-    result = await pool.query(
-      `UPDATE business
-       SET min_transaction_amount   = $1,
-           pending_min_transaction_amount = NULL,
-           receipt_example_image_url = CASE WHEN $2 THEN $3 ELSE receipt_example_image_url END
-       WHERE user_id = $4`,
-      [
-        data.min_transaction_amount,
-        updateExampleImage,
-        data.receipt_example_image_url ?? null,
-        ownerUserId,
-      ],
-    );
+    hasOpenDraw = drawCheck.rows.length > 0;
   }
+
+  const sets: string[] = [];
+  const params: unknown[] = [];
+  let i = 1;
+
+  if (updateMin) {
+    if (hasOpenDraw) {
+      // In an active campaign — store as pending, takes effect when the draw closes.
+      sets.push(`pending_min_transaction_amount = $${i++}`);
+      params.push(data.min_transaction_amount);
+    } else {
+      // No active campaign — apply immediately and clear any stale pending value.
+      sets.push(`min_transaction_amount = $${i++}`);
+      params.push(data.min_transaction_amount);
+      sets.push('pending_min_transaction_amount = NULL');
+    }
+  }
+
+  if (updateExampleImage) {
+    sets.push(`receipt_example_image_url = $${i++}`);
+    params.push(data.receipt_example_image_url ?? null);
+  }
+
+  params.push(ownerUserId);
+  const result = await pool.query(
+    `UPDATE business SET ${sets.join(', ')} WHERE user_id = $${i}`,
+    params,
+  );
 
   if (result.rowCount === 0) throw new Error('BUSINESS_NOT_FOUND');
 
   invalidatePublicBusinessData();
-  return { isPending: hasOpenDraw };
+  return { isPending: hasOpenDraw && updateMin };
 };
 
 export const getBusinessLocationsByUserId = async (userId: number) => {
