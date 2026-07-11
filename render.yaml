@@ -1,6 +1,13 @@
+# Winnbell API - Render blueprint for the Winnbell company account.
+# Two isolated environments: production (api.winnbell.com) and staging.
+# All secrets are sync:false - set them per-service in the Render dashboard.
+# Staging and production must point at DIFFERENT Neon DBs, Supabase projects,
+# and Stripe modes (staging = test keys, production = live keys).
+
 services:
+  # ── PRODUCTION ──────────────────────────────────────────────────────────
   - type: web
-    name: winnbell-server
+    name: winnbell-api
     env: node
     region: oregon
     plan: free
@@ -15,7 +22,9 @@ services:
         sync: false
       - key: SUPABASE_URL
         sync: false
-      - key: SUPABASE_ANON_KEY
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
       - key: STRIPE_SECRET_KEY
         sync: false
@@ -51,13 +60,13 @@ services:
         sync: false
       - key: FRONTEND_URL
         sync: false
-      - key: AWS_SNS_ACCESS_KEY_ID
-        sync: false
-      - key: AWS_SNS_SECRET_ACCESS_KEY
-        sync: false
-      - key: AWS_SNS_REGION
-        sync: false
       - key: PHONE_VERIFY_ENABLED
+        sync: false
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_FROM_NUMBER
         sync: false
       - key: IPINFO_TOKEN
         sync: false
@@ -65,9 +74,100 @@ services:
         sync: false
       - key: SMTP_PORT
         sync: false
+      - key: SMTP_SECURE
+        sync: false
       - key: SMTP_USER
         sync: false
       - key: SMTP_PASS
         sync: false
       - key: SMTP_FROM
+        sync: false
+      - key: ADMIN_ALERT_EMAIL
+        sync: false
+      - key: SENTRY_DSN
+        sync: false
+
+  # ── STAGING ─────────────────────────────────────────────────────────────
+  # Same shape as production; point it at the staging Neon DB, the staging
+  # Supabase project, and Stripe TEST keys. NODE_ENV stays 'production' so
+  # the build and runtime behavior match production exactly.
+  - type: web
+    name: winnbell-api-staging
+    env: node
+    region: oregon
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_JWT_SECRET
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: STRIPE_SECRET_KEY
+        sync: false
+      - key: STRIPE_WEBHOOK_SECRET
+        sync: false
+      - key: STRIPE_PRICE_ID_1000
+        sync: false
+      - key: STRIPE_PRICE_ID_2500
+        sync: false
+      - key: STRIPE_PRICE_ID_5000
+        sync: false
+      - key: GOOGLE_PLACES_API
+        sync: false
+      - key: GOOGLE_VISION_API_KEY
+        sync: false
+      - key: OCR_PROVIDER
+        sync: false
+      - key: R2_ACCESS_KEY_ID
+        sync: false
+      - key: R2_SECRET_ACCESS_KEY
+        sync: false
+      - key: R2_ACCOUNT_ID
+        sync: false
+      - key: R2_BUCKET
+        sync: false
+      - key: R2_PUBLIC_URL
+        sync: false
+      - key: VAPID_PUBLIC_KEY
+        sync: false
+      - key: VAPID_PRIVATE_KEY
+        sync: false
+      - key: CLIENT_URL
+        sync: false
+      - key: FRONTEND_URL
+        sync: false
+      - key: PHONE_VERIFY_ENABLED
+        sync: false
+      - key: TWILIO_ACCOUNT_SID
+        sync: false
+      - key: TWILIO_AUTH_TOKEN
+        sync: false
+      - key: TWILIO_FROM_NUMBER
+        sync: false
+      - key: IPINFO_TOKEN
+        sync: false
+      - key: SMTP_HOST
+        sync: false
+      - key: SMTP_PORT
+        sync: false
+      - key: SMTP_SECURE
+        sync: false
+      - key: SMTP_USER
+        sync: false
+      - key: SMTP_PASS
+        sync: false
+      - key: SMTP_FROM
+        sync: false
+      - key: ADMIN_ALERT_EMAIL
+        sync: false
+      - key: SENTRY_DSN
         sync: false
