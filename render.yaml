@@ -9,7 +9,7 @@ services:
   - type: web
     name: winnbell-api
     env: node
-    region: oregon
+    region: virginia
     plan: free
     branch: main
     buildCommand: npm install --include=dev && npm run build
