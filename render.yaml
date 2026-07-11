@@ -11,6 +11,7 @@ services:
     env: node
     region: oregon
     plan: free
+    branch: main
     buildCommand: npm install --include=dev && npm run build
     startCommand: npm start
     envVars:
@@ -96,6 +97,7 @@ services:
     env: node
     region: oregon
     plan: free
+    branch: develop
     buildCommand: npm install --include=dev && npm run build
     startCommand: npm start
     envVars:
