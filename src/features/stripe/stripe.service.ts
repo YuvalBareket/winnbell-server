@@ -1527,6 +1527,7 @@ export const updateSubscriptionPlan = async (userId: number, newEntriesPerLocati
       s.pending_entries_per_location,
       s.pending_fee_at_entry,
       s.status,
+      s.cancel_at_period_end,
       b.id AS business_id,
       (SELECT COUNT(*)::int FROM business_location
        WHERE business_id = b.id
@@ -1540,6 +1541,10 @@ export const updateSubscriptionPlan = async (userId: number, newEntriesPerLocati
   const sub = result.rows[0];
   if (!sub) throw new Error('No subscription found');
   if (sub.status === 'Cancelled') throw new Error('Cannot update a cancelled subscription');
+  // A subscription set to cancel is on its way out - a staged plan change would strand
+  // pending_* state that no future campaign will ever apply. Block it; the owner must
+  // resume the plan first. (The client also disables Edit Plan, but the API must enforce it.)
+  if (sub.cancel_at_period_end) throw new Error('SUBSCRIPTION_CANCELLING');
   if (!sub.stripe_subscription_id) throw new Error('No Stripe subscription on record');
   // A broken payment must be fixed before any billing change — otherwise settlements
   // and baselines run against money that was never collected.

@@ -2,6 +2,7 @@ migrations/
 node_modules/
 dist/
 .env
+.env.*
 *.json
 !package.json
 !tsconfig.json
