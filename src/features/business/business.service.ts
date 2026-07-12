@@ -1,4 +1,5 @@
 import { getPool } from '../../shared/db/db.js';
+import { OPEN_DRAW_ID_SUBQUERY } from '../../shared/db/queries.js';
 import { publicCache, invalidatePublicBusinessData, invalidatePublicLocation, getPlatformSettings, invalidateUserAuth } from '../../shared/cache/cache.js';
 import type { PoolClient } from 'pg';
 import crypto from 'crypto';
@@ -298,19 +299,18 @@ export const logBusinessProfileViewService = async (
   locationId: number | null,
 ): Promise<void> => {
   const pool = getPool();
-  const biz = await pool.query(`SELECT user_id FROM business WHERE id = $1`, [businessId]);
-  if (biz.rows.length === 0) return;            // unknown business — skip (no FK error)
-  if (biz.rows[0].user_id === userId) return;   // owner viewing own profile — don't inflate
-
-  let locId: number | null = null;
-  if (locationId && Number.isInteger(locationId) && locationId > 0) {
-    const loc = await pool.query(`SELECT 1 FROM business_location WHERE id = $1 AND business_id = $2`, [locationId, businessId]);
-    if (loc.rows.length > 0) locId = locationId; // only store a location that belongs to the business
-  }
-
+  // Single round trip (this fires on every map profile tap): the SELECT source skips unknown
+  // businesses and owner self-views, and downgrades a location that does not belong to the
+  // business to NULL - same semantics as the previous three sequential queries.
+  const locId = locationId && Number.isInteger(locationId) && locationId > 0 ? locationId : null;
   await pool.query(
     `INSERT INTO business_profile_view (business_id, location_id, user_id)
-     VALUES ($1, $2, $3)
+     SELECT b.id,
+            CASE WHEN EXISTS (SELECT 1 FROM business_location bl WHERE bl.id = $2 AND bl.business_id = b.id)
+                 THEN $2::int ELSE NULL END,
+            $3
+     FROM business b
+     WHERE b.id = $1 AND b.user_id != $3
      ON CONFLICT (user_id, business_id, location_id)
      DO UPDATE SET last_viewed_at = NOW()`,
     [businessId, locId, userId],
@@ -555,7 +555,7 @@ export const searchParticipatingLocationsService = async (query: string): Promis
         SELECT COUNT(*)::int FROM ticket t
         WHERE t.business_id = b.id
           AND t.location_id = bl.id
-          AND t.draw_id = (SELECT id FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1)
+          AND t.draw_id = ${OPEN_DRAW_ID_SUBQUERY}
           AND t.is_quarantined = FALSE
       ) >= COALESCE(s.entries_per_location, (SELECT global_entry_cap FROM platform_settings WHERE id = 1)) AS cap_reached
     FROM business_location bl

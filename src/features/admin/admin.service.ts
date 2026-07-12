@@ -1,6 +1,7 @@
 import { getPool } from '../../shared/db/db.js';
+import { OPEN_DRAW_ID_SUBQUERY } from '../../shared/db/queries.js';
 import { getPlatformSettings, invalidatePlatformSettings, invalidatePublicBusinessData, invalidateUserAuth } from '../../shared/cache/cache.js';
-import { lastDayOfMonthNyMidnightUtc, nextCampaignOpensNy } from '../../shared/dates.js';
+import { lastDayOfMonthNyMidnightUtc, nextCampaignOpensNy, drawDateFromString } from '../../shared/dates.js';
 import { sendFoundingFinalCampaignEmail } from '../../shared/email/email.service.js';
 import { decayAllUserRiskScores } from '../risk/risk.service.js';
 
@@ -142,9 +143,19 @@ export const getAllDrawsService = async () => {
       d.winner_user_id,
       d.winner_ticket_id,
       d.winner_confirmed,
-      array_length(d.rejected_ticket_ids, 1) AS rejected_count,
-      (SELECT COUNT(*)::int FROM ticket WHERE draw_id = d.id AND is_quarantined = FALSE AND activated_by_user_id IS NOT NULL) AS entry_count
+      NULLIF(drw.rejected_count, 0)::int AS rejected_count,
+      COALESCE(tc.entry_count, 0)::int AS entry_count
     FROM draw d
+    LEFT JOIN (
+      SELECT draw_id, COUNT(*)::int AS rejected_count
+      FROM draw_rejected_winner GROUP BY draw_id
+    ) drw ON drw.draw_id = d.id
+    LEFT JOIN (
+      SELECT draw_id, COUNT(*)::int AS entry_count
+      FROM ticket
+      WHERE is_quarantined = FALSE AND activated_by_user_id IS NOT NULL
+      GROUP BY draw_id
+    ) tc ON tc.draw_id = d.id
     ORDER BY d.draw_date DESC
   `);
   return result.rows;
@@ -184,14 +195,7 @@ export const updateDrawService = async (
     values.push(data.prize_amount);
   }
   if (data.draw_date !== undefined) {
-    const nyDateStr = new Date(data.draw_date).toLocaleDateString('en-US', {
-      timeZone: 'America/New_York',
-      year: 'numeric',
-      month: '2-digit',
-      day: '2-digit',
-    });
-    const [month, , year] = nyDateStr.split('/').map(Number);
-    const lastDay = lastDayOfMonthNyMidnightUtc(year, month);
+    const lastDay = drawDateFromString(data.draw_date);
     updates.push(`draw_date = $${idx++}`);
     values.push(lastDay);
   }
@@ -224,10 +228,7 @@ export const createDrawService = async (data: {
 }) => {
   // Campaigns must end on the last day of a month (00:00 NY time → last day 24:00 NY time).
   // Normalise the provided date to the last day of its month in NY timezone.
-  const nyDateStr = new Date(data.draw_date).toLocaleDateString('en-US', { timeZone: 'America/New_York', year: 'numeric', month: '2-digit', day: '2-digit' });
-  const [month, , year] = nyDateStr.split('/').map(Number);
-  // Last day of that month at midnight NY time (offset resolved per-date: EDT summer / EST winter).
-  const drawDate = lastDayOfMonthNyMidnightUtc(year, month);
+  const drawDate = drawDateFromString(data.draw_date);
 
   const pool = getPool();
   const client = await pool.connect();
@@ -549,8 +550,7 @@ export const reopenDrawService = async (drawId: number): Promise<void> => {
            opened_at = COALESCE(opened_at, NOW()),
            closed_at = NULL,
            winner_user_id = NULL,
-           winner_ticket_id = NULL,
-           rejected_ticket_ids = '{}'
+           winner_ticket_id = NULL
        WHERE id = $1`,
       [drawId],
     );
@@ -588,7 +588,7 @@ export const pickDrawWinnerService = async (drawId: number, applyPenalty = false
     await client.query('BEGIN');
 
     const check = await client.query(
-      `SELECT id, status, prize_pool, winner_user_id, winner_ticket_id, winner_confirmed, rejected_ticket_ids
+      `SELECT id, status, prize_pool, winner_user_id, winner_ticket_id, winner_confirmed
        FROM draw WHERE id = $1 FOR UPDATE`,
       [drawId],
     );
@@ -598,9 +598,10 @@ export const pickDrawWinnerService = async (drawId: number, applyPenalty = false
     if (check.rows[0].winner_confirmed === true) throw new Error('Winner has already been confirmed for this draw');
 
     const prizePool: number = check.rows[0].prize_pool;
-    let rejectedIds: number[] = check.rows[0].rejected_ticket_ids ?? [];
 
-    // If there is an unconfirmed candidate, reject it and clear it before picking again
+    // If there is an unconfirmed candidate, reject it and clear it before picking again.
+    // Rejections live ONLY in draw_rejected_winner (normalized, FK-safe, append-only) - the
+    // pick query below excludes them via NOT EXISTS, so no array bookkeeping on the draw row.
     const prevTicketId: number | null = check.rows[0].winner_ticket_id;
     const prevUserId: number | null = check.rows[0].winner_user_id;
     if (prevTicketId !== null) {
@@ -609,28 +610,26 @@ export const pickDrawWinnerService = async (drawId: number, applyPenalty = false
       if (!disqualifyReason) {
         throw new Error('A reason is required to disqualify the current winner.');
       }
-      rejectedIds = [...rejectedIds, prevTicketId];
       await client.query(
-        `UPDATE draw SET winner_user_id = NULL, winner_ticket_id = NULL, rejected_ticket_ids = $1 WHERE id = $2`,
-        [rejectedIds, drawId],
+        `UPDATE draw SET winner_user_id = NULL, winner_ticket_id = NULL WHERE id = $1`,
+        [drawId],
       );
-      if (prevUserId !== null) {
-        const penalty = applyPenalty ? 12 : 0;
-        // Always quarantine the rejected ticket - the entry is invalid regardless of penalty
-        await client.query(
-          `UPDATE ticket SET is_quarantined = TRUE, quarantine_reason = 'admin_rejected_winner', quarantined_at = NOW() WHERE id = $1`,
-          [prevTicketId],
-        );
-        if (applyPenalty) {
-          await client.query(`UPDATE "user" SET risk_score = risk_score + $2 WHERE id = $1`, [prevUserId, penalty]);
-        }
-        // Log rejection (always) with the admin's documented reason — append-only record.
-        await client.query(
-          `INSERT INTO draw_rejected_winner (draw_id, ticket_id, user_id, risk_penalty, reason) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING`,
-          [drawId, prevTicketId, prevUserId, penalty, disqualifyReason],
-        );
-        await logDrawAudit(client, drawId, 'winner_rejected', { ticket_id: prevTicketId, user_id: prevUserId, penalty, reason: disqualifyReason });
+      const penalty = applyPenalty && prevUserId !== null ? 12 : 0;
+      // Always quarantine the rejected ticket - the entry is invalid regardless of penalty
+      await client.query(
+        `UPDATE ticket SET is_quarantined = TRUE, quarantine_reason = 'admin_rejected_winner', quarantined_at = NOW() WHERE id = $1`,
+        [prevTicketId],
+      );
+      if (penalty > 0) {
+        await client.query(`UPDATE "user" SET risk_score = risk_score + $2 WHERE id = $1`, [prevUserId, penalty]);
       }
+      // Log rejection (always) with the admin's documented reason — append-only record. This row
+      // is also what excludes the ticket from every future pick of this draw.
+      await client.query(
+        `INSERT INTO draw_rejected_winner (draw_id, ticket_id, user_id, risk_penalty, reason) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING`,
+        [drawId, prevTicketId, prevUserId, penalty, disqualifyReason],
+      );
+      await logDrawAudit(client, drawId, 'winner_rejected', { ticket_id: prevTicketId, user_id: prevUserId, penalty, reason: disqualifyReason });
     }
 
     // Winner selection scans this draw's eligible tickets once (ORDER BY random() LIMIT 1 is a
@@ -663,10 +662,13 @@ export const pickDrawWinnerService = async (drawId: number, applyPenalty = false
       WHERE t.draw_id = $1
         AND t.status = 'Activated'
         AND t.is_quarantined = FALSE
-        AND t.id != ALL($2::int[])
+        AND NOT EXISTS (
+          SELECT 1 FROM draw_rejected_winner drw
+          WHERE drw.draw_id = t.draw_id AND drw.ticket_id = t.id
+        )
       ORDER BY random()
       LIMIT 1
-    `, [drawId, rejectedIds]);
+    `, [drawId]);
 
     if (ticketResult.rows.length === 0) throw new Error('No eligible tickets remaining in this draw');
 
@@ -675,8 +677,8 @@ export const pickDrawWinnerService = async (drawId: number, applyPenalty = false
     const winnerTicketId: number = winner.ticket_id;
 
     await client.query(
-      `UPDATE draw SET winner_user_id = $1, winner_ticket_id = $2, rejected_ticket_ids = $3 WHERE id = $4`,
-      [winnerId, winnerTicketId, rejectedIds, drawId],
+      `UPDATE draw SET winner_user_id = $1, winner_ticket_id = $2 WHERE id = $3`,
+      [winnerId, winnerTicketId, drawId],
     );
     await logDrawAudit(client, drawId, 'winner_picked', { ticket_id: winnerTicketId, user_id: winnerId });
 
@@ -799,7 +801,7 @@ export const confirmWinnerService = async (drawId: number): Promise<{
         // If no draw is open, the subquery is NULL and zero rows match (safe no-op).
         await getPool().query(
           `UPDATE ticket SET is_quarantined = FALSE, quarantine_reason = NULL, quarantined_at = NULL
-           WHERE draw_id = (SELECT id FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1)
+           WHERE draw_id = ${OPEN_DRAW_ID_SUBQUERY}
              AND activated_by_user_id = ANY($1::int[])
              AND is_quarantined = TRUE
              AND quarantine_reason = 'high_risk_user'`,
@@ -900,7 +902,7 @@ export const getAllUsersService = async (params: {
           u.risk_score, u.risk_last_flagged_at,
           b.id AS business_id, b.name AS business_name, (s2.status IN ('Active', 'Trialing')) AS business_active,
           (SELECT COUNT(*) FROM ticket t WHERE t.activated_by_user_id = u.id AND t.is_quarantined = FALSE
-           AND t.draw_id = (SELECT id FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1)
+           AND t.draw_id = ${OPEN_DRAW_ID_SUBQUERY}
           ) AS entry_count,
           (SELECT MAX(t2.activated_at) FROM ticket t2 WHERE t2.activated_by_user_id = u.id) AS last_active_at
        FROM "user" u
@@ -1227,10 +1229,16 @@ export const getCampaignComparisonService = async () => {
       d.status,
       d.prize_pool AS prize_amount,
       d.draw_date,
-      (SELECT COUNT(*)::int FROM ticket WHERE draw_id = d.id AND is_quarantined = FALSE AND activated_by_user_id IS NOT NULL) AS total_entries,
-      (SELECT COUNT(*)::int FROM ticket WHERE draw_id = d.id AND is_quarantined = TRUE) AS quarantined,
+      COALESCE(tc.total_entries, 0) AS total_entries,
+      COALESCE(tc.quarantined, 0) AS quarantined,
       COALESCE(de.business_count, 0) AS business_count
     FROM draw d
+    LEFT JOIN (
+      SELECT draw_id,
+             COUNT(*) FILTER (WHERE is_quarantined = FALSE AND activated_by_user_id IS NOT NULL)::int AS total_entries,
+             COUNT(*) FILTER (WHERE is_quarantined = TRUE)::int AS quarantined
+      FROM ticket GROUP BY draw_id
+    ) tc ON tc.draw_id = d.id
     LEFT JOIN (
       SELECT draw_id, COUNT(*) AS business_count FROM draw_entry GROUP BY draw_id
     ) de ON de.draw_id = d.id

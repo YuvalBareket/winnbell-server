@@ -1,4 +1,5 @@
 import { getPool, PoolClient } from '../../shared/db/db.js';
+import { OPEN_DRAW_ID_SUBQUERY, getOpenDrawId } from '../../shared/db/queries.js';
 import crypto from 'crypto';
 import { invalidatePublicLocation } from '../../shared/cache/cache.js';
 import {
@@ -330,11 +331,7 @@ export const activateFreeTicket = async (userId: number, claimIp?: string): Prom
     }
 
 
-    const drawResult = await client.query(`
-      SELECT id FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1
-    `);
-
-    const activeDrawId = drawResult.rows[0]?.id;
+    const activeDrawId = await getOpenDrawId(client);
     if (!activeDrawId) {
       throw new Error('No active campaign found. Please try again later.');
     }
@@ -530,10 +527,7 @@ export const submitReceiptEntryService = async (
       );
       if (parseInt(probeCheck.rows[0].count, 10) > 0) {
         await updateUserRiskScore(userId, 3); // +3 more = +4 total for confirmed probe
-        const probeDrawResult = await pool.query(
-          `SELECT id FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1`,
-        );
-        const probDrawId = probeDrawResult.rows[0]?.id;
+        const probDrawId = await getOpenDrawId(pool);
         if (probDrawId) {
           await syncUserQuarantineState(userId, probDrawId);
         }
@@ -949,12 +943,8 @@ export const generateTicketService = async (user_id: number, location_id: number
     // Falls back to platform global_entry_cap (same as the receipt path); NULL = unlimited
     const entry_cap: number | null = entries_per_location != null ? Number(entries_per_location) : null;
 
-    const drawInfo = await client.query(`
-      SELECT id FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1
-    `);
-
-    if (drawInfo.rows.length === 0) throw new Error('No active campaign found. Please contact admin.');
-    const drawId = drawInfo.rows[0].id;
+    const drawId = await getOpenDrawId(client);
+    if (!drawId) throw new Error('No active campaign found. Please contact admin.');
 
     // Entry cap enforcement — NULL cap means unlimited (MVP default)
     // Quarantined tickets do not consume the cap

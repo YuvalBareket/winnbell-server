@@ -3,6 +3,7 @@ import { connectDB } from './shared/db/db.js';
 import app from './app.js';
 import { recoverStaleOcrJobs } from './features/ocr/ocr.service.js';
 import { cleanupExpiredRefreshTokens } from './features/auth/auth.service.js';
+import { cleanupOldWebhookEvents } from './features/stripe/stripe.service.js';
 import { initMonitoring } from './shared/monitoring.js';
 
 const PORT = process.env.PORT || 3000;
@@ -32,9 +33,10 @@ const startServer = async () => {
       console.log(`🚀 Winnbell server running on port ${PORT}`);
     });
 
-    // Purge expired refresh tokens every 6 hours
+    // Purge expired refresh tokens + old webhook idempotency claims every 6 hours
     setInterval(() => {
       cleanupExpiredRefreshTokens().catch(err => console.error('[cleanup] refresh token purge failed:', err));
+      cleanupOldWebhookEvents().catch(err => console.error('[cleanup] webhook event purge failed:', err));
     }, 6 * 60 * 60 * 1000);
 
     // Retry lost / provider-errored OCR jobs every 30 minutes so a Google Vision blip never

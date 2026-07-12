@@ -5,6 +5,11 @@ import pg, { Pool, PoolClient } from 'pg';
 // runs outside UTC (e.g. local dev in Israel UTC+3). Appending 'Z' forces UTC parsing.
 pg.types.setTypeParser(pg.types.builtins.TIMESTAMP, (val: string) => new Date(val + 'Z'));
 
+// BIGINT (ticket.id and its FK columns are 64-bit): pg returns int8 as a STRING by default,
+// which silently breaks number comparisons and JSON payload types. Parse to number - safe here
+// because ids stay far below Number.MAX_SAFE_INTEGER (2^53).
+pg.types.setTypeParser(pg.types.builtins.INT8, (val: string) => parseInt(val, 10));
+
 let pool: Pool;
 
 export const connectDB = async () => {

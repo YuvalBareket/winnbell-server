@@ -41,6 +41,20 @@ export function nextCampaignOpensNy(now: Date = new Date()): Date {
   return nyMidnightUtc(year, month, 1);
 }
 
+// Parse a draw_date string and normalise it to midnight NY on the last day of its month.
+// Encapsulates the 3-line parsing pattern duplicated across createDrawService and
+// updateDrawService in admin.service.ts.
+export function drawDateFromString(dateStr: string): Date {
+  const nyDateStr = new Date(dateStr).toLocaleDateString('en-US', {
+    timeZone: 'America/New_York',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  });
+  const [month, , year] = nyDateStr.split('/').map(Number);
+  return lastDayOfMonthNyMidnightUtc(year, month);
+}
+
 // ─── Charge day ────────────────────────────────────────────────────────────────
 // Subscriptions bill on the 24th of every month (Stripe billing_cycle_anchor day 24, NY
 // terms). Each charge pays for the NEXT month's campaign, leaving a buffer week between

@@ -1,5 +1,6 @@
 import crypto from 'crypto';
 import { getPool, PoolClient } from '../../shared/db/db.js';
+import { getOpenDrawId } from '../../shared/db/queries.js';
 import { generateGlobalUniqueCode, MAX_ENTRIES_PER_DRAW } from '../tickets/tickets.service.js';
 
 // Readable code (no ambiguous O/0/I/1/L) for shareable links.
@@ -102,10 +103,7 @@ export const grantPendingReferralBonus = async (
   const fromLocation = row.source === 'location_flyer' && row.location_id !== null;
   if (!fromReferral && !fromLocation) return false;
 
-  const draw = await client.query(
-    `SELECT id FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1`,
-  );
-  const drawId = draw.rows[0]?.id;
+  const drawId = await getOpenDrawId(client);
   if (!drawId) return false; // no open draw — skip for now (design: revisit hold-for-next-draw)
 
   const cap = await client.query(

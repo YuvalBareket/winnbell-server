@@ -673,6 +673,14 @@ export const handleStripeWebhook = async (rawBody: Buffer, signature: string): P
   }
 };
 
+// Retention: idempotency claims only need to outlive Stripe's retry window (~3 days;
+// manual replays up to 30). Purge older rows so the table never grows unbounded.
+// Wired into the 6-hourly cleanup interval in server.ts alongside refresh tokens.
+export const cleanupOldWebhookEvents = async (): Promise<void> => {
+  const pool = getPool();
+  await pool.query(`DELETE FROM stripe_webhook_event WHERE processed_at < NOW() - INTERVAL '30 days'`);
+};
+
 async function processStripeEvent(event: Stripe.Event, pool: Pool): Promise<void> {
   switch (event.type) {
 

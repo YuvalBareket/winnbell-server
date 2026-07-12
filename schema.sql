@@ -215,7 +215,8 @@ CREATE TABLE founding_member (
 -- plan page can show full payment history. Refund status is read live from Stripe.
 CREATE TABLE founding_payment (
   id                         SERIAL PRIMARY KEY,
-  business_id                INTEGER NOT NULL REFERENCES business(id) ON DELETE CASCADE,
+  -- RESTRICT: this is a financial ledger; deleting a business must never erase payment history.
+  business_id                INTEGER NOT NULL REFERENCES business(id) ON DELETE RESTRICT,
   stripe_payment_intent_id   TEXT UNIQUE NOT NULL,
   stripe_checkout_session_id TEXT UNIQUE,
   amount                     NUMERIC(10, 2) NOT NULL,
@@ -235,7 +236,8 @@ CREATE INDEX idx_founding_payment_business ON founding_payment (business_id, cre
 -- settlement invoice already carries the description.
 CREATE TABLE subscription_change_log (
   id          SERIAL PRIMARY KEY,
-  business_id INTEGER NOT NULL REFERENCES business(id) ON DELETE CASCADE,
+  -- RESTRICT: append-only billing history; deleting a business must never erase it.
+  business_id INTEGER NOT NULL REFERENCES business(id) ON DELETE RESTRICT,
   description TEXT NOT NULL,
   created_at  TIMESTAMP NOT NULL DEFAULT NOW()
 );
@@ -252,11 +254,11 @@ CREATE TABLE draw (
                      CHECK (prize_percentage > 0 AND prize_percentage <= 100),
   draw_date        TIMESTAMP NOT NULL,
   status           draw_status_enum NOT NULL DEFAULT 'Upcoming',
-  -- Populated by pickDrawWinnerService after the draw closes
+  -- Populated by pickDrawWinnerService after the draw closes.
+  -- Rejected winner candidates live ONLY in draw_rejected_winner (normalized, FK-safe).
   winner_user_id      INTEGER REFERENCES "user"(id) ON DELETE SET NULL,
-  winner_ticket_id    INTEGER NULL,              -- FK added below after ticket table
+  winner_ticket_id    BIGINT NULL,               -- FK added below after ticket table
   winner_confirmed    BOOLEAN NOT NULL DEFAULT FALSE,
-  rejected_ticket_ids INTEGER[] NOT NULL DEFAULT '{}',
   opened_at           TIMESTAMP NULL,            -- set when admin opens the draw
   closed_at        TIMESTAMP NULL,
   created_at       TIMESTAMP NOT NULL DEFAULT NOW(),
@@ -290,7 +292,9 @@ CREATE TABLE draw_entry (
 -- ── Tickets ───────────────────────────────────────────────────────────────────
 
 CREATE TABLE ticket (
-  id                      SERIAL PRIMARY KEY,
+  -- BIGSERIAL: the ticket table is the app's fastest-growing table; a 32-bit id would need a
+  -- painful full-table rewrite to widen later, so it is 64-bit from day one.
+  id                      BIGSERIAL PRIMARY KEY,
   -- 6-char (batch/code mode) or 8-char (receipt/free mode) alphanumeric code
   code                    VARCHAR(10) UNIQUE NOT NULL,
   status                  ticket_status_enum NOT NULL DEFAULT 'Issued',
@@ -327,11 +331,22 @@ CREATE TABLE ticket (
   risk_flags              TEXT[] NULL,
 
   -- Multi-ticket receipt: secondary tickets point back to the first (anchor) ticket
-  anchor_ticket_id        INTEGER NULL REFERENCES ticket(id) ON DELETE SET NULL,
+  anchor_ticket_id        BIGINT NULL REFERENCES ticket(id) ON DELETE SET NULL,
 
   created_at              TIMESTAMP NOT NULL DEFAULT NOW(),
   updated_at              TIMESTAMP NOT NULL DEFAULT NOW()
 );
+
+-- Integrity guards. An Activated ticket must know who activated it. A receipt entry must
+-- carry its identifier (otherwise it bypasses the idx_ticket_receipt_unique dedup) - EXCEPT
+-- sibling tickets of a multi-entry receipt, which intentionally hold NULL and point at the
+-- anchor via anchor_ticket_id (only the anchor carries the identifier, or the dedup index
+-- would reject the siblings themselves). On migrated DBs, pre-constraint legacy rows were
+-- backfilled with 'LEGACY-<id>' identifiers and both constraints VALIDATEd.
+ALTER TABLE ticket ADD CONSTRAINT chk_activated_ticket_has_user
+  CHECK (status != 'Activated' OR activated_by_user_id IS NOT NULL);
+ALTER TABLE ticket ADD CONSTRAINT chk_receipt_has_identifier
+  CHECK (entry_source != 'receipt' OR receipt_identifier IS NOT NULL OR anchor_ticket_id IS NOT NULL);
 
 -- Deferred FK: draw.winner_ticket_id -> ticket.id (ticket table now exists)
 ALTER TABLE draw
@@ -535,6 +550,27 @@ CREATE INDEX IF NOT EXISTS idx_ticket_user_time
 CREATE INDEX IF NOT EXISTS idx_ticket_business_time
   ON ticket (business_id, activated_at) INCLUDE (transaction_amount);
 
+-- Business Analytics: every Overview/series/core-stats query filters
+-- (business_id, created_at range) on countable entries. THE analytics workhorse index.
+CREATE INDEX IF NOT EXISTS idx_ticket_business_created
+  ON ticket (business_id, created_at DESC)
+  WHERE is_quarantined = FALSE AND activated_by_user_id IS NOT NULL;
+
+-- Admin/growth analytics per draw: countable entries by draw + business over time.
+CREATE INDEX IF NOT EXISTS idx_ticket_activated
+  ON ticket (draw_id, business_id, created_at DESC)
+  WHERE activated_by_user_id IS NOT NULL AND is_quarantined = FALSE;
+
+-- DAU/WAU/MAU: countable entries by time alone (no other leading predicate).
+CREATE INDEX IF NOT EXISTS idx_ticket_created_at
+  ON ticket (created_at DESC)
+  WHERE activated_by_user_id IS NOT NULL AND is_quarantined = FALSE;
+
+-- Multi-ticket receipts: sibling lookups by anchor (OCR propagation, admin image decisions).
+CREATE INDEX IF NOT EXISTS idx_ticket_anchor
+  ON ticket (anchor_ticket_id)
+  WHERE anchor_ticket_id IS NOT NULL;
+
 -- ── business ──────────────────────────────────────────────────────────────────
 
 -- Owner lookup (find a user's business) is served by the UNIQUE(user_id) constraint's index;
@@ -568,9 +604,7 @@ CREATE INDEX idx_draw_status_date
 
 -- ── draw_entry ────────────────────────────────────────────────────────────────
 
-CREATE INDEX idx_draw_entry_business
-  ON draw_entry (business_id);
-
+-- NOTE: no single-column business_id index — idx_draw_entry_business_draw's prefix covers it.
 CREATE INDEX idx_draw_entry_draw
   ON draw_entry (draw_id);
 
@@ -608,7 +642,7 @@ CREATE INDEX idx_push_sub_user
 -- ── refresh_token ──────────────────────────────────────────────────────────────
 
 CREATE INDEX idx_refresh_token_user ON refresh_token (user_id);
-CREATE INDEX idx_refresh_token_hash ON refresh_token (token_hash);
+-- NOTE: no separate token_hash index — the UNIQUE(token_hash) constraint already provides one.
 -- Drive the 6-hourly cleanupExpiredRefreshTokens DELETEs (split into two single-column predicates
 -- so each is index-driven instead of a full scan).
 CREATE INDEX idx_refresh_token_expires ON refresh_token (expires_at);
@@ -634,6 +668,11 @@ CREATE INDEX idx_phone_otp_user ON phone_otp (user_id);
 
 CREATE INDEX idx_user_role ON "user" (role);
 CREATE UNIQUE INDEX idx_user_phone_unique ON "user" (phone_number) WHERE phone_number IS NOT NULL;
+-- Deleted-account check on OAuth login (auth.service): OR-lookup across both identifiers,
+-- filtered to inactive rows only (tiny partial index).
+CREATE INDEX IF NOT EXISTS idx_user_inactive_lookup
+  ON "user" (external_auth_id, email)
+  WHERE is_active = FALSE;
 
 -- =============================================================================
 -- Seed Data
@@ -666,8 +705,9 @@ CREATE INDEX IF NOT EXISTS idx_draw_audit_log_draw ON draw_audit_log (draw_id, c
 CREATE TABLE IF NOT EXISTS draw_rejected_winner (
   id              SERIAL PRIMARY KEY,
   draw_id         INTEGER NOT NULL REFERENCES draw(id) ON DELETE CASCADE,
-  ticket_id       INTEGER NOT NULL REFERENCES ticket(id) ON DELETE CASCADE,
-  user_id         INTEGER NOT NULL REFERENCES "user"(id) ON DELETE SET NULL,
+  ticket_id       BIGINT NOT NULL REFERENCES ticket(id) ON DELETE CASCADE,
+  -- Nullable: the audit row must survive even if the user account is hard-deleted (SET NULL).
+  user_id         INTEGER NULL REFERENCES "user"(id) ON DELETE SET NULL,
   risk_penalty    INTEGER NOT NULL DEFAULT 10,
   -- Mandatory admin justification for disqualifying this winner (legal/regulatory trail).
   reason          TEXT NULL,
