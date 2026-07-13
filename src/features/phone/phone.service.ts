@@ -18,13 +18,15 @@ export const sendPhoneOtp = async (userId: number, phoneNumber: string): Promise
 
   const pool = getPool();
 
-  const normalizedPhone = phoneNumber.startsWith('+') ? phoneNumber : `+1${phoneNumber.replace(/\D/g, '')}`;
-
-  // Validate E.164 format: + followed by 10-15 digits
-  const digits = normalizedPhone.replace(/\D/g, '');
-  if (digits.length < 10 || digits.length > 15) {
+  // US numbers only for now. Accept "5551234567", "(555) 123-4567", "+15551234567" etc.,
+  // normalize to +1XXXXXXXXXX, and enforce NANP shape (10 digits, area code and exchange
+  // both 2-9) so an unreachable number can never be stored as a verified phone.
+  const rawDigits = phoneNumber.replace(/\D/g, '');
+  const national = rawDigits.length === 11 && rawDigits.startsWith('1') ? rawDigits.slice(1) : rawDigits;
+  if (!/^[2-9]\d{2}[2-9]\d{6}$/.test(national)) {
     throw new Error('INVALID_PHONE');
   }
+  const normalizedPhone = `+1${national}`;
 
   // Block if user is already verified — no need to re-send
   const userCheck = await pool.query(
