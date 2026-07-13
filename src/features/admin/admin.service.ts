@@ -656,7 +656,7 @@ export const pickDrawWinnerService = async (drawId: number, applyPenalty = false
         b.name AS business_name,
         bl.name AS location_name
       FROM ticket t
-      JOIN "user" u ON t.activated_by_user_id = u.id AND u.risk_score < 20
+      JOIN "user" u ON t.activated_by_user_id = u.id AND u.risk_score < 20 AND u.is_active = TRUE
       LEFT JOIN business b ON t.business_id = b.id
       LEFT JOIN business_location bl ON t.location_id = bl.id
       WHERE t.draw_id = $1

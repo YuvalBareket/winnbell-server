@@ -681,6 +681,104 @@ export const cleanupOldWebhookEvents = async (): Promise<void> => {
   await pool.query(`DELETE FROM stripe_webhook_event WHERE processed_at < NOW() - INTERVAL '30 days'`);
 };
 
+// ─── Reconcile local subscriptions against Stripe (lost-webhook self-healing) ──
+//
+// Webhooks are the primary sync mechanism, but a delivery can be lost for good when the
+// server is down past Stripe's retry window (it has happened). Without healing, a business
+// whose invoice.payment_succeeded was lost stays Past_Due locally forever and silently
+// misses every campaign open even though Stripe collected the money. This job re-reads
+// every Stripe-backed subscription row and heals status / current_period_end /
+// cancel_at_period_end from Stripe's current state:
+//   - Past_Due/Incomplete row that Stripe shows paid -> same recovery path as the webhook
+//     (recoverBusinessAfterPayment: flip Active + enroll into the currently Open campaign).
+//   - Row whose Stripe subscription is gone (resource_missing) -> Cancelled.
+//   - Cancelled row that Stripe shows alive -> resurrected (the retrieve is by OUR stored
+//     subscription id, so this only ever restores state a stale event wrongly destroyed).
+// Founding rows (stripe_subscription_id IS NULL) have no Stripe object and are skipped.
+// Runs sequentially - the subscription table holds one row per business, so volume is low.
+let reconcileInFlight = false;
+export const reconcileSubscriptionsWithStripe = async (): Promise<{ checked: number; healed: number }> => {
+  if (reconcileInFlight) return { checked: 0, healed: 0 };
+  reconcileInFlight = true;
+  try {
+    const pool = getPool();
+    const local = await pool.query(
+      `SELECT business_id, stripe_subscription_id, status, current_period_end, cancel_at_period_end
+       FROM subscription
+       WHERE stripe_subscription_id IS NOT NULL`,
+    );
+
+    let healed = 0;
+    for (const row of local.rows) {
+      try {
+        let stripeStatus: string;
+        let periodEnd: Date | null = null;
+        let cancelAtPeriodEnd: boolean = row.cancel_at_period_end;
+        try {
+          const sub = await stripe.subscriptions.retrieve(row.stripe_subscription_id);
+          stripeStatus = mapStripeStatus(sub.status);
+          periodEnd = extractPeriodEnd(sub);
+          cancelAtPeriodEnd = sub.cancel_at_period_end;
+        } catch (err: unknown) {
+          if ((err as { code?: string })?.code === 'resource_missing') {
+            // Deleted at Stripe and we never saw the event - the local row is a ghost.
+            stripeStatus = 'Cancelled';
+          } else {
+            throw err;
+          }
+        }
+
+        const periodDrift = periodEnd !== null && (
+          row.current_period_end == null ||
+          Math.abs(periodEnd.getTime() - new Date(row.current_period_end).getTime()) > 1000 ||
+          cancelAtPeriodEnd !== row.cancel_at_period_end
+        );
+        if (stripeStatus === row.status && !periodDrift) continue;
+
+        healed++;
+        console.warn(
+          `[Stripe reconcile] business ${row.business_id}: healing local ` +
+          `(${row.status}) from Stripe (${stripeStatus})`,
+        );
+
+        // Period fields first, so the recovery enrollment guard below sees the paid period.
+        if (periodEnd !== null) {
+          await pool.query(
+            `UPDATE subscription
+             SET current_period_end = $2, cancel_at_period_end = $3, updated_at = NOW()
+             WHERE business_id = $1 AND stripe_subscription_id = $4`,
+            [row.business_id, periodEnd, cancelAtPeriodEnd, row.stripe_subscription_id],
+          );
+        }
+
+        if (stripeStatus === 'Active' && (row.status === 'Past_Due' || row.status === 'Incomplete')) {
+          // Missed invoice.payment_succeeded: full recovery, including enrollment into the
+          // currently Open campaign the payment was for (idempotent ON CONFLICT inside).
+          await recoverBusinessAfterPayment(pool, row.business_id);
+        } else if (stripeStatus !== row.status) {
+          await pool.query(
+            `UPDATE subscription SET status = $2, updated_at = NOW()
+             WHERE business_id = $1 AND stripe_subscription_id = $3`,
+            [row.business_id, stripeStatus, row.stripe_subscription_id],
+          );
+        }
+      } catch (err: unknown) {
+        // One broken row must not stop the sweep for everyone else.
+        console.error(
+          `[Stripe reconcile] business ${row.business_id} failed:`,
+          err instanceof Error ? err.message : err,
+        );
+      }
+    }
+
+    if (healed > 0) invalidatePublicBusinessData();
+    console.log(`[Stripe reconcile] checked ${local.rows.length} subscriptions, healed ${healed}`);
+    return { checked: local.rows.length, healed };
+  } finally {
+    reconcileInFlight = false;
+  }
+};
+
 async function processStripeEvent(event: Stripe.Event, pool: Pool): Promise<void> {
   switch (event.type) {
 
@@ -766,9 +864,16 @@ async function processStripeEvent(event: Stripe.Event, pool: Pool): Promise<void
         const businessId = Number(subscription.metadata?.business_id);
         if (!businessId) break;
 
+        // Same stale-event guards as customer.subscription.updated: the row must belong to
+        // THIS Stripe subscription. A deleted event that failed delivery and is retried days
+        // later (after the business re-subscribed and the row carries a NEW subscription id)
+        // must never cancel the replacement subscription.
         await pool.query(
-          `UPDATE subscription SET status = 'Cancelled', updated_at = NOW() WHERE business_id = $1`,
-          [businessId],
+          `UPDATE subscription SET status = 'Cancelled', updated_at = NOW()
+           WHERE business_id = $1
+             AND stripe_subscription_id = $2
+             AND status <> 'Cancelled'`,
+          [businessId, subscription.id],
         );
         // No draw removal: with open-time enrollment a business is only ever in the
         // Open draw it already paid for (it keeps it), and won't be enrolled in the

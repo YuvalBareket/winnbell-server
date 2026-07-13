@@ -135,7 +135,7 @@ describe('handleStripeWebhook — customer.subscription.deleted', () => {
     mockConstructEvent.mockReturnValue({
       id: 'evt_del',
       type: 'customer.subscription.deleted',
-      data: { object: { metadata: { business_id: '42' } } },
+      data: { object: { id: 'sub_dead', metadata: { business_id: '42' } } },
     });
     mockQuery
       .mockResolvedValueOnce({ rows: [{ event_id: 'evt_del' }], rowCount: 1 }) // claim
@@ -153,6 +153,30 @@ describe('handleStripeWebhook — customer.subscription.deleted', () => {
       ([sql]: [string]) => typeof sql === 'string' && sql.includes('DELETE FROM draw_entry'),
     );
     expect(deletedDraw).toBeUndefined();
+  });
+
+  it('scopes the cancel to THIS stripe subscription id, so a stale/retried deleted event can never cancel a replacement subscription', async () => {
+    mockConstructEvent.mockReturnValue({
+      id: 'evt_del_stale',
+      type: 'customer.subscription.deleted',
+      data: { object: { id: 'sub_old_replaced', metadata: { business_id: '42' } } },
+    });
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ event_id: 'evt_del_stale' }], rowCount: 1 }) // claim
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 });                             // UPDATE matches nothing
+
+    await handleStripeWebhook(Buffer.from('{}'), 'sig');
+
+    const cancelled = mockQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes("status = 'Cancelled'"),
+    );
+    expect(cancelled).toBeDefined();
+    const [sql, params] = cancelled as [string, unknown[]];
+    // The WHERE must pin both the business AND the exact Stripe subscription the event
+    // belongs to, and must never touch an already-Cancelled row.
+    expect(sql).toContain('stripe_subscription_id = $2');
+    expect(sql).toContain("status <> 'Cancelled'");
+    expect(params).toEqual([42, 'sub_old_replaced']);
   });
 });
 
