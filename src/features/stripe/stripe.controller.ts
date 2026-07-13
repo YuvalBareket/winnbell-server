@@ -173,6 +173,10 @@ export const updatePlan = async (req: Request, res: Response) => {
       res.status(400).json({ error: 'You are already on this plan.' });
       return;
     }
+    if (msg === 'SUBSCRIPTION_CANCELLING') {
+      res.status(409).json({ error: 'Your plan is set to cancel. Resume it before changing your plan.' });
+      return;
+    }
     console.error('[stripe.updatePlan]', err);
     res.status(400).json({ error: 'Failed to update plan' });
   }

@@ -591,8 +591,6 @@ export const sendFoundingFinalCampaignEmail = async (
     return;
   }
 
-  const fmt = (d: Date) =>
-    d.toLocaleDateString('en-US', { timeZone: 'America/New_York', month: 'long', day: 'numeric', year: 'numeric' });
   const nextCampaignMonth = dates.nextCampaignOpensAt.toLocaleDateString('en-US', { timeZone: 'America/New_York', month: 'long' });
   // Subscribe deadline = the last day of the CURRENT month (the day before the next open).
   // setUTCDate(0) = day zero of the open's month = last day of the month before it,
@@ -631,11 +629,11 @@ export const sendFoundingFinalCampaignEmail = async (
               </p>
               <p style="margin:0 0 20px;color:#64748b;font-size:15px;line-height:1.6;">
                 The campaign running right now is the last one included in your Founding Partner year,
-                which ends on <strong style="color:#1e293b;">${fmt(dates.termEnd)}</strong>.
+                which ends on <strong style="color:#1e293b;">${fmtNyDate(dates.termEnd)}</strong>.
               </p>
               <p style="margin:0 0 28px;color:#64748b;font-size:15px;line-height:1.6;">
                 To stay on the Winnbell map and be part of the <strong style="color:#1e293b;">${nextCampaignMonth} campaign</strong>,
-                start a regular plan by <strong style="color:#1e293b;">${fmt(subscribeBy)}</strong>.
+                start a regular plan by <strong style="color:#1e293b;">${fmtNyDate(subscribeBy)}</strong>.
                 Do it before then and your business will not miss a single day.
               </p>
 
