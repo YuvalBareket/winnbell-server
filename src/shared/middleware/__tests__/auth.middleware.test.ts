@@ -33,7 +33,7 @@ jest.mock('../../db/db.js', () => ({
 }));
 
 // Import after mocks are set up
-import { authenticateToken } from '../auth.middleware';
+import { authenticateToken, requireProfileComplete } from '../auth.middleware';
 import { userCache, invalidateUserAuth } from '../../cache/cache.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -456,5 +456,81 @@ describe('invalidateUserAuth — cache key invalidation', () => {
     expect(userCache.has(`user:role:${USER_A}`)).toBe(false);
     // USER_B's cache entry must still be present
     expect(userCache.has(`user:role:${USER_B}`)).toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// requireProfileComplete — server-side age gate on entry-creating routes
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('requireProfileComplete — entry routes require DOB + gender on record', () => {
+  const makeAuthedReq = (id: number, role: string): Request =>
+    ({ user: { id, role } }) as unknown as Request;
+
+  const setupGuard = (guard: { is_active?: boolean; is_phone_verified?: boolean; profile_complete?: boolean }) => {
+    mockPoolQuery.mockResolvedValueOnce({
+      rows: [{ is_active: true, is_phone_verified: true, profile_complete: false, ...guard }],
+    });
+  };
+
+  it('blocks a consumer without a completed profile (403 with message)', async () => {
+    setupGuard({ profile_complete: false });
+    const res = makeRes();
+    const next = makeNext();
+
+    await requireProfileComplete(makeAuthedReq(1, 'User'), res, next);
+
+    expect(res.status).toHaveBeenCalledWith(403);
+    expect(res.json).toHaveBeenCalledWith({ message: 'Please complete your profile before entering draws.' });
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it('passes a consumer whose profile is complete', async () => {
+    setupGuard({ profile_complete: true });
+    const res = makeRes();
+    const next = makeNext();
+
+    await requireProfileComplete(makeAuthedReq(2, 'User'), res, next);
+
+    expect(next).toHaveBeenCalled();
+    expect(res.status).not.toHaveBeenCalled();
+  });
+
+  it('exempts Business and Admin roles (they never create consumer entries)', async () => {
+    setupGuard({ profile_complete: false });
+    const res1 = makeRes();
+    const next1 = makeNext();
+    await requireProfileComplete(makeAuthedReq(3, 'Business'), res1, next1);
+    expect(next1).toHaveBeenCalled();
+
+    setupGuard({ profile_complete: false });
+    const res2 = makeRes();
+    const next2 = makeNext();
+    await requireProfileComplete(makeAuthedReq(4, 'Admin'), res2, next2);
+    expect(next2).toHaveBeenCalled();
+  });
+
+  it('unblocks immediately after invalidateUserAuth (cache cleared on profile save)', async () => {
+    // First call caches the incomplete guard row
+    setupGuard({ profile_complete: false });
+    await requireProfileComplete(makeAuthedReq(5, 'User'), makeRes(), makeNext());
+
+    // Profile saved server-side -> invalidateUserAuth clears the guard cache
+    invalidateUserAuth(5);
+
+    // Next call re-reads the DB and sees the completed profile
+    setupGuard({ profile_complete: true });
+    const res = makeRes();
+    const next = makeNext();
+    await requireProfileComplete(makeAuthedReq(5, 'User'), res, next);
+    expect(next).toHaveBeenCalled();
+  });
+
+  it('rejects an unauthenticated request', async () => {
+    const res = makeRes();
+    const next = makeNext();
+    await requireProfileComplete({ user: undefined } as unknown as Request, res, next);
+    expect(res.status).toHaveBeenCalledWith(401);
+    expect(next).not.toHaveBeenCalled();
   });
 });

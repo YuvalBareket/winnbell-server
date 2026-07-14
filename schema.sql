@@ -75,6 +75,10 @@ CREATE TABLE "user" (
   referral_code        VARCHAR(12) UNIQUE,
   -- City resolved from the registration IP (ipinfo) at signup — no user-typed field.
   city                 VARCHAR(120) NULL,
+  -- Step-2 profile setup (consumers + location managers), collected right after registration.
+  -- NULL until the user completes the step; drives requiresProfileSetup in auth payloads.
+  date_of_birth        DATE NULL,
+  gender               VARCHAR(20) NULL CHECK (gender IN ('Female', 'Male', 'Non-binary', 'Prefer not to say')),
   created_at           TIMESTAMP NOT NULL DEFAULT NOW(),
   updated_at           TIMESTAMP NOT NULL DEFAULT NOW()
 );

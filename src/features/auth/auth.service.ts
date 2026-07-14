@@ -196,7 +196,7 @@ export const registerUser = async (
     const result = await client.query(
       `INSERT INTO "user" (full_name, email, password_hash, role, registration_ip)
        VALUES ($1, $2, $3, 'User', $4)
-       RETURNING id, role, full_name, email, is_phone_verified, token_epoch`,
+       RETURNING id, role, full_name, email, is_phone_verified, token_epoch, date_of_birth::text AS date_of_birth, gender`,
       [fullName, email, passwordHash, registrationIp ?? null],
     );
     const newUser = result.rows[0];
@@ -273,6 +273,9 @@ export const registerUser = async (
         role: newUser.role,
         location_id: locationId,
         requiresBusinessSetup: newUser.role === 'Business' && !inviteToken,
+        requiresProfileSetup: needsProfileSetup(newUser.role, locationId, newUser.date_of_birth, newUser.gender),
+        dateOfBirth: newUser.date_of_birth ?? null,
+        gender: newUser.gender ?? null,
         isPhoneVerified: newUser.is_phone_verified,
       },
     };
@@ -284,6 +287,17 @@ export const registerUser = async (
   }
 };
 
+// Step-2 profile setup applies to consumers and location managers (role Business WITH a
+// location) - business owners have their own setup wizard and admins are exempt. True until
+// the user has saved both a date of birth and a gender.
+const needsProfileSetup = (
+  role: string,
+  locationId: number | null,
+  dateOfBirth: unknown,
+  gender: unknown,
+): boolean =>
+  (role === 'User' || (role === 'Business' && !!locationId)) && (!dateOfBirth || !gender);
+
 export const loginUser = async (
   email: string,
   password: string,
@@ -293,7 +307,7 @@ export const loginUser = async (
   email = email.toLowerCase().trim();
 
   const result = await pool.query(
-    `SELECT id, email, password_hash, full_name, role, is_phone_verified, token_epoch FROM "user" WHERE email = $1 AND is_active = true`,
+    `SELECT id, email, password_hash, full_name, role, is_phone_verified, token_epoch, date_of_birth::text AS date_of_birth, gender FROM "user" WHERE email = $1 AND is_active = true`,
     [email],
   );
   const user = result.rows[0];
@@ -412,6 +426,9 @@ export const loginUser = async (
       location_id: locationId,
       business_id: businessId,
       requiresBusinessSetup: user.role === 'Business' && !locationId && !hasBusiness,
+      requiresProfileSetup: needsProfileSetup(user.role, locationId, user.date_of_birth, user.gender),
+      dateOfBirth: user.date_of_birth ?? null,
+      gender: user.gender ?? null,
       businessIsActive,
       businessLogoUrl,
       isPhoneVerified: user.is_phone_verified,
@@ -508,7 +525,7 @@ export const syncExternalUser = async (
              registration_ip = COALESCE("user".registration_ip, EXCLUDED.registration_ip),
              city = COALESCE("user".city, EXCLUDED.city),
              updated_at = NOW()
-       RETURNING id, role, full_name AS "fullName", email, token_epoch`,
+       RETURNING id, role, full_name AS "fullName", email, token_epoch, date_of_birth::text AS date_of_birth, gender`,
       [externalId, email, fullName, role, detectedState, safeIp, detectedCity],
     );
     const dbUser = upsertResult.rows[0];
@@ -615,6 +632,9 @@ export const syncExternalUser = async (
         location_id: locationId,
         business_id: businessId,
         requiresBusinessSetup: dbUser.role === 'Business' && !locationId && !hasBusiness,
+        requiresProfileSetup: needsProfileSetup(dbUser.role, locationId, dbUser.date_of_birth, dbUser.gender),
+        dateOfBirth: dbUser.date_of_birth ?? null,
+        gender: dbUser.gender ?? null,
         businessIsActive,
         businessLogoUrl,
       },
@@ -625,6 +645,59 @@ export const syncExternalUser = async (
   } finally {
     client.release();
   }
+};
+
+// Allowed values mirror the user_gender_check constraint in schema.sql.
+export const GENDER_OPTIONS = ['Female', 'Male', 'Non-binary', 'Prefer not to say'] as const;
+
+// Step-2 profile setup (consumers + location managers): saves date of birth + gender.
+// Validation errors throw with a user-facing message; the controller maps them to 400.
+export const completeProfileSetup = async (
+  userId: number,
+  dateOfBirth: string,
+  gender: string,
+): Promise<{ dateOfBirth: string; gender: string }> => {
+  if (typeof dateOfBirth !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(dateOfBirth)) {
+    throw new Error('Please enter a valid date of birth.');
+  }
+  const dob = new Date(`${dateOfBirth}T00:00:00Z`);
+  if (Number.isNaN(dob.getTime())) {
+    throw new Error('Please enter a valid date of birth.');
+  }
+  // JS rolls invalid calendar dates over (2006-02-29 becomes Mar 1) instead of rejecting them,
+  // but PostgreSQL's DATE column rejects the original string with a raw error. Round-trip the
+  // string so impossible dates fail here with the friendly message instead of a 500.
+  if (dob.toISOString().slice(0, 10) !== dateOfBirth) {
+    throw new Error('Please enter a valid date of birth.');
+  }
+  const now = new Date();
+  let age = now.getUTCFullYear() - dob.getUTCFullYear();
+  const hadBirthday =
+    now.getUTCMonth() > dob.getUTCMonth() ||
+    (now.getUTCMonth() === dob.getUTCMonth() && now.getUTCDate() >= dob.getUTCDate());
+  if (!hadBirthday) age -= 1;
+  if (age < 18) {
+    throw new Error('You must be 18 or older to use Winnbell.');
+  }
+  if (age > 120) {
+    throw new Error('Please enter a valid date of birth.');
+  }
+  if (!GENDER_OPTIONS.includes(gender as (typeof GENDER_OPTIONS)[number])) {
+    throw new Error('Please select a valid option.');
+  }
+
+  const pool = getPool();
+  const result = await pool.query(
+    `UPDATE "user" SET date_of_birth = $1, gender = $2, updated_at = NOW()
+     WHERE id = $3 AND is_active = TRUE
+     RETURNING date_of_birth::text AS date_of_birth, gender`,
+    [dateOfBirth, gender, userId],
+  );
+  if (result.rowCount === 0) {
+    throw new Error('User not found');
+  }
+  invalidateUserAuth(userId);
+  return { dateOfBirth: result.rows[0].date_of_birth, gender: result.rows[0].gender };
 };
 
 export const cleanupExpiredRefreshTokens = async (): Promise<void> => {

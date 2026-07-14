@@ -29,6 +29,19 @@ import { getPool } from '../../shared/db/db.js';
 import { syncSubscriptionQuantity } from '../stripe/stripe.service.js';
 import { validateLengths } from '../../shared/validation.js';
 
+// Mirrors the business.sector CHECK constraint in schema.sql. 'Free' is excluded from
+// self-service registration (the client never offers it), so setup/update reject it too.
+const REGISTRATION_SECTORS = [
+  'Food', 'Coffee', 'Bakery', 'Grocery', 'Retail', 'Beauty', 'Health',
+  'Gym', 'Auto', 'Entertainment', 'Education', 'Service',
+];
+
+// Presence check: length validation deliberately skips missing values, so required fields
+// need this explicit guard - otherwise an API caller bypassing the wizard can create a
+// business with no name/sector or a location with no name/address (raw DB 500s or junk rows).
+const requireNonEmpty = (label: string, value: unknown): string | null =>
+  typeof value === 'string' && value.trim().length > 0 ? null : `${label} is required.`;
+
 // Returns an error string when lat/lon are not valid coordinates, null when OK
 const validateCoords = (lat: unknown, lon: unknown): string | null => {
   if (typeof lat !== 'number' || typeof lon !== 'number' || Number.isNaN(lat) || Number.isNaN(lon)) {
@@ -190,10 +203,21 @@ export const setupBusiness = async (req: AuthRequest, res: Response): Promise<vo
     const urlErr = validateWebsiteUrl(website_url);
     if (urlErr) { res.status(400).json({ message: urlErr }); return; }
 
+    // Setup cannot be skipped past: name and a real sector are mandatory (the client wizard
+    // enforces this, but the API is the gate that counts).
+    const nameErr = requireNonEmpty('Business name', businessName);
+    if (nameErr) { res.status(400).json({ message: nameErr }); return; }
+    if (typeof businessSector !== 'string' || !REGISTRATION_SECTORS.includes(businessSector)) {
+      res.status(400).json({ message: 'Please select a valid business sector.' });
+      return;
+    }
+
     // Validate each location (phone is now per-location, not per-business).
     const locations: Array<{ name?: string; address?: string; suite?: string; phone?: string; lat?: unknown; lon?: unknown }> = req.body.locations ?? [];
     if (locations.length === 0) { res.status(400).json({ message: 'At least one location is required.' }); return; }
     for (const loc of locations) {
+      const locRequiredErr = requireNonEmpty('Location name', loc.name) ?? requireNonEmpty('Location address', loc.address);
+      if (locRequiredErr) { res.status(400).json({ message: locRequiredErr }); return; }
       const locErr = validateLengths([
         ['Location name', loc.name, 200],
         ['Location address', loc.address, 500],
@@ -260,6 +284,12 @@ export const updateBusiness = async (req: AuthRequest, res: Response): Promise<v
     if (lenErr) { res.status(400).json({ message: lenErr }); return; }
     const urlErr = validateWebsiteUrl(website_url);
     if (urlErr) { res.status(400).json({ message: urlErr }); return; }
+    // The sector can be changed but never cleared or set to a value outside the schema's
+    // CHECK list (which would otherwise surface as a raw DB error).
+    if (typeof businessSector !== 'string' || !REGISTRATION_SECTORS.includes(businessSector)) {
+      res.status(400).json({ message: 'Please select a valid business sector.' });
+      return;
+    }
 
     await updateBusinessProfile(req.user!.id, { businessSector, description, terms_text, website_url });
     res.status(204).send();
@@ -338,6 +368,8 @@ export const updateLocation = async (req: AuthRequest, res: Response): Promise<v
       phone?: string;
     };
 
+    const requiredErr = requireNonEmpty('Location name', name) ?? requireNonEmpty('Location address', address);
+    if (requiredErr) { res.status(400).json({ message: requiredErr }); return; }
     const lenErr = validateLengths([['Location name', name, 200], ['Address', address, 500], ['Suite', suite, 100], ['Phone', phone, 20]]);
     if (lenErr) { res.status(400).json({ message: lenErr }); return; }
     const coordErr = validateCoords(lat, lon);
@@ -373,6 +405,8 @@ export const addLocation = async (req: AuthRequest, res: Response): Promise<void
     phone?: string;
   };
 
+  const requiredErr = requireNonEmpty('Location name', name) ?? requireNonEmpty('Location address', address);
+  if (requiredErr) { res.status(400).json({ message: requiredErr }); return; }
   const lenErr = validateLengths([['Location name', name, 200], ['Address', address, 500], ['Suite', suite, 100], ['Phone', phone, 20]]);
   if (lenErr) { res.status(400).json({ message: lenErr }); return; }
   const coordErr = validateCoords(lat, lon);

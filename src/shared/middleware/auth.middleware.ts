@@ -39,7 +39,6 @@ export const requirePhoneVerified = async (
   const userId = req.user?.id;
   if (!userId) { res.status(401).json({ message: 'Unauthorized' }); return; }
 
-  type GuardData = { is_active: boolean; is_phone_verified: boolean };
   const guard = await getGuardData(userId, res);
   if (!guard) return; // response already sent
 
@@ -52,6 +51,32 @@ export const requirePhoneVerified = async (
   const role = req.user?.role;
   if (role !== 'Business' && role !== 'Admin' && !guard.is_phone_verified) {
     res.status(403).json({ message: 'Phone verification required.' });
+    return;
+  }
+
+  next();
+};
+
+// Guards entry-creating routes: the step-2 profile (date of birth + gender) must be on record
+// before a consumer can create draw entries. This is the SERVER-side age gate - the client
+// redirect to /profile-setup is UX only and trivially bypassed by editing localStorage or
+// calling the API directly. The DOB itself is 18+ validated when saved (completeProfileSetup),
+// and completing the profile invalidates the guard cache, so the block lifts immediately.
+export const requireProfileComplete = async (
+  req: AuthRequest,
+  res: Response,
+  next: NextFunction,
+): Promise<void> => {
+  const userId = req.user?.id;
+  if (!userId) { res.status(401).json({ message: 'Unauthorized' }); return; }
+
+  const guard = await getGuardData(userId, res);
+  if (!guard) return; // response already sent
+
+  // Business and Admin roles never create consumer entries; only consumers are gated.
+  const role = req.user?.role;
+  if (role !== 'Business' && role !== 'Admin' && !guard.profile_complete) {
+    res.status(403).json({ message: 'Please complete your profile before entering draws.' });
     return;
   }
 
@@ -78,7 +103,7 @@ export const requireActive = async (
   next();
 };
 
-type GuardData = { is_active: boolean; is_phone_verified: boolean };
+type GuardData = { is_active: boolean; is_phone_verified: boolean; profile_complete: boolean };
 
 async function getGuardData(userId: number, res: Response): Promise<GuardData | null> {
   const cacheKey = `user:guard:${userId}`;
@@ -88,10 +113,12 @@ async function getGuardData(userId: number, res: Response): Promise<GuardData | 
   try {
     const pool = getPool();
     const result = await pool.query(
-      `SELECT is_active, is_phone_verified FROM "user" WHERE id = $1`,
+      `SELECT is_active, is_phone_verified,
+              (date_of_birth IS NOT NULL AND gender IS NOT NULL) AS profile_complete
+       FROM "user" WHERE id = $1`,
       [userId],
     );
-    const guard: GuardData = result.rows[0] ?? { is_active: false, is_phone_verified: false };
+    const guard: GuardData = result.rows[0] ?? { is_active: false, is_phone_verified: false, profile_complete: false };
     // Cache write is best-effort: node-cache throws ECACHEFULL at maxKeys, and a full
     // cache must degrade to per-request DB reads, never to a 503.
     try { userCache.set(cacheKey, guard); } catch { /* serve uncached */ }
