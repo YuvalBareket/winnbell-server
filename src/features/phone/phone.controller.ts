@@ -39,6 +39,14 @@ export const sendOtp = async (req: Request, res: Response): Promise<void> => {
       res.status(429).json({ message: 'Too many verification requests. Please wait before trying again.' });
       return;
     }
+    if (msg === 'RESEND_TOO_SOON') {
+      res.status(429).json({ message: 'We just sent you a code. Give it a minute before requesting another.' });
+      return;
+    }
+    if (msg === 'SMS_SEND_FAILED') {
+      res.status(502).json({ message: 'We could not send the code right now. Please try again in a moment.' });
+      return;
+    }
     console.error('[phone] sendOtp error:', err);
     res.status(500).json({ message: 'Failed to send verification code.' });
   }

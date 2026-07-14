@@ -2,16 +2,36 @@ import twilio from 'twilio';
 import { getPool } from '../../shared/db/db.js';
 import { invalidateUserAuth } from '../../shared/cache/cache.js';
 import { grantPendingReferralBonus } from '../referral/referral.service.js';
-import crypto from 'crypto';
 
-const twilioClient = twilio(
-  process.env.TWILIO_ACCOUNT_SID!,
-  process.env.TWILIO_AUTH_TOKEN!,
-);
+// Real SMS goes out ONLY when PHONE_VERIFY_ENABLED=true - set exclusively on the production
+// service (the same flag already gates the free-entry phone requirement in tickets.service).
+// Every other environment (local dev, staging, CI) NEVER sends an SMS; the code is always
+// the fixed dev code 123456. Production uses Twilio VERIFY (not messages.create): the A2P
+// 10DLC campaign registration kept failing (error 30896), and Verify is exempt from it for
+// OTP-only senders - Twilio generates, texts, and checks the real code itself.
+const isSmsLive = () => process.env.PHONE_VERIFY_ENABLED === 'true';
+const DEV_OTP_CODE = '123456';
+// Stored in the code column for live sends: the real code lives at Twilio, never locally.
+// Can never match user input in the non-live compare path (codes are 6 digits).
+const LIVE_CODE_SENTINEL = 'LIVE';
+
+// Lazy so environments without Twilio credentials never construct the client (the factory
+// throws on a missing/malformed account SID at import time).
+let twilioClient: ReturnType<typeof twilio> | null = null;
+const getTwilio = (): ReturnType<typeof twilio> => {
+  if (!twilioClient) {
+    twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID!, process.env.TWILIO_AUTH_TOKEN!);
+  }
+  return twilioClient;
+};
 
 const MAX_VERIFY_ATTEMPTS = 3;
 const OTP_EXPIRY_MINUTES = 10;
 const MAX_SENDS_PER_HOUR = 3;
+// Minimum spacing between sends. The client shows a matching 60s cooldown, but that is
+// component state - closing and reopening the verify sheet resets it. This is the real gate,
+// so reopening the sheet (or hammering the API) can never fire SMS faster than one a minute.
+const RESEND_INTERVAL_SECONDS = 60;
 
 export const sendPhoneOtp = async (userId: number, phoneNumber: string): Promise<void> => {
 
@@ -65,25 +85,45 @@ export const sendPhoneOtp = async (userId: number, phoneNumber: string): Promise
   if (userRateCheck.rows[0].cnt >= MAX_SENDS_PER_HOUR) {
     throw new Error('TOO_MANY_SENDS');
   }
-//  const code = String(crypto.randomInt(100000, 999999));
-  const code = '123456' 
 
-  // Insert new OTP — do NOT delete old rows first so rate limit history is preserved.
-  // Old expired rows are cleaned up lazily on the next send.
+  // Minimum spacing: a code sent less than a minute ago is still perfectly good - resume it
+  // instead of sending another SMS (the client re-enters the code step on reopen).
+  const recentSend = await pool.query(
+    `SELECT 1 FROM phone_otp
+     WHERE user_id = $1 AND created_at > NOW() - make_interval(secs => $2)
+     LIMIT 1`,
+    [userId, RESEND_INTERVAL_SECONDS],
+  );
+  if (recentSend.rows.length > 0) {
+    throw new Error('RESEND_TOO_SOON');
+  }
+  const code = isSmsLive() ? LIVE_CODE_SENTINEL : DEV_OTP_CODE;
+
+  // Insert new OTP — do NOT delete old unexpired rows first so rate limit history is
+  // preserved. Old expired rows are cleaned up lazily on the next send.
   await pool.query(`DELETE FROM phone_otp WHERE user_id = $1 AND expires_at <= NOW()`, [userId]);
   await pool.query(
     `INSERT INTO phone_otp (user_id, phone_number, code, expires_at)
-     VALUES ($1, $2, $3, NOW() + INTERVAL '10 minutes')`,
+     VALUES ($1, $2, $3, NOW() + INTERVAL '${OTP_EXPIRY_MINUTES} minutes')`,
     [userId, normalizedPhone, code],
   );
 
-
-//     await twilioClient.messages.create({
-//       to: normalizedPhone,
-//       from: process.env.TWILIO_FROM_NUMBER!,
-//       body: `Winnbell verification code: ${code}. Expires in ${OTP_EXPIRY_MINUTES} minutes. Don't share this code.`,
-//     });
-
+  if (isSmsLive()) {
+    try {
+      await getTwilio().verify.v2
+        .services(process.env.TWILIO_VERIFY_SERVICE_SID!)
+        .verifications.create({ to: normalizedPhone, channel: 'sms' });
+    } catch (err) {
+      // The SMS never went out: remove the row so the user is not stuck in a "code sent"
+      // state that cannot verify and blocks the next attempt via the 60s spacing check.
+      await pool.query(
+        `DELETE FROM phone_otp WHERE user_id = $1 AND code = $2`,
+        [userId, LIVE_CODE_SENTINEL],
+      );
+      console.error('[phone] Twilio Verify send failed:', err instanceof Error ? err.message : err);
+      throw new Error('SMS_SEND_FAILED');
+    }
+  }
 };
 
 
@@ -121,9 +161,28 @@ export const verifyPhoneOtp = async (
       throw new Error('TOO_MANY_ATTEMPTS');
     }
 
+    // Attempt accounting is local in BOTH modes and increments BEFORE the check, so a
+    // caller can never buy unlimited guesses (Twilio has its own limits too, but ours is
+    // the uniform gate the tests and the client rely on).
     await client.query(`UPDATE phone_otp SET attempts = attempts + 1 WHERE id = $1`, [otp.id]);
 
-    if (otp.code !== code.trim()) {
+    let codeOk: boolean;
+    if (isSmsLive()) {
+      // Twilio Verify holds the real code; 'approved' is the only success status. A dead or
+      // never-created verification raises (404) - treat it exactly like a wrong code.
+      try {
+        const check = await getTwilio().verify.v2
+          .services(process.env.TWILIO_VERIFY_SERVICE_SID!)
+          .verificationChecks.create({ to: otp.phone_number, code: code.trim() });
+        codeOk = check.status === 'approved';
+      } catch {
+        codeOk = false;
+      }
+    } else {
+      codeOk = otp.code === code.trim();
+    }
+
+    if (!codeOk) {
       await client.query('COMMIT');
       throw new Error('INVALID_CODE');
     }
