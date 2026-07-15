@@ -20,6 +20,7 @@ jest.mock('../auth.controller.js', () => ({
   logoutController: jest.fn(),
   revokeAllSessions: jest.fn(),
   profileSetup: jest.fn(),
+  updateName: jest.fn(),
   deleteAccount: jest.fn(),
 }));
 jest.mock('../test-setup.controller.js', () => ({ testSetup: jest.fn() }));

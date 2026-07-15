@@ -135,6 +135,31 @@ export const profileSetup = async (req: Request, res: Response): Promise<void> =
   }
 };
 
+// POST /auth/update-name  body: { fullName }  - edit display name from Settings (authenticated).
+export const updateName = async (req: Request, res: Response): Promise<void> => {
+  const userId = req.user?.id;
+  if (!userId) { res.status(401).json({ message: 'Unauthorized' }); return; }
+
+  const { fullName } = req.body ?? {};
+  const lenErr = validateLengths([['Name', fullName, 100]]);
+  if (lenErr) { res.status(400).json({ message: lenErr }); return; }
+
+  try {
+    const result = await authService.updateFullName(userId, fullName);
+    res.json({ message: 'Name updated', ...result });
+  } catch (error: unknown) {
+    if (error instanceof Error && error.message === 'User not found') {
+      res.status(404).json({ message: 'User not found' });
+      return;
+    }
+    if (error instanceof Error && (error.message.startsWith('Please') || error.message.startsWith('Name'))) {
+      res.status(400).json({ message: error.message });
+      return;
+    }
+    res.status(500).json({ message: 'Server error' });
+  }
+};
+
 // Called by the reset-password flow after a successful password change to log the
 // user out of every other existing session. Authenticated by the user's Supabase
 // access token (same verification as syncUser). Deleting all internal refresh tokens

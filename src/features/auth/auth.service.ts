@@ -196,7 +196,7 @@ export const registerUser = async (
     const result = await client.query(
       `INSERT INTO "user" (full_name, email, password_hash, role, registration_ip)
        VALUES ($1, $2, $3, 'User', $4)
-       RETURNING id, role, full_name, email, is_phone_verified, token_epoch, date_of_birth::text AS date_of_birth, gender`,
+       RETURNING id, role, full_name, email, is_phone_verified, token_epoch, date_of_birth::text AS date_of_birth, gender, created_at`,
       [fullName, email, passwordHash, registrationIp ?? null],
     );
     const newUser = result.rows[0];
@@ -276,6 +276,7 @@ export const registerUser = async (
         requiresProfileSetup: needsProfileSetup(newUser.role, locationId, newUser.date_of_birth, newUser.gender),
         dateOfBirth: newUser.date_of_birth ?? null,
         gender: newUser.gender ?? null,
+        created_at: newUser.created_at,
         isPhoneVerified: newUser.is_phone_verified,
       },
     };
@@ -307,7 +308,7 @@ export const loginUser = async (
   email = email.toLowerCase().trim();
 
   const result = await pool.query(
-    `SELECT id, email, password_hash, full_name, role, is_phone_verified, token_epoch, date_of_birth::text AS date_of_birth, gender FROM "user" WHERE email = $1 AND is_active = true`,
+    `SELECT id, email, password_hash, full_name, role, is_phone_verified, token_epoch, date_of_birth::text AS date_of_birth, gender, created_at FROM "user" WHERE email = $1 AND is_active = true`,
     [email],
   );
   const user = result.rows[0];
@@ -429,6 +430,7 @@ export const loginUser = async (
       requiresProfileSetup: needsProfileSetup(user.role, locationId, user.date_of_birth, user.gender),
       dateOfBirth: user.date_of_birth ?? null,
       gender: user.gender ?? null,
+      created_at: user.created_at,
       businessIsActive,
       businessLogoUrl,
       isPhoneVerified: user.is_phone_verified,
@@ -525,7 +527,7 @@ export const syncExternalUser = async (
              registration_ip = COALESCE("user".registration_ip, EXCLUDED.registration_ip),
              city = COALESCE("user".city, EXCLUDED.city),
              updated_at = NOW()
-       RETURNING id, role, full_name AS "fullName", email, token_epoch, date_of_birth::text AS date_of_birth, gender`,
+       RETURNING id, role, full_name AS "fullName", email, token_epoch, date_of_birth::text AS date_of_birth, gender, created_at`,
       [externalId, email, fullName, role, detectedState, safeIp, detectedCity],
     );
     const dbUser = upsertResult.rows[0];
@@ -698,6 +700,33 @@ export const completeProfileSetup = async (
   }
   invalidateUserAuth(userId);
   return { dateOfBirth: result.rows[0].date_of_birth, gender: result.rows[0].gender };
+};
+
+// Update the user's display name from Settings. Our "user".full_name is the source of truth
+// for display (the sync upsert's ON CONFLICT never overwrites it), so this survives resyncs.
+export const updateFullName = async (
+  userId: number,
+  fullName: unknown,
+): Promise<{ fullName: string }> => {
+  const trimmed = typeof fullName === 'string' ? fullName.trim() : '';
+  if (!trimmed) {
+    throw new Error('Please enter your name.');
+  }
+  if (trimmed.length > 100) {
+    throw new Error('Name must be under 100 characters.');
+  }
+  const pool = getPool();
+  const result = await pool.query(
+    `UPDATE "user" SET full_name = $1, updated_at = NOW()
+     WHERE id = $2 AND is_active = TRUE
+     RETURNING full_name`,
+    [trimmed, userId],
+  );
+  if (result.rowCount === 0) {
+    throw new Error('User not found');
+  }
+  invalidateUserAuth(userId);
+  return { fullName: result.rows[0].full_name };
 };
 
 export const cleanupExpiredRefreshTokens = async (): Promise<void> => {

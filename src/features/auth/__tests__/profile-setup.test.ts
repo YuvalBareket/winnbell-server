@@ -25,7 +25,7 @@ jest.mock('../../../shared/db/db.js', () => ({
   }),
 }));
 
-import { completeProfileSetup, loginUser } from '../auth.service';
+import { completeProfileSetup, updateFullName, loginUser } from '../auth.service';
 
 process.env.JWT_SECRET = 'test-secret';
 
@@ -48,6 +48,37 @@ const setupPoolQueries = (...responses: Array<{ rows: unknown[]; rowCount?: numb
 
 beforeEach(() => {
   jest.clearAllMocks();
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// updateFullName (Settings name edit)
+// ─────────────────────────────────────────────────────────────────────────────
+describe('updateFullName', () => {
+  test('trims and saves a valid name, returns it', async () => {
+    setupPoolQueries({ rows: [{ full_name: 'Jane Doe' }], rowCount: 1 });
+    const res = await updateFullName(1, '  Jane Doe  ');
+    expect(res).toEqual({ fullName: 'Jane Doe' });
+    const [sql, params] = mockPoolQuery.mock.calls[0];
+    expect(sql).toContain('UPDATE "user" SET full_name');
+    expect(params).toEqual(['Jane Doe', 1]);
+  });
+
+  test('rejects an empty/whitespace name without touching the DB', async () => {
+    await expect(updateFullName(1, '   ')).rejects.toThrow('Please enter your name.');
+    await expect(updateFullName(1, '')).rejects.toThrow('Please enter your name.');
+    await expect(updateFullName(1, undefined)).rejects.toThrow('Please enter your name.');
+    expect(mockPoolQuery).not.toHaveBeenCalled();
+  });
+
+  test('rejects a name over 100 characters', async () => {
+    await expect(updateFullName(1, 'x'.repeat(101))).rejects.toThrow('Name must be under 100 characters.');
+    expect(mockPoolQuery).not.toHaveBeenCalled();
+  });
+
+  test('throws "User not found" when no active row is updated', async () => {
+    setupPoolQueries({ rows: [], rowCount: 0 });
+    await expect(updateFullName(999, 'Ghost')).rejects.toThrow('User not found');
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

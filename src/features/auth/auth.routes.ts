@@ -27,6 +27,7 @@ router.post('/refresh', authController.refreshTokenController);
 router.post('/logout', authController.logoutController);
 router.post('/revoke-sessions', authController.revokeAllSessions);
 router.post('/profile-setup', authenticateToken, authController.profileSetup);
+router.post('/update-name', authenticateToken, authController.updateName);
 router.delete('/account', authenticateToken, authController.deleteAccount);
 // Dev/test only — registered in app.ts with NODE_ENV guard
 
