@@ -675,3 +675,37 @@ export const sendFoundingFinalCampaignEmail = async (
   await transporter.sendMail({ from: FROM, to: toEmail, subject, html });
   console.log(`[Email] Founding final-campaign notice sent to ${toEmail}`);
 };
+
+// ─── Contact Form ─────────────────────────────────────────────────────────────
+// Public /contact form submissions, delivered to the support inbox. User-supplied text is
+// HTML-escaped (the form is public and unauthenticated). reply_to points at the submitter
+// so support can answer with a plain reply.
+
+const escapeHtml = (s: string): string =>
+  s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+
+export const sendContactMessageEmail = async (details: {
+  fullName: string;
+  email: string;
+  topic: string;
+  message: string;
+}): Promise<void> => {
+  if (!process.env.SMTP_HOST) {
+    console.warn('[Email] SMTP_HOST not configured — skipping contact message email');
+    return;
+  }
+  const to = process.env.SUPPORT_EMAIL ?? 'support@winnbell.com';
+  const subject = `Contact form: ${details.topic} - ${details.fullName}`;
+  const html = `
+<p><strong>New contact form message</strong></p>
+<ul>
+  <li>From: ${escapeHtml(details.fullName)} &lt;${escapeHtml(details.email)}&gt;</li>
+  <li>Topic: ${escapeHtml(details.topic)}</li>
+</ul>
+<p style="white-space:pre-wrap;border-left:3px solid #ccc;padding-left:12px;">${escapeHtml(details.message)}</p>
+<p>Reply directly to this email to answer them.</p>
+  `.trim();
+
+  await transporter.sendMail({ from: FROM, to, replyTo: `${details.fullName} <${details.email}>`, subject, html });
+  console.log(`[Email] Contact form message sent to ${to}`);
+};

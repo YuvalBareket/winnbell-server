@@ -12,6 +12,7 @@ import stripeWebhookRoutes from './features/stripe/stripe.routes.js';
 import notificationRoutes from './features/notifications/notifications.routes.js';
 import phoneRouter from './features/phone/phone.routes.js';
 import referralRoutes from './features/referral/referral.routes.js';
+import contactRoutes from './features/contact/contact.routes.js';
 import { resolveReferral } from './features/referral/referral.controller.js';
 import { Router } from 'express';
 import {
@@ -202,6 +203,20 @@ app.use('/draws', publicDrawsRouter);
 
 // Public referral resolve — the /join landing fetches the referrer's first name before login.
 app.get('/referral/resolve', publicLimiter, resolveReferral);
+
+// Public contact form — logged-out visitors can reach us too. Tight per-IP budget: each
+// submission sends a real email to the support inbox, so this only needs a handful per
+// person, ever, and any more is abuse.
+const contactLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 5 * RATE_LIMIT_MULTIPLIER,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: getClientIpKey,
+  store: makeRateLimitStore('contact'),
+  message: { message: 'Too many messages from this device. Please try again later.' },
+});
+app.use('/contact', contactLimiter, contactRoutes);
 
 // ── Authenticated routes ──
 app.use(authenticateToken);
