@@ -238,7 +238,16 @@ export const getMyRiskLevel = async (req: AuthRequest, res: Response) => {
          -- the per-user cap and the total they see, so isDrawCapped fires exactly at the cap.
          (SELECT COUNT(*)::int FROM ticket t3 JOIN draw d ON t3.draw_id = d.id
           WHERE t3.activated_by_user_id = $1 AND d.status = 'Open'
-         ) AS draw_entry_count
+         ) AS draw_entry_count,
+         -- Unclaimed welcome bonus (person referral OR location flyer signup). Mirrors the
+         -- eligibility in grantPendingReferralBonus: the bonus is granted at phone-verify time,
+         -- so the client uses this to prompt an unverified invitee to verify and claim it.
+         EXISTS (
+           SELECT 1 FROM user_acquisition ua
+           WHERE ua.user_id = $1 AND ua.referral_rewarded_at IS NULL
+             AND (ua.referred_by_user_id IS NOT NULL
+                  OR (ua.source = 'location_flyer' AND ua.location_id IS NOT NULL))
+         ) AS welcome_bonus_pending
        FROM "user" u WHERE u.id = $1`,
       [userId],
     );
@@ -248,6 +257,7 @@ export const getMyRiskLevel = async (req: AuthRequest, res: Response) => {
     const isPhoneVerified: boolean = row?.is_phone_verified ?? false;
     const dailyCount: number = row?.daily_count ?? 0;
     const drawEntryCount: number = row?.draw_entry_count ?? 0;
+    const welcomeBonusPending: boolean = row?.welcome_bonus_pending ?? false;
 
     // High risk + already submitted today = throttled
     const isThrottled = score >= 20 && dailyCount >= 1;
@@ -259,6 +269,7 @@ export const getMyRiskLevel = async (req: AuthRequest, res: Response) => {
       dailyCount,
       dailyLimit: 5,
       isPhoneVerified,
+      welcomeBonusPending,
     });
   } catch {
     res.status(500).json({ message: 'Failed to fetch risk level.' });
