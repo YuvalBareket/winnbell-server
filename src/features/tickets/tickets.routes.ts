@@ -5,10 +5,12 @@ import { requireRole, requirePhoneVerified, requireProfileComplete, requireActiv
 import { makeRateLimitStore } from '../../shared/rateLimitStore.js';
 import { getClientIpKey } from '../../shared/clientIp.js';
 
-// 5 entry attempts per minute per user (keyed on JWT user ID, not IP)
+// 5 entry attempts per minute per user (keyed on JWT user ID, not IP).
+// Outside production the cap scales up (same policy as the app.ts limiters) so E2E
+// entry flows and rapid manual testing never trip 429s on the dev machine.
 const entryLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 5,
+  max: 5 * (process.env.NODE_ENV === 'production' ? 1 : 5),
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req: Request) => req.user?.id?.toString() ?? getClientIpKey(req),

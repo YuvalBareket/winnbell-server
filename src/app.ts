@@ -51,9 +51,14 @@ app.use(
 );
 
 // Rate limiters
+// Outside production (local dev; Render prod AND staging both set NODE_ENV=production) every
+// cap is multiplied so E2E runs, seed scripts, and rapid manual testing never trip 429s.
+// The windows and relative budgets stay identical to production, only the ceilings scale.
+const RATE_LIMIT_MULTIPLIER = process.env.NODE_ENV === 'production' ? 1 : 5;
+
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 30,
+  max: 30 * RATE_LIMIT_MULTIPLIER,
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: getClientIpKey,
@@ -70,7 +75,7 @@ const authLimiter = rateLimit({
 // tokens are 80 hex chars, so brute force via this endpoint is not a realistic threat.
 const refreshLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 300,
+  max: 300 * RATE_LIMIT_MULTIPLIER,
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: getClientIpKey,
@@ -82,7 +87,7 @@ const refreshLimiter = rateLimit({
 // from mass-creating accounts from a single IP (5 new accounts per hour per IP)
 const registrationLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
-  max: 5,
+  max: 5 * RATE_LIMIT_MULTIPLIER,
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: getClientIpKey,
@@ -97,7 +102,7 @@ const registrationLimiter = rateLimit({
 // top of the general authLimiter.
 const checkEmailLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 30,
+  max: 30 * RATE_LIMIT_MULTIPLIER,
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: getClientIpKey,
@@ -107,7 +112,7 @@ const checkEmailLimiter = rateLimit({
 
 const ticketsLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
-  max: 30,
+  max: 30 * RATE_LIMIT_MULTIPLIER,
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req: express.Request) => req.user?.id?.toString() ?? getClientIpKey(req),
@@ -117,7 +122,7 @@ const ticketsLimiter = rateLimit({
 
 const publicLimiter = rateLimit({
   windowMs: 60 * 1000,
-  max: 20,
+  max: 20 * RATE_LIMIT_MULTIPLIER,
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: getClientIpKey,
@@ -129,7 +134,7 @@ const publicLimiter = rateLimit({
 // while still blocking bot farms. Per-user + per-phone limits are the primary defense.
 const otpLimiter = rateLimit({
   windowMs: 60 * 60 * 1000, // 1 hour
-  max: 50,
+  max: 50 * RATE_LIMIT_MULTIPLIER,
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: getClientIpKey,
@@ -145,7 +150,7 @@ const otpLimiter = rateLimit({
 // staff behind one office IP — trip the 20/min public cap just by opening the dashboard.
 const businessLimiter = rateLimit({
   windowMs: 60 * 1000, // 1 minute
-  max: 120,
+  max: 120 * RATE_LIMIT_MULTIPLIER,
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: (req: express.Request) => req.user?.id?.toString() ?? getClientIpKey(req),
