@@ -12,7 +12,9 @@ export interface CampaignKpis {
 export interface CampaignEntry {
   ticket_id: number;
   location_name: string;
-  customer_masked: string;
+  // Receipt identifier instead of any customer name: the feed identifies the submission,
+  // not the person (privacy + owner asked for it 2026-07-15). Null for free/promo entries.
+  receipt_identifier: string | null;
   transaction_amount: number | null;
   entry_source: string;
   // Number of entries this submission granted. A receipt over the threshold can earn several
@@ -47,17 +49,6 @@ export interface CampaignHeader {
   entries_used: number;        // campaign-total, quarantined excluded, respecting scope
   entry_cap: number | null;
   cap_reached: boolean;
-}
-
-// Customer display for the business feed: first name + last initial (e.g. "Jane D."). Never the
-// full name/email, so it stays privacy-light while still being human to the business.
-function maskCustomer(fullName: string | null | undefined): string {
-  const name = (fullName ?? '').trim();
-  if (!name) return 'Customer';
-  const parts = name.split(/\s+/);
-  const first = parts[0];
-  if (parts.length === 1) return first;
-  return `${first} ${parts[parts.length - 1][0].toUpperCase()}.`;
 }
 
 // created_at period predicate. WTD/MTD use calendar boundaries (week starts Monday in PG),
@@ -298,12 +289,11 @@ export const getCampaignEntries = async (
 
   const res = await pool.query(
     `SELECT t.id AS ticket_id, COALESCE(bl.name, bl.address) AS location_name,
-            u.full_name AS customer_name, t.transaction_amount, t.entry_source,
+            t.receipt_identifier, t.transaction_amount, t.entry_source,
             t.is_quarantined, t.created_at,
             (1 + (SELECT COUNT(*)::int FROM ticket s WHERE s.anchor_ticket_id = t.id)) AS entry_count
      FROM ticket t
      LEFT JOIN business_location bl ON bl.id = t.location_id
-     LEFT JOIN "user" u ON u.id = t.activated_by_user_id
      WHERE ${conditions.join(' AND ')}
        AND (t.entry_source != 'receipt' OR t.receipt_identifier IS NOT NULL)
      ORDER BY t.created_at DESC, t.id DESC LIMIT $${params.length}`,
@@ -316,7 +306,7 @@ export const getCampaignEntries = async (
   const items: CampaignEntry[] = rows.map(r => ({
     ticket_id: Number(r.ticket_id),
     location_name: r.location_name ? String(r.location_name) : 'Unknown location',
-    customer_masked: maskCustomer(r.customer_name),
+    receipt_identifier: r.receipt_identifier != null ? String(r.receipt_identifier) : null,
     transaction_amount: r.transaction_amount != null ? parseFloat(r.transaction_amount) : null,
     entry_source: r.entry_source ?? 'receipt',
     entry_count: Number(r.entry_count) || 1,
