@@ -144,6 +144,7 @@ describe('updateBusinessProfile', () => {
     setupPoolQueries({ rows: [], rowCount: 1 });
 
     await updateBusinessProfile(42, {
+      businessName: 'Joe\'s Coffee',
       businessSector: 'Food',
       description: 'Great food',
       terms_text: 'Standard terms',
@@ -153,6 +154,23 @@ describe('updateBusinessProfile', () => {
     expect(mockQuery).toHaveBeenCalledTimes(1);
     const [, params] = mockQuery.mock.calls[0] as [string, unknown[]];
     expect(params).toContain('https://example.com');
+    // The public name is forwarded (trimmed) to the UPDATE.
+    expect(params).toContain('Joe\'s Coffee');
+  });
+
+  it('should trim the business name before the UPDATE', async () => {
+    setupPoolQueries({ rows: [], rowCount: 1 });
+
+    await updateBusinessProfile(42, {
+      businessName: '  Spaced Cafe  ',
+      businessSector: 'Coffee',
+      description: 'x',
+      terms_text: '',
+      website_url: null,
+    });
+
+    const [, params] = mockQuery.mock.calls[0] as [string, unknown[]];
+    expect(params).toContain('Spaced Cafe');
   });
 
   it('should accept null website_url without throwing', async () => {
@@ -160,6 +178,7 @@ describe('updateBusinessProfile', () => {
 
     await expect(
       updateBusinessProfile(43, {
+        businessName: 'A Shop',
         businessSector: 'Retail',
         description: 'A shop',
         terms_text: 'Standard terms',
@@ -177,6 +196,7 @@ describe('updateBusinessProfile', () => {
 
     await expect(
       updateBusinessProfile(99, {
+        businessName: 'No Match Co',
         businessSector: 'Tech',
         description: 'No match',
         terms_text: '',

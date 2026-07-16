@@ -268,7 +268,8 @@ export const getMyBusiness = async (req: AuthRequest, res: Response): Promise<vo
 
 export const updateBusiness = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const { businessSector, description, terms_text, website_url } = req.body as {
+    const { businessName, businessSector, description, terms_text, website_url } = req.body as {
+      businessName: string;
       businessSector: string;
       description: string;
       terms_text: string;
@@ -276,12 +277,16 @@ export const updateBusiness = async (req: AuthRequest, res: Response): Promise<v
     };
 
     const lenErr = validateLengths([
+      ['Business name', businessName, 150],
       ['Sector', businessSector, 50],
       ['Description', description, 2000],
       ['Terms', terms_text, 5000],
       ['Website URL', website_url, 500],
     ]);
     if (lenErr) { res.status(400).json({ message: lenErr }); return; }
+    // Same rule as setup: the public name is mandatory and can never be cleared.
+    const nameErr = requireNonEmpty('Business name', businessName);
+    if (nameErr) { res.status(400).json({ message: nameErr }); return; }
     const urlErr = validateWebsiteUrl(website_url);
     if (urlErr) { res.status(400).json({ message: urlErr }); return; }
     // The sector can be changed but never cleared or set to a value outside the schema's
@@ -291,7 +296,7 @@ export const updateBusiness = async (req: AuthRequest, res: Response): Promise<v
       return;
     }
 
-    await updateBusinessProfile(req.user!.id, { businessSector, description, terms_text, website_url });
+    await updateBusinessProfile(req.user!.id, { businessName, businessSector, description, terms_text, website_url });
     res.status(204).send();
   } catch (error: unknown) {
     if (error instanceof Error && error.message === 'BUSINESS_NOT_FOUND') {

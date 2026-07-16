@@ -125,20 +125,27 @@ describe('setupBusiness — required fields cannot be skipped', () => {
 describe('updateBusiness — sector can change but never to garbage or empty', () => {
   test('rejects clearing the sector', async () => {
     const res = makeRes();
-    await updateBusiness(makeReq({ businessSector: '', description: 'd', terms_text: 't' }), res);
+    await updateBusiness(makeReq({ businessName: 'Joe', businessSector: '', description: 'd', terms_text: 't' }), res);
     expect400(res, 'Please select a valid business sector.');
     expect(mockUpdateProfile).not.toHaveBeenCalled();
   });
 
   test('rejects a sector outside the allowed list', async () => {
     const res = makeRes();
-    await updateBusiness(makeReq({ businessSector: 'Casino', description: 'd', terms_text: 't' }), res);
+    await updateBusiness(makeReq({ businessName: 'Joe', businessSector: 'Casino', description: 'd', terms_text: 't' }), res);
     expect400(res, 'Please select a valid business sector.');
   });
 
-  test('accepts a valid sector change', async () => {
+  test('rejects clearing the business name', async () => {
     const res = makeRes();
-    await updateBusiness(makeReq({ businessSector: 'Bakery', description: 'd', terms_text: 't' }), res);
+    await updateBusiness(makeReq({ businessName: '  ', businessSector: 'Bakery', description: 'd', terms_text: 't' }), res);
+    expect400(res, 'Business name is required.');
+    expect(mockUpdateProfile).not.toHaveBeenCalled();
+  });
+
+  test('accepts a valid sector + name change', async () => {
+    const res = makeRes();
+    await updateBusiness(makeReq({ businessName: 'Joe', businessSector: 'Bakery', description: 'd', terms_text: 't' }), res);
     expect(mockUpdateProfile).toHaveBeenCalled();
     expect(res.status).toHaveBeenCalledWith(204);
   });

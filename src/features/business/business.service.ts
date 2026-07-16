@@ -371,9 +371,9 @@ export const updateBusinessProfile = async (ownerUserId: number, data: UpdateBus
 
   const result = await pool.query(`
     UPDATE business
-    SET sector = $1, description = $2, terms_text = $3, website_url = $4
-    WHERE user_id = $5
-  `, [data.businessSector, data.description, data.terms_text, data.website_url ?? null, ownerUserId]);
+    SET name = $1, sector = $2, description = $3, terms_text = $4, website_url = $5
+    WHERE user_id = $6
+  `, [data.businessName.trim(), data.businessSector, data.description, data.terms_text, data.website_url ?? null, ownerUserId]);
 
   if (result.rowCount === 0) throw new Error('BUSINESS_NOT_FOUND');
 
