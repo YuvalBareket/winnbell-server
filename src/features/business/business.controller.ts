@@ -32,7 +32,8 @@ import { validateLengths } from '../../shared/validation.js';
 // Mirrors the business.sector CHECK constraint in schema.sql. 'Free' is excluded from
 // self-service registration (the client never offers it), so setup/update reject it too.
 const REGISTRATION_SECTORS = [
-  'Food', 'Coffee', 'Bakery', 'Grocery', 'Retail', 'Beauty', 'Health',
+  'Food', 'Coffee', 'Bakery', 'IceCream', 'Grocery', 'Liquor', 'Retail',
+  'Fashion', 'Electronics', 'Books', 'Flowers', 'Pets', 'Beauty', 'Health',
   'Gym', 'Auto', 'Entertainment', 'Education', 'Service',
 ];
 
@@ -329,11 +330,13 @@ export const updateCampaignSettingsController = async (req: AuthRequest, res: Re
 
     if (hasMin) {
       // A specific minimum is mandatory — null/"no minimum" is not allowed when setting it.
+      // Must stay in sync with MIN_RECEIPT_THRESHOLD in client/src/shared/constants/entries.ts
+      const MIN_RECEIPT_THRESHOLD = 10;
       if (
         typeof min_transaction_amount !== 'number' || Number.isNaN(min_transaction_amount) ||
-        min_transaction_amount <= 0 || min_transaction_amount > 100000
+        min_transaction_amount < MIN_RECEIPT_THRESHOLD || min_transaction_amount > 100000
       ) {
-        res.status(400).json({ message: 'A minimum transaction amount is required (a positive number up to 100,000).' });
+        res.status(400).json({ message: 'A minimum transaction amount is required ($10 up to $100,000).' });
         return;
       }
       data.min_transaction_amount = min_transaction_amount;

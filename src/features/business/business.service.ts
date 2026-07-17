@@ -98,6 +98,8 @@ export const getAddress = async (text: string): Promise<{ label: string; placeId
     body: JSON.stringify({
       input: q,
       includedPrimaryTypes: ['street_address', 'route', 'establishment', 'premise', 'point_of_interest'],
+      // US-only platform: never suggest addresses outside the United States
+      includedRegionCodes: ['us'],
     }),
   });
 
