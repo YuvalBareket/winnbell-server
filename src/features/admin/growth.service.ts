@@ -193,11 +193,12 @@ export const getGrowthAnalyticsService = async () => {
              AND created_at >= DATE_TRUNC('month', NOW()))                                        AS entries_this_month
     `),
 
-    // ── §9 geography (from IP-derived state + city, no user-typed field) ────────
+    // ── §9 geography (self-declared state of residence from profile setup; city
+    //    stays IP-derived - there is no user-typed city field) ────────────────────
     pool.query(`
-      SELECT declared_state AS state, COUNT(*) AS count
-      FROM "user" WHERE role = 'User' AND declared_state IS NOT NULL
-      GROUP BY declared_state ORDER BY count DESC LIMIT 15
+      SELECT state, COUNT(*) AS count
+      FROM "user" WHERE role = 'User' AND state IS NOT NULL
+      GROUP BY state ORDER BY count DESC LIMIT 15
     `),
     pool.query(`
       SELECT city, COUNT(*) AS count
