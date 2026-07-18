@@ -86,6 +86,9 @@ export interface IpRegion {
   stateCode: string | null;
   /** City name from the IP geo lookup (ipinfo). Null when detection failed. */
   city: string | null;
+  /** Approximate city-level coordinates from ipinfo's `loc` - used by the client as a
+   *  map-center fallback when browser geolocation is unavailable. */
+  approxLocation: { latitude: number; longitude: number } | null;
 }
 
 /**
@@ -94,24 +97,42 @@ export interface IpRegion {
  * the state codes stored in platform_settings.allowed_states.)
  * Returns nulls on any failure — callers fail open.
  */
+// Loopback/private ranges: only seen in local dev (production traffic always carries a
+// public client IP via Cloudflare). ipinfo can't resolve them, so we query ipinfo without
+// an IP instead - that resolves the DEV MACHINE's own public IP, matching prod behavior.
+const isPrivateIp = (ip: string): boolean =>
+  /^(127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|::1$|::ffff:127\.|f[cd]|fe80)/i.test(ip);
+
 export const getRegionFromIp = async (ip: string): Promise<IpRegion> => {
-  if (!ip) return { country: null, stateCode: null, city: null };
+  if (!ip) return { country: null, stateCode: null, city: null, approxLocation: null };
   try {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 2000);
     const tokenParam = process.env.IPINFO_TOKEN ? `?token=${process.env.IPINFO_TOKEN}` : '';
     // encode the client-controlled IP (from X-Forwarded-For/cf-connecting-ip) so a crafted
     // value can't inject path/query into the external URL or maneuver around the token param.
-    const res = await fetch(`https://ipinfo.io/${encodeURIComponent(ip)}/json${tokenParam}`, { signal: controller.signal });
+    const ipSegment = isPrivateIp(ip) ? '' : `${encodeURIComponent(ip)}/`;
+    const res = await fetch(`https://ipinfo.io/${ipSegment}json${tokenParam}`, { signal: controller.signal });
     clearTimeout(timeout);
-    if (!res.ok) return { country: null, stateCode: null, city: null };
-    const data = await res.json() as { country?: string; region?: string; city?: string };
+    if (!res.ok) return { country: null, stateCode: null, city: null, approxLocation: null };
+    const data = await res.json() as { country?: string; region?: string; city?: string; loc?: string };
     const country = typeof data.country === 'string' && data.country.length === 2 ? data.country : null;
     const stateCode = country === 'US' && data.region ? (US_STATE_NAME_TO_CODE[data.region] ?? null) : null;
     const city = typeof data.city === 'string' && data.city.trim() ? data.city.trim().slice(0, 120) : null;
-    return { country, stateCode, city };
+    // ipinfo `loc` is "lat,lng" (city-level accuracy)
+    let approxLocation: IpRegion['approxLocation'] = null;
+    if (typeof data.loc === 'string') {
+      const [latStr, lngStr] = data.loc.split(',');
+      const latitude = Number(latStr);
+      const longitude = Number(lngStr);
+      if (Number.isFinite(latitude) && Number.isFinite(longitude) &&
+          latitude >= -90 && latitude <= 90 && longitude >= -180 && longitude <= 180) {
+        approxLocation = { latitude, longitude };
+      }
+    }
+    return { country, stateCode, city, approxLocation };
   } catch {
-    return { country: null, stateCode: null, city: null };
+    return { country: null, stateCode: null, city: null, approxLocation: null };
   }
 };
 
@@ -120,6 +141,7 @@ export interface RegionCheckResult {
   country: string | null;
   state: string | null;
   city: string | null;
+  approxLocation: { latitude: number; longitude: number } | null;
 }
 
 /**
@@ -128,14 +150,14 @@ export interface RegionCheckResult {
  * geo-API hiccup never locks out legitimate users.
  */
 export const evaluateRegionRestriction = async (ip: string): Promise<RegionCheckResult> => {
-  const { country, stateCode, city } = await getRegionFromIp(ip);
+  const { country, stateCode, city, approxLocation } = await getRegionFromIp(ip);
   const allowedStates = await getAllowedStates();
 
-  if (allowedStates.length === 0) return { blocked: false, country, state: stateCode, city };
-  if (!country) return { blocked: false, country, state: stateCode, city }; // fail open
-  if (country !== 'US') return { blocked: true, country, state: stateCode, city };
-  if (!stateCode) return { blocked: false, country, state: stateCode, city }; // US, state unknown — fail open
-  return { blocked: !allowedStates.includes(stateCode), country, state: stateCode, city };
+  if (allowedStates.length === 0) return { blocked: false, country, state: stateCode, city, approxLocation };
+  if (!country) return { blocked: false, country, state: stateCode, city, approxLocation }; // fail open
+  if (country !== 'US') return { blocked: true, country, state: stateCode, city, approxLocation };
+  if (!stateCode) return { blocked: false, country, state: stateCode, city, approxLocation }; // US, state unknown — fail open
+  return { blocked: !allowedStates.includes(stateCode), country, state: stateCode, city, approxLocation };
 };
 
 // ── Bot / throwaway-email protection ──────────────────────────────────────────

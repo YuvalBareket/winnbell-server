@@ -293,9 +293,9 @@ export const getRegionConfig = async (_req: Request, res: Response): Promise<voi
 export const checkRegion = async (req: Request, res: Response): Promise<void> => {
   try {
     const result = await authService.evaluateRegionRestriction(getClientIp(req));
-    res.json({ blocked: result.blocked, country: result.country, state: result.state });
+    res.json({ blocked: result.blocked, country: result.country, state: result.state, approx_location: result.approxLocation });
   } catch {
-    res.json({ blocked: false, country: null, state: null });
+    res.json({ blocked: false, country: null, state: null, approx_location: null });
   }
 };
 
