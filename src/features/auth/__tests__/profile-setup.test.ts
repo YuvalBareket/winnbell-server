@@ -178,7 +178,7 @@ describe('completeProfileSetup', () => {
   });
 
   test('rejects a gender outside the allowed set', async () => {
-    await expect(completeProfileSetup(1, yearsAgo(30), 'Other', 'FL')).rejects.toThrow(
+    await expect(completeProfileSetup(1, yearsAgo(30), 'Non-binary', 'FL')).rejects.toThrow(
       'Please select a valid option.',
     );
     expect(mockPoolQuery).not.toHaveBeenCalled();

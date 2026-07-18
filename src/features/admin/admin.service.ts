@@ -1158,11 +1158,13 @@ export const getAdminAnalyticsService = async (businessId?: number, drawId?: num
   for (const row of entrySrcRes.rows) {
     entrySrcMap[row.entry_source] = parseInt(row.count);
   }
-  const entryTotal = Object.values(entrySrcMap).reduce((a, b) => a + b, 0);
+  // The 'code' entry mode was removed from the product: legacy code tickets are
+  // excluded so the total always equals the sum of the reported sources.
+  const entryTotal = ['receipt', 'free', 'promo', 'referral']
+    .reduce((a, k) => a + (entrySrcMap[k] ?? 0), 0);
 
   return {
     entrySourceMix: {
-      code: entrySrcMap['code'] ?? 0,
       receipt: entrySrcMap['receipt'] ?? 0,
       free: entrySrcMap['free'] ?? 0,
       promo: entrySrcMap['promo'] ?? 0,
@@ -1297,7 +1299,6 @@ export const getLocationBreakdownService = async (params: {
          SUM(CASE WHEN t.is_quarantined = FALSE AND t.activated_by_user_id IS NOT NULL THEN 1 ELSE 0 END) AS activated,
          SUM(CASE WHEN t.is_quarantined = TRUE THEN 1 ELSE 0 END) AS quarantined,
          SUM(CASE WHEN t.entry_source = 'receipt' THEN 1 ELSE 0 END) AS receipt_tickets,
-         SUM(CASE WHEN t.entry_source = 'code' THEN 1 ELSE 0 END) AS code_tickets,
          ROUND(AVG(CASE WHEN t.transaction_amount IS NOT NULL THEN t.transaction_amount END)::numeric, 2) AS avg_transaction,
          ROUND(
            100.0 * SUM(CASE WHEN t.transaction_amount IS NOT NULL
@@ -1342,7 +1343,6 @@ export const getLocationBreakdownService = async (params: {
       activated: parseInt(r.activated) || 0,
       quarantined: parseInt(r.quarantined) || 0,
       receipt_tickets: parseInt(r.receipt_tickets) || 0,
-      code_tickets: parseInt(r.code_tickets) || 0,
       avg_transaction: r.avg_transaction ? parseFloat(r.avg_transaction) : null,
       pct_just_above_threshold: r.pct_just_above_threshold ? parseFloat(r.pct_just_above_threshold) : null,
     })),

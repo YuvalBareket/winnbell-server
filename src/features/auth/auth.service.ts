@@ -654,7 +654,7 @@ export const syncExternalUser = async (
 };
 
 // Allowed values mirror the user_gender_check constraint in schema.sql.
-export const GENDER_OPTIONS = ['Female', 'Male', 'Non-binary', 'Prefer not to say'] as const;
+export const GENDER_OPTIONS = ['Female', 'Male', 'Other', 'Prefer not to say'] as const;
 
 // Step-2 profile setup (consumers + location managers): saves date of birth, gender,
 // and state of residence (only states where Winnbell operates, per platform settings).
