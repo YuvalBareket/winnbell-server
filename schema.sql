@@ -19,6 +19,8 @@ CREATE TYPE draw_status_enum AS ENUM ('Upcoming', 'Open', 'Closed');
 
 CREATE TYPE ticket_status_enum AS ENUM ('Issued', 'Activated');
 
+-- 'code' is legacy: the business-generated-code entry mode was removed from the
+-- product (receipt-only now); the value stays so historical ticket rows keep loading.
 CREATE TYPE entry_source_enum AS ENUM ('code', 'receipt', 'free', 'promo', 'referral');
 
 CREATE TYPE image_validation_enum AS ENUM ('not_required', 'pending', 'passed', 'failed', 'ocr_error');
@@ -26,8 +28,6 @@ CREATE TYPE image_validation_enum AS ENUM ('not_required', 'pending', 'passed', 
 CREATE TYPE subscription_status_enum AS ENUM ('Active', 'Trialing', 'Past_Due', 'Cancelled', 'Incomplete');
 
 CREATE TYPE billing_interval_enum AS ENUM ('monthly', 'yearly');
-
-CREATE TYPE entry_mode_enum AS ENUM ('receipt', 'code');
 
 CREATE TYPE free_ticket_status_enum AS ENUM ('approved', 'rejected');
 
@@ -113,8 +113,6 @@ CREATE TABLE business (
   terms_text                      TEXT,
   logo_url                        TEXT,
   receipt_example_image_url       TEXT,
-  -- entry_mode: 'receipt' = user submits receipt; 'code' = business generates codes
-  entry_mode                      entry_mode_enum NOT NULL DEFAULT 'receipt',
   -- A specific minimum is MANDATORY (no "no minimum" option). NOT NULL DEFAULT 50 so
   -- every business always has a concrete threshold; pending stays nullable where NULL
   -- unambiguously means "no pending change" (the value itself can never be null).
@@ -302,10 +300,10 @@ CREATE TABLE ticket (
   -- BIGSERIAL: the ticket table is the app's fastest-growing table; a 32-bit id would need a
   -- painful full-table rewrite to widen later, so it is 64-bit from day one.
   id                      BIGSERIAL PRIMARY KEY,
-  -- 6-char (batch/code mode) or 8-char (receipt/free mode) alphanumeric code
+  -- 8-char alphanumeric winner-verification code shown at the counter
   code                    VARCHAR(10) UNIQUE NOT NULL,
   status                  ticket_status_enum NOT NULL DEFAULT 'Issued',
-  entry_source            entry_source_enum NOT NULL DEFAULT 'code',
+  entry_source            entry_source_enum NOT NULL DEFAULT 'receipt',
   business_id             INTEGER REFERENCES business(id) ON DELETE RESTRICT,
   location_id             INTEGER REFERENCES business_location(id) ON DELETE SET NULL,
   draw_id                 INTEGER REFERENCES draw(id) ON DELETE RESTRICT,

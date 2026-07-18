@@ -1402,7 +1402,6 @@ export const getBusinessDetailService = async (businessId: number) => {
         b.name,
         b.sector,
         b.description,
-        b.entry_mode,
         b.min_transaction_amount,
         b.website_url,
         b.logo_url,

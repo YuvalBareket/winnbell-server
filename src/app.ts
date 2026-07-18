@@ -17,11 +17,9 @@ import { resolveReferral } from './features/referral/referral.controller.js';
 import { Router } from 'express';
 import {
   getNearby,
-  getParticipating,
   getLocationProfileById,
   getParticipatingLocationById,
   searchParticipatingLocations,
-  getEntryMode,
   getAddressController,
   getAddressCoordsController,
 } from './features/business/business.controller.js';
@@ -183,11 +181,9 @@ app.use('/auth', authLimiter, authRoutes);
 // discovery budget intact while letting authed dashboard traffic use businessLimiter instead.
 const publicBusinessRouter = Router();
 publicBusinessRouter.get('/nearby', publicLimiter, getNearby);
-publicBusinessRouter.get('/participating', publicLimiter, getParticipating);
 publicBusinessRouter.get('/participating/locations/search', publicLimiter, searchParticipatingLocations);
 publicBusinessRouter.get('/locations/:locationId/profile', publicLimiter, optionalAuth, getLocationProfileById);
 publicBusinessRouter.get('/participating/locations/:locationId', publicLimiter, getParticipatingLocationById);
-publicBusinessRouter.get('/mode', publicLimiter, getEntryMode);
 publicBusinessRouter.post('/address', publicLimiter, getAddressController);
 publicBusinessRouter.get('/address-coords', publicLimiter, getAddressCoordsController);
 publicBusinessRouter.get('/subscription/founding-availability', publicLimiter, getFoundingAvailability);

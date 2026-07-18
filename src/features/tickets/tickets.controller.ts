@@ -1,28 +1,9 @@
 import { Response } from 'express';
 import * as ticketService from './tickets.service.js';
-import { getBusinessLocationsByUserId } from '../business/business.service.js';
 import { getPool } from '../../shared/db/db.js';
 import { AuthRequest } from '../../shared/middleware/auth.middleware.js';
 import { validateLength } from '../../shared/validation.js';
 import { getClientIp } from '../../shared/clientIp.js';
-
-export const redeemCode = async (req: AuthRequest, res: Response) => {
-  try {
-    const { code } = req.body;
-    if (!code || typeof code !== 'string' || !/^[A-Z0-9]{6,8}$/.test(code)) {
-      res.status(400).json({ message: 'Invalid ticket code format' });
-      return;
-    }
-    const userId = req.user!.id;
-
-    const result = await ticketService.activateTicket(code, userId);
-    res.status(200).json(result);
-  } catch (error: unknown) {
-    // Surface the service's curated, user-facing message (already used, draw closed, cap reached, etc.).
-    const message = error instanceof Error && error.message ? error.message : 'Redeem failed';
-    res.status(400).json({ message });
-  }
-};
 
 export const getMyTickets = async (req: AuthRequest, res: Response) => {
   try {
@@ -143,43 +124,6 @@ export const submitReceiptEntry = async (req: AuthRequest, res: Response) => {
     // Surface the service's curated, user-facing message (threshold, dates, duplicates, etc.).
     const message = error instanceof Error && error.message ? error.message : 'Entry submission failed.';
     res.status(400).json({ message });
-  }
-};
-
-export const generateTicket = async (req: AuthRequest, res: Response) => {
-  try {
-    const user_id = req.user!.id;
-
-    // If the user is a manager (has a location_id in their JWT), they can ONLY generate tickets
-    // for their own assigned location — reject any attempt to target a different location.
-    const jwtLocationId = req.user!.location_id ?? null;
-    if (jwtLocationId && req.body?.location_id && Number(req.body.location_id) !== jwtLocationId) {
-      res.status(403).json({ message: 'Forbidden: cannot generate tickets for another location.' });
-      return;
-    }
-
-    let location_id: number | undefined = (jwtLocationId ?? req.body?.location_id) || undefined;
-
-    if (!location_id) {
-      const businessLocations = await getBusinessLocationsByUserId(user_id);
-
-      if (!businessLocations || businessLocations.length === 0) {
-        res.status(400).json({
-          message: 'No locations found for this business. A location is required to issue a ticket.',
-        });
-        return;
-      }
-
-      location_id = businessLocations[0].id;
-    }
-
-    const result = await ticketService.generateTicketService(user_id, Number(location_id));
-
-    res.status(201).json({ success: true, code: result.code });
-  } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : '';
-    const status = msg.includes('Unauthorized') || msg.includes('cannot') ? 403 : 400;
-    res.status(status).json({ message: 'Failed to generate ticket' });
   }
 };
 

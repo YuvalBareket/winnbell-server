@@ -1,5 +1,6 @@
-// Entry source distinguishes MVP code-based entries from v2 receipt-based entries
-export type EntrySource = 'code' | 'receipt';
+// How the ticket entered the draw. 'code' is legacy only (the business-generated
+// code entry mode was removed; historical rows may still carry it).
+export type EntrySource = 'code' | 'receipt' | 'free' | 'promo' | 'referral';
 
 export interface ITicket {
   id: number;

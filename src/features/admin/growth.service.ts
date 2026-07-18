@@ -129,7 +129,7 @@ export const getGrowthAnalyticsService = async () => {
         SELECT activated_by_user_id AS uid,
                COUNT(*) AS entries,
                COUNT(DISTINCT business_id) AS biz,
-               COUNT(*) FILTER (WHERE entry_source IN ('receipt','code')) AS purchase_entries
+               COUNT(*) FILTER (WHERE entry_source = 'receipt') AS purchase_entries
         FROM ticket
         WHERE is_quarantined = FALSE AND activated_by_user_id IS NOT NULL
           AND created_at >= DATE_TRUNC('month', NOW())

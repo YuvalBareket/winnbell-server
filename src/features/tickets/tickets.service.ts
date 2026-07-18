@@ -5,13 +5,12 @@ import { invalidatePublicLocation } from '../../shared/cache/cache.js';
 import {
   ActivationResult,
   FreeTicketStatus,
-  ITicket,
   ReceiptEntryInput,
 } from './tickets.types.js';
 
 const MAX_ENTRIES_PER_RECEIPT = 3;
 // Hard per-user cap on total entries in a single draw, across ALL entry types
-// (scanned code, free weekly, receipt, promo). Change here only (client mirrors it
+// (free weekly, receipt, promo, referral). Change here only (client mirrors it
 // in its own constant). This is a legal/fairness limit and must never be exceeded.
 export const MAX_ENTRIES_PER_DRAW = 30;
 import {
@@ -24,74 +23,6 @@ import {
 } from '../risk/risk.service.js';
 import { RISK_THRESHOLDS } from '../risk/risk.types.js';
 import { validateReceiptAsync } from '../ocr/ocr.service.js';
-
-export const activateTicket = async (code: string, userId: number) => {
-  const pool = getPool();
-  const client = await pool.connect();
-
-  try {
-    await client.query('BEGIN');
-
-    const checkResult = await client.query(`
-      SELECT t.id, t.status, t.business_id, t.location_id, t.draw_id, d.status as draw_status
-      FROM ticket t
-      LEFT JOIN draw d ON t.draw_id = d.id
-      WHERE t.code = $1
-    `, [code]);
-
-    const ticket = checkResult.rows[0];
-    if (!ticket) throw new Error('Invalid ticket code.');
-    if (ticket.draw_status?.toUpperCase() !== 'OPEN') throw new Error('The draw for this ticket is already closed.');
-
-    const ownerCheck = await client.query(`
-      SELECT 1 FROM business WHERE id = $1 AND user_id = $2
-      UNION ALL
-      SELECT 1 FROM business_location WHERE business_id = $1 AND manager_user_id = $2
-      LIMIT 1
-    `, [ticket.business_id, userId]);
-    if (ownerCheck.rows.length > 0) {
-      throw new Error('Business owners and managers cannot activate tickets for their own business.');
-    }
-
-    // Shared per-user cap lock: ALL entry types (code/free/receipt/promo) serialize on this
-    // one key before the per-draw cap check, so parallel multi-type requests can't each read
-    // count-1 and all commit past the cap. One open draw at a time, so per-user == per-draw here.
-    await client.query(`SELECT pg_advisory_xact_lock(10, hashtext('udcap:' || $1::text))`, [userId]);
-
-    // Cap counts ALL of the user's tickets in this draw (including under-review ones),
-    // matching the total they see — so the visible entry count can never exceed the cap.
-    const drawCapResult = await client.query(
-      `SELECT COUNT(*) AS count FROM ticket
-       WHERE activated_by_user_id = $1 AND draw_id = $2`,
-      [userId, ticket.draw_id],
-    );
-    if (parseInt(drawCapResult.rows[0].count, 10) >= MAX_ENTRIES_PER_DRAW) {
-      throw new Error(`You have reached the maximum of ${MAX_ENTRIES_PER_DRAW} entries for this draw.`);
-    }
-
-    const updateResult = await client.query(`
-      UPDATE ticket
-      SET status = 'Activated',
-          activated_by_user_id = $1,
-          activated_at = NOW()
-      WHERE code = $2
-        AND status = 'Issued'
-        AND draw_id IN (SELECT id FROM draw WHERE status = 'Open')
-    `, [userId, code]);
-
-    if (updateResult.rowCount === 0) throw new Error('This ticket has already been used or the draw is no longer open.');
-
-    await client.query('COMMIT');
-    // Activating a ticket changes only this location's cap_reached count.
-    if (ticket.location_id != null) invalidatePublicLocation(ticket.location_id);
-    return { message: 'Ticket activated successfully!' };
-  } catch (err) {
-    await client.query('ROLLBACK');
-    throw err;
-  } finally {
-    client.release();
-  }
-};
 
 export const getUserTicketsService = async (userId: number, drawId: number) => {
   const pool = getPool();
@@ -906,73 +837,3 @@ export const activatePromotionalEntry = async (
   }
 };
 
-export const generateTicketService = async (user_id: number, location_id: number) => {
-  const pool = getPool();
-  const client = await pool.connect();
-
-  try {
-    await client.query('BEGIN');
-
-    // Entitlement = membership in the OPEN campaign (draw_entry), NOT subscription status.
-    // Billing runs on the 24th while campaigns run to month end, so a business that
-    // cancelled (subscription ended on the 24th) still owns the campaign it paid for and
-    // must keep issuing entries until it closes. draw_entry only ever contains businesses
-    // that paid for the campaign, so it is the correct paid-access record.
-    const authInfo = await client.query(`
-      SELECT bl.business_id, bl.id as location_id,
-             COALESCE(s.entries_per_location, ps.global_entry_cap) AS entries_per_location
-      FROM business_location bl
-      JOIN business b ON bl.business_id = b.id
-      LEFT JOIN subscription s ON s.business_id = b.id
-      LEFT JOIN platform_settings ps ON ps.id = 1
-      WHERE bl.id = $1
-        AND (b.user_id = $2 OR bl.manager_user_id = $2)
-        AND bl.is_active = true
-        AND EXISTS (
-          SELECT 1 FROM draw_entry de
-          JOIN draw d ON d.id = de.draw_id
-          WHERE de.business_id = b.id AND d.status = 'Open'
-        )
-    `, [location_id, user_id]);
-
-    if (authInfo.rows.length === 0) {
-      throw new Error('Unauthorized or inactive location. Ticket cannot be issued.');
-    }
-
-    const { business_id, entries_per_location } = authInfo.rows[0];
-    // Falls back to platform global_entry_cap (same as the receipt path); NULL = unlimited
-    const entry_cap: number | null = entries_per_location != null ? Number(entries_per_location) : null;
-
-    const drawId = await getOpenDrawId(client);
-    if (!drawId) throw new Error('No active campaign found. Please contact admin.');
-
-    // Entry cap enforcement — NULL cap means unlimited (MVP default)
-    // Quarantined tickets do not consume the cap
-    if (entry_cap !== null) {
-      const capCheck = await client.query(
-        `SELECT COUNT(*) AS count FROM ticket
-         WHERE location_id = $1 AND draw_id = $2 AND is_quarantined = FALSE`,
-        [location_id, drawId],
-      );
-      if (parseInt(capCheck.rows[0].count) >= entry_cap) {
-        throw new Error('We\'re sorry, this location has run out of entries for the current campaign. This is not your fault - try visiting another participating location!');
-      }
-    }
-
-    const code = await generateGlobalUniqueCode(client);
-
-    await client.query(`
-      INSERT INTO ticket (code, status, entry_source, business_id, location_id, draw_id, created_at)
-      VALUES ($1, 'Issued', 'code', $2, $3, $4, NOW())
-    `, [code, business_id, location_id, drawId]);
-
-    await client.query('COMMIT');
-    invalidatePublicLocation(location_id);
-    return { code };
-  } catch (error) {
-    await client.query('ROLLBACK');
-    throw error;
-  } finally {
-    client.release();
-  }
-};

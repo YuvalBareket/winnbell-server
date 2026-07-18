@@ -203,7 +203,6 @@ export const getMyBusinessData = async (userId: number, managedLocationId?: numb
         b.terms_text,
         b.logo_url,
         b.receipt_example_image_url,
-        b.entry_mode,
         b.min_transaction_amount,
         b.pending_min_transaction_amount,
         b.website_url,
@@ -488,53 +487,6 @@ export const updateBusinessLogo = async (ownerUserId: number, logoUrl: string): 
   if (result.rowCount === 0) throw new Error('BUSINESS_NOT_FOUND');
 
   invalidatePublicBusinessData();
-};
-
-export const getEntryModeService = async (): Promise<{ entry_mode: string }> => {
-  const CACHE_KEY = 'business:entry_mode';
-  const cached = publicCache.get<{ entry_mode: string }>(CACHE_KEY);
-  if (cached !== undefined) return cached;
-
-  const pool = getPool();
-  const result = await pool.query(
-    `SELECT b.entry_mode FROM business b
-     WHERE EXISTS (
-       SELECT 1 FROM draw_entry de
-       JOIN draw d ON d.id = de.draw_id
-       WHERE de.business_id = b.id AND d.status = 'Open'
-     )
-     LIMIT 1`,
-  );
-  const value = { entry_mode: result.rows[0]?.entry_mode ?? 'receipt' };
-  publicCache.set(CACHE_KEY, value, 300);
-  return value;
-};
-
-export const getParticipatingBusinessesService = async () => {
-  const CACHE_KEY = 'business:participating';
-  const cached = publicCache.get(CACHE_KEY);
-  if (cached !== undefined) return cached;
-
-  const pool = getPool();
-
-  const result = await pool.query(`
-    SELECT b.id, b.name, b.sector, b.logo_url, b.entry_mode
-    FROM business b
-    WHERE EXISTS (
-      SELECT 1 FROM draw_entry de
-      JOIN draw d ON d.id = de.draw_id
-      WHERE de.business_id = b.id AND d.status = 'Open'
-    )
-    ORDER BY b.name ASC
-  `);
-
-  const businesses = result.rows;
-  // All participating businesses share the same entry_mode; default to 'receipt' if none found
-  const entry_mode = businesses[0]?.entry_mode ?? 'receipt';
-
-  const value = { entry_mode, businesses };
-  publicCache.set(CACHE_KEY, value, 60);
-  return value;
 };
 
 export const searchParticipatingLocationsService = async (query: string): Promise<ParticipatingLocation[]> => {

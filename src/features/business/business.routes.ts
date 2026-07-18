@@ -6,10 +6,8 @@ import {
   createInviteLink,
   deleteLocation,
   getAddressController,
-  getEntryMode,
   getMyBusiness,
   getNearby,
-  getParticipating,
   getUploadUrl,
   getLocationProfileById,
   getParticipatingLocationById,
@@ -29,11 +27,9 @@ const router = Router();
 
 // ── Public routes (no auth required) — these are also mounted in app.ts BEFORE authenticateToken ──
 router.get('/nearby', getNearby);
-router.get('/participating', getParticipating);
 router.get('/participating/locations/search', searchParticipatingLocations);
 router.get('/locations/:locationId/profile', getLocationProfileById);
 router.get('/participating/locations/:locationId', getParticipatingLocationById);
-router.get('/mode', getEntryMode);
 // /address is handled by publicBusinessRouter in app.ts with rate limiter
 router.get('/subscription/founding-availability', getFoundingAvailability);
 

@@ -36,11 +36,6 @@ export interface MyBusinessLocation {
   is_active: boolean;
 }
 
-// Entry mode controls how customers submit entries for this business.
-// 'code'    = MVP: business generates codes, customers activate them
-// 'receipt' = v2: customers self-submit receipt identifier + amount
-export type EntryMode = 'code' | 'receipt';
-
 /** Shape returned by getMyBusinessData */
 export interface MyBusinessData {
   id: number;
@@ -51,7 +46,6 @@ export interface MyBusinessData {
   logo_url: string | null;
   receipt_example_image_url: string | null;
   is_subscribed: boolean;
-  entry_mode: EntryMode;
   entries_per_location: number | null;   // from subscription; NULL = falls back to global cap
   min_transaction_amount: number | null; // NULL = no minimum
   global_entry_cap: number | null;       // platform ceiling set by admin

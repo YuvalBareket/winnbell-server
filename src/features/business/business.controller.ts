@@ -10,10 +10,8 @@ import {
   deleteBusinessLocation,
   getAddress,
   getAddressCoords,
-  getEntryModeService,
   getMyBusinessData,
   getNearbyBusinessesService,
-  getParticipatingBusinessesService,
   getLocationProfileByIdService,
   getParticipatingLocationByIdService,
   removeLocationManagerService,
@@ -71,23 +69,6 @@ const validateWebsiteUrl = (url: unknown): string | null => {
   }
 };
 
-export const getEntryMode = async (_req: Request, res: Response) => {
-  try {
-    const result = await getEntryModeService();
-    res.json(result);
-  } catch (err: unknown) {
-    res.status(500).json({ error: 'Server error' });
-  }
-};
-
-export const getParticipating = async (_req: Request, res: Response) => {
-  try {
-    const result = await getParticipatingBusinessesService();
-    res.json(result);
-  } catch (err: unknown) {
-    res.status(500).json({ error: 'Server error' });
-  }
-};
 
 export const searchParticipatingLocations = async (req: Request, res: Response) => {
   try {

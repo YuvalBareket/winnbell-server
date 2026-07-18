@@ -19,7 +19,6 @@ export const platformCache = new NodeCache({ stdTTL: 300, checkperiod: 600 });
 export interface PlatformSettings {
   allowed_states: string[];
   entries_per_location: number;
-  global_entry_mode: string;
   founding_member_cap: number;
   founding_member_price_cents: number;
   founding_phase_active?: boolean;
