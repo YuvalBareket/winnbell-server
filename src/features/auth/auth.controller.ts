@@ -104,29 +104,29 @@ export const login = async (req: Request, res: Response) => {
   }
 };
 
-// POST /auth/profile-setup  body: { dateOfBirth: 'YYYY-MM-DD', gender }
+// POST /auth/profile-setup  body: { dateOfBirth: 'YYYY-MM-DD', gender, state }
 // Step-2 profile setup for consumers and location managers (authenticated).
 export const profileSetup = async (req: Request, res: Response): Promise<void> => {
   const userId = req.user?.id;
   if (!userId) { res.status(401).json({ message: 'Unauthorized' }); return; }
 
-  const { dateOfBirth, gender } = req.body ?? {};
-  if (!dateOfBirth || !gender) {
-    res.status(400).json({ message: 'Date of birth and gender are required' });
+  const { dateOfBirth, gender, state } = req.body ?? {};
+  if (!dateOfBirth || !gender || !state) {
+    res.status(400).json({ message: 'Date of birth, gender, and state are required' });
     return;
   }
-  const lenErr = validateLengths([['Date of birth', dateOfBirth, 10], ['Gender', gender, 20]]);
+  const lenErr = validateLengths([['Date of birth', dateOfBirth, 10], ['Gender', gender, 20], ['State', state, 2]]);
   if (lenErr) { res.status(400).json({ message: lenErr }); return; }
 
   try {
-    const result = await authService.completeProfileSetup(userId, dateOfBirth, gender);
+    const result = await authService.completeProfileSetup(userId, dateOfBirth, gender, state);
     res.json({ message: 'Profile updated', ...result });
   } catch (error: unknown) {
     if (error instanceof Error && error.message === 'User not found') {
       res.status(404).json({ message: 'User not found' });
       return;
     }
-    if (error instanceof Error && error.message.startsWith('Please') || error instanceof Error && error.message.startsWith('You must')) {
+    if (error instanceof Error && (error.message.startsWith('Please') || error.message.startsWith('You must'))) {
       // Validation errors from the service carry user-facing messages
       res.status(400).json({ message: error.message });
       return;

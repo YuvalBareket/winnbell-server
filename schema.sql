@@ -79,6 +79,9 @@ CREATE TABLE "user" (
   -- NULL until the user completes the step; drives requiresProfileSetup in auth payloads.
   date_of_birth        DATE NULL,
   gender               VARCHAR(20) NULL CHECK (gender IN ('Female', 'Male', 'Non-binary', 'Prefer not to say')),
+  -- Self-declared U.S. state of residence (2-letter code), collected at step-2 profile
+  -- setup. Validated against platform_settings.allowed_states at write time.
+  state                VARCHAR(2) NULL CHECK (state ~ '^[A-Z]{2}$'),
   created_at           TIMESTAMP NOT NULL DEFAULT NOW(),
   updated_at           TIMESTAMP NOT NULL DEFAULT NOW()
 );

@@ -196,7 +196,7 @@ export const registerUser = async (
     const result = await client.query(
       `INSERT INTO "user" (full_name, email, password_hash, role, registration_ip)
        VALUES ($1, $2, $3, 'User', $4)
-       RETURNING id, role, full_name, email, is_phone_verified, token_epoch, date_of_birth::text AS date_of_birth, gender, created_at`,
+       RETURNING id, role, full_name, email, is_phone_verified, token_epoch, date_of_birth::text AS date_of_birth, gender, state, created_at`,
       [fullName, email, passwordHash, registrationIp ?? null],
     );
     const newUser = result.rows[0];
@@ -273,9 +273,10 @@ export const registerUser = async (
         role: newUser.role,
         location_id: locationId,
         requiresBusinessSetup: newUser.role === 'Business' && !inviteToken,
-        requiresProfileSetup: needsProfileSetup(newUser.role, locationId, newUser.date_of_birth, newUser.gender),
+        requiresProfileSetup: needsProfileSetup(newUser.role, locationId, newUser.date_of_birth, newUser.gender, newUser.state),
         dateOfBirth: newUser.date_of_birth ?? null,
         gender: newUser.gender ?? null,
+        state: newUser.state ?? null,
         created_at: newUser.created_at,
         isPhoneVerified: newUser.is_phone_verified,
       },
@@ -290,14 +291,15 @@ export const registerUser = async (
 
 // Step-2 profile setup applies to consumers and location managers (role Business WITH a
 // location) - business owners have their own setup wizard and admins are exempt. True until
-// the user has saved both a date of birth and a gender.
+// the user has saved a date of birth, a gender, and a state of residence.
 const needsProfileSetup = (
   role: string,
   locationId: number | null,
   dateOfBirth: unknown,
   gender: unknown,
+  state: unknown,
 ): boolean =>
-  (role === 'User' || (role === 'Business' && !!locationId)) && (!dateOfBirth || !gender);
+  (role === 'User' || (role === 'Business' && !!locationId)) && (!dateOfBirth || !gender || !state);
 
 export const loginUser = async (
   email: string,
@@ -308,7 +310,7 @@ export const loginUser = async (
   email = email.toLowerCase().trim();
 
   const result = await pool.query(
-    `SELECT id, email, password_hash, full_name, role, is_phone_verified, token_epoch, date_of_birth::text AS date_of_birth, gender, created_at FROM "user" WHERE email = $1 AND is_active = true`,
+    `SELECT id, email, password_hash, full_name, role, is_phone_verified, token_epoch, date_of_birth::text AS date_of_birth, gender, state, created_at FROM "user" WHERE email = $1 AND is_active = true`,
     [email],
   );
   const user = result.rows[0];
@@ -427,9 +429,10 @@ export const loginUser = async (
       location_id: locationId,
       business_id: businessId,
       requiresBusinessSetup: user.role === 'Business' && !locationId && !hasBusiness,
-      requiresProfileSetup: needsProfileSetup(user.role, locationId, user.date_of_birth, user.gender),
+      requiresProfileSetup: needsProfileSetup(user.role, locationId, user.date_of_birth, user.gender, user.state),
       dateOfBirth: user.date_of_birth ?? null,
       gender: user.gender ?? null,
+      state: user.state ?? null,
       created_at: user.created_at,
       businessIsActive,
       businessLogoUrl,
@@ -527,7 +530,7 @@ export const syncExternalUser = async (
              registration_ip = COALESCE("user".registration_ip, EXCLUDED.registration_ip),
              city = COALESCE("user".city, EXCLUDED.city),
              updated_at = NOW()
-       RETURNING id, role, full_name AS "fullName", email, token_epoch, date_of_birth::text AS date_of_birth, gender, created_at`,
+       RETURNING id, role, full_name AS "fullName", email, token_epoch, date_of_birth::text AS date_of_birth, gender, state, created_at`,
       [externalId, email, fullName, role, detectedState, safeIp, detectedCity],
     );
     const dbUser = upsertResult.rows[0];
@@ -634,9 +637,10 @@ export const syncExternalUser = async (
         location_id: locationId,
         business_id: businessId,
         requiresBusinessSetup: dbUser.role === 'Business' && !locationId && !hasBusiness,
-        requiresProfileSetup: needsProfileSetup(dbUser.role, locationId, dbUser.date_of_birth, dbUser.gender),
+        requiresProfileSetup: needsProfileSetup(dbUser.role, locationId, dbUser.date_of_birth, dbUser.gender, dbUser.state),
         dateOfBirth: dbUser.date_of_birth ?? null,
         gender: dbUser.gender ?? null,
+        state: dbUser.state ?? null,
         businessIsActive,
         businessLogoUrl,
       },
@@ -652,13 +656,15 @@ export const syncExternalUser = async (
 // Allowed values mirror the user_gender_check constraint in schema.sql.
 export const GENDER_OPTIONS = ['Female', 'Male', 'Non-binary', 'Prefer not to say'] as const;
 
-// Step-2 profile setup (consumers + location managers): saves date of birth + gender.
+// Step-2 profile setup (consumers + location managers): saves date of birth, gender,
+// and state of residence (only states where Winnbell operates, per platform settings).
 // Validation errors throw with a user-facing message; the controller maps them to 400.
 export const completeProfileSetup = async (
   userId: number,
   dateOfBirth: string,
   gender: string,
-): Promise<{ dateOfBirth: string; gender: string }> => {
+  state: string,
+): Promise<{ dateOfBirth: string; gender: string; state: string }> => {
   if (typeof dateOfBirth !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(dateOfBirth)) {
     throw new Error('Please enter a valid date of birth.');
   }
@@ -687,19 +693,28 @@ export const completeProfileSetup = async (
   if (!GENDER_OPTIONS.includes(gender as (typeof GENDER_OPTIONS)[number])) {
     throw new Error('Please select a valid option.');
   }
+  const stateCode = typeof state === 'string' ? state.trim().toUpperCase() : '';
+  if (!/^[A-Z]{2}$/.test(stateCode)) {
+    throw new Error('Please select your state.');
+  }
+  // Only states where Winnbell operates (empty list = no restriction configured).
+  const allowedStates = await getAllowedStates();
+  if (allowedStates.length > 0 && !allowedStates.includes(stateCode)) {
+    throw new Error('Please select a state where Winnbell operates.');
+  }
 
   const pool = getPool();
   const result = await pool.query(
-    `UPDATE "user" SET date_of_birth = $1, gender = $2, updated_at = NOW()
-     WHERE id = $3 AND is_active = TRUE
-     RETURNING date_of_birth::text AS date_of_birth, gender`,
-    [dateOfBirth, gender, userId],
+    `UPDATE "user" SET date_of_birth = $1, gender = $2, state = $3, updated_at = NOW()
+     WHERE id = $4 AND is_active = TRUE
+     RETURNING date_of_birth::text AS date_of_birth, gender, state`,
+    [dateOfBirth, gender, stateCode, userId],
   );
   if (result.rowCount === 0) {
     throw new Error('User not found');
   }
   invalidateUserAuth(userId);
-  return { dateOfBirth: result.rows[0].date_of_birth, gender: result.rows[0].gender };
+  return { dateOfBirth: result.rows[0].date_of_birth, gender: result.rows[0].gender, state: result.rows[0].state };
 };
 
 // Update the user's display name from Settings. Our "user".full_name is the source of truth

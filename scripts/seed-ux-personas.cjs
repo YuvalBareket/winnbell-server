@@ -45,11 +45,15 @@ async function upsertUser(key, { fullName, role = 'User', phoneVerified = true, 
   const hash = await bcrypt.hash(PW, 10);
   const r = await q(
     `INSERT INTO "user" (email, full_name, password_hash, role, is_active, is_email_verified,
-                         phone_number, is_phone_verified, risk_score, referral_code, declared_state, city)
-     VALUES ($1,$2,$3,$4,TRUE,TRUE,$5,$6,$7,$8,'NY','New York')
+                         phone_number, is_phone_verified, risk_score, referral_code, declared_state, city,
+                         date_of_birth, gender, state)
+     VALUES ($1,$2,$3,$4,TRUE,TRUE,$5,$6,$7,$8,'NY','New York','1995-06-15','Prefer not to say','FL')
      ON CONFLICT (email) DO UPDATE SET
        full_name=$2, role=$4, is_active=TRUE, phone_number=$5, is_phone_verified=$6,
-       risk_score=$7, referral_code=COALESCE($8, "user".referral_code)
+       risk_score=$7, referral_code=COALESCE($8, "user".referral_code),
+       date_of_birth=COALESCE("user".date_of_birth, EXCLUDED.date_of_birth),
+       gender=COALESCE("user".gender, EXCLUDED.gender),
+       state=COALESCE("user".state, EXCLUDED.state)
      RETURNING id, email, full_name, role, is_phone_verified`,
     [email, fullName, hash, role, phone ?? null, phoneVerified, riskScore, referralCode],
   );

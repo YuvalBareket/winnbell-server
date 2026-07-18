@@ -114,7 +114,7 @@ async function getGuardData(userId: number, res: Response): Promise<GuardData | 
     const pool = getPool();
     const result = await pool.query(
       `SELECT is_active, is_phone_verified,
-              (date_of_birth IS NOT NULL AND gender IS NOT NULL) AS profile_complete
+              (date_of_birth IS NOT NULL AND gender IS NOT NULL AND state IS NOT NULL) AS profile_complete
        FROM "user" WHERE id = $1`,
       [userId],
     );
