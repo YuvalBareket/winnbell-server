@@ -166,8 +166,9 @@ export const createFullBusinessProfile = async (userId: number, data: BusinessSe
       `INSERT INTO business (user_id, name, sector, description, website_url, logo_url, min_transaction_amount)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING id`,
-      // A specific minimum is mandatory; default to $50 when the setup form omits one.
-      [userId, data.businessName, data.businessSector, data.description, data.website_url || null, data.logo_url || null, data.min_transaction_amount ?? 50],
+      // A specific minimum is mandatory; default to $20 when the setup form omits one
+      // (the subscribe flow no longer collects it - owners tune it in the Business Hub).
+      [userId, data.businessName, data.businessSector, data.description, data.website_url || null, data.logo_url || null, data.min_transaction_amount ?? 20],
     );
     const businessId = businessResult.rows[0].id;
 

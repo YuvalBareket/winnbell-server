@@ -113,10 +113,11 @@ CREATE TABLE business (
   terms_text                      TEXT,
   logo_url                        TEXT,
   receipt_example_image_url       TEXT,
-  -- A specific minimum is MANDATORY (no "no minimum" option). NOT NULL DEFAULT 50 so
-  -- every business always has a concrete threshold; pending stays nullable where NULL
-  -- unambiguously means "no pending change" (the value itself can never be null).
-  min_transaction_amount          NUMERIC(10, 2) NOT NULL DEFAULT 50 CHECK (min_transaction_amount > 0),
+  -- A specific minimum is MANDATORY (no "no minimum" option). NOT NULL DEFAULT 20 so
+  -- every business always has a concrete threshold (subscribing no longer collects one
+  -- up front - it starts at $20 and is edited in the Business Hub); pending stays
+  -- nullable where NULL unambiguously means "no pending change".
+  min_transaction_amount          NUMERIC(10, 2) NOT NULL DEFAULT 20 CHECK (min_transaction_amount > 0),
   pending_min_transaction_amount  NUMERIC(10, 2) NULL CHECK (pending_min_transaction_amount IS NULL OR pending_min_transaction_amount > 0),
   website_url                     TEXT,
   created_at                      TIMESTAMP NOT NULL DEFAULT NOW(),
