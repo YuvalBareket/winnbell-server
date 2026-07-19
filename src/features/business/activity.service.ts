@@ -33,6 +33,7 @@ export interface CampaignListItem {
   draw_id: number;
   name: string;
   prize_amount: number;
+  start_date: string;
   draw_date: string;
   status: string;      // 'Open' | 'Closed' | 'Upcoming'
   is_current: boolean; // status === 'Open'
@@ -44,6 +45,7 @@ export interface CampaignHeader {
   status: string;
   campaign_name: string | null;
   prize_amount: number | null;
+  start_date: string | null;
   draw_date: string | null;
   days_remaining: number | null;
   entries_used: number;        // campaign-total, quarantined excluded, respecting scope
@@ -102,7 +104,7 @@ export const listBusinessCampaigns = async (
   const { businessId } = await resolveScope(userId, jwtLocationId);
   if (businessId == null) return [];
   const res = await pool.query(
-    `SELECT DISTINCT d.id AS draw_id, d.name, d.prize_pool, d.draw_date, d.status
+    `SELECT DISTINCT d.id AS draw_id, d.name, d.prize_pool, d.start_date, d.draw_date, d.status
      FROM draw d JOIN draw_entry de ON de.draw_id = d.id AND de.business_id = $1
      ORDER BY d.draw_date DESC
      LIMIT 60`,
@@ -112,6 +114,7 @@ export const listBusinessCampaigns = async (
     draw_id: r.draw_id,
     name: r.name,
     prize_amount: Number(r.prize_pool),
+    start_date: (r.start_date instanceof Date ? r.start_date : new Date(r.start_date)).toISOString(),
     draw_date: (r.draw_date instanceof Date ? r.draw_date : new Date(r.draw_date)).toISOString(),
     status: r.status,
     is_current: r.status === 'Open',
@@ -127,7 +130,7 @@ export const getCampaignHeader = async (
 ): Promise<CampaignHeader> => {
   const pool = getPool();
   const empty: CampaignHeader = {
-    has_campaign: false, status: 'Closed', campaign_name: null, prize_amount: null, draw_date: null,
+    has_campaign: false, status: 'Closed', campaign_name: null, prize_amount: null, start_date: null, draw_date: null,
     days_remaining: null, entries_used: 0, entry_cap: null, cap_reached: false,
   };
   const { businessId, scopedLocationId } = await resolveScope(userId, jwtLocationId, filterLocationId);
@@ -137,14 +140,14 @@ export const getCampaignHeader = async (
   let drawRes;
   if (drawId != null) {
     drawRes = await pool.query(
-      `SELECT d.id, d.name, d.prize_pool, d.draw_date, d.status
+      `SELECT d.id, d.name, d.prize_pool, d.start_date, d.draw_date, d.status
        FROM draw d JOIN draw_entry de ON de.draw_id = d.id AND de.business_id = $1
        WHERE d.id = $2 LIMIT 1`,
       [businessId, drawId],
     );
   } else {
     drawRes = await pool.query(
-      `SELECT d.id, d.name, d.prize_pool, d.draw_date, d.status
+      `SELECT d.id, d.name, d.prize_pool, d.start_date, d.draw_date, d.status
        FROM draw d JOIN draw_entry de ON de.draw_id = d.id AND de.business_id = $1
        WHERE d.status = 'Open' ORDER BY d.draw_date ASC LIMIT 1`,
       [businessId],
@@ -186,6 +189,7 @@ export const getCampaignHeader = async (
     status: draw.status,
     campaign_name: draw.name,
     prize_amount: Number(draw.prize_pool),
+    start_date: (draw.start_date instanceof Date ? draw.start_date : new Date(draw.start_date)).toISOString(),
     draw_date: drawDate.toISOString(),
     days_remaining: daysRemaining,
     entries_used: used,

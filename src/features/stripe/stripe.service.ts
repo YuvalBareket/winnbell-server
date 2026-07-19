@@ -1929,6 +1929,7 @@ export const getSubscriptionDetails = async (userId: number) => {
       s.stripe_subscription_id, s.stripe_price_id, s.billing_interval,
       d.id         AS draw_id,
       d.name       AS draw_name,
+      d.start_date AS draw_start_date,
       d.draw_date  AS draw_date,
       d.status     AS draw_status,
       d.prize_pool AS prize_amount,
@@ -1949,13 +1950,14 @@ export const getSubscriptionDetails = async (userId: number) => {
       ) AS next_campaign_location_count,
       nd.id         AS next_campaign_id,
       nd.name       AS next_campaign_name,
+      nd.start_date AS next_campaign_start_date,
       nd.draw_date  AS next_campaign_date,
       nd.prize_pool AS next_campaign_prize
     FROM business b
     JOIN subscription s ON s.business_id = b.id
     LEFT JOIN founding_member fm ON fm.business_id = b.id
     LEFT JOIN LATERAL (
-      SELECT d2.id, d2.name, d2.draw_date, d2.status, d2.prize_pool
+      SELECT d2.id, d2.name, d2.start_date, d2.draw_date, d2.status, d2.prize_pool
       FROM draw_entry de2
       JOIN draw d2 ON d2.id = de2.draw_id
       WHERE de2.business_id = b.id
@@ -1969,7 +1971,7 @@ export const getSubscriptionDetails = async (userId: number) => {
       -- The next campaign this business will be enrolled into when the admin opens
       -- it. Enrollment happens at open, so there is no draw_entry yet; this shows
       -- the soonest Upcoming campaign the business will join.
-      SELECT d4.id, d4.name, d4.draw_date, d4.prize_pool
+      SELECT d4.id, d4.name, d4.start_date, d4.draw_date, d4.prize_pool
       FROM draw d4
       WHERE d4.status = 'Upcoming'
       ORDER BY d4.draw_date ASC

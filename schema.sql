@@ -258,6 +258,10 @@ CREATE TABLE draw (
   prize_pool       NUMERIC(12, 2) NOT NULL DEFAULT 0 CHECK (prize_pool >= 0),
   prize_percentage NUMERIC(5, 2)  NOT NULL DEFAULT 80
                      CHECK (prize_percentage > 0 AND prize_percentage <= 100),
+  -- Campaign period: the draw happens on the last day of the month (draw_date, midnight
+  -- NY). start_date is admin-selectable (midnight NY on the picked day) and defaults to
+  -- the 1st of the draw month; the services enforce start_date < draw_date.
+  start_date       TIMESTAMP NOT NULL,
   draw_date        TIMESTAMP NOT NULL,
   status           draw_status_enum NOT NULL DEFAULT 'Upcoming',
   -- Populated by pickDrawWinnerService after the draw closes.

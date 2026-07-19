@@ -8,7 +8,7 @@ export const getActiveDrawService = async () => {
 
   const pool = getPool();
   const result = await pool.query(`
-    SELECT id, name, prize_pool AS prize_amount, draw_date, status
+    SELECT id, name, prize_pool AS prize_amount, start_date, draw_date, status
     FROM draw
     WHERE status = 'Open'
     ORDER BY draw_date ASC
@@ -28,6 +28,7 @@ export const getDrawHistoryService = async () => {
       d.id,
       d.name,
       d.prize_pool AS prize_amount,
+      d.start_date,
       d.draw_date,
       d.status,
       d.closed_at,
@@ -54,7 +55,7 @@ export const getDrawHistoryService = async () => {
 export const getDrawByIdService = async (drawId: number) => {
   const pool = getPool();
   const result = await pool.query(`
-    SELECT id, name, prize_pool AS prize_amount, draw_date, status
+    SELECT id, name, prize_pool AS prize_amount, start_date, draw_date, status
     FROM draw
     WHERE id = $1
   `, [drawId]);
@@ -68,6 +69,7 @@ export const getDrawResultService = async (drawId: number) => {
       d.id,
       d.name,
       d.prize_pool AS prize_amount,
+      d.start_date,
       d.draw_date,
       d.status,
       d.closed_at,

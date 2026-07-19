@@ -1,7 +1,7 @@
 import { getPool } from '../../shared/db/db.js';
 import { OPEN_DRAW_ID_SUBQUERY } from '../../shared/db/queries.js';
 import { getPlatformSettings, invalidatePlatformSettings, invalidatePublicBusinessData, invalidateUserAuth } from '../../shared/cache/cache.js';
-import { lastDayOfMonthNyMidnightUtc, nextCampaignOpensNy, drawDateFromString } from '../../shared/dates.js';
+import { lastDayOfMonthNyMidnightUtc, nextCampaignOpensNy, drawDateFromString, drawStartDateFromString, nyMidnightFromString } from '../../shared/dates.js';
 import { sendFoundingFinalCampaignEmail } from '../../shared/email/email.service.js';
 import { decayAllUserRiskScores } from '../risk/risk.service.js';
 
@@ -138,6 +138,7 @@ export const getAllDrawsService = async () => {
       d.id,
       d.name,
       d.prize_pool AS prize_amount,
+      d.start_date,
       d.draw_date,
       d.status,
       d.winner_user_id,
@@ -166,13 +167,13 @@ export const getAllDrawsService = async () => {
 
 export const updateDrawService = async (
   drawId: number,
-  data: { name?: string; prize_amount?: number; draw_date?: string },
+  data: { name?: string; prize_amount?: number; draw_date?: string; start_date?: string },
 ) => {
   const pool = getPool();
 
-  // Verify draw exists and is Upcoming
+  // Verify draw exists and is Upcoming (dates needed to validate a partial update)
   const existing = await pool.query(
-    `SELECT id, status FROM draw WHERE id = $1`,
+    `SELECT id, status, start_date, draw_date FROM draw WHERE id = $1`,
     [drawId],
   );
   if (!existing.rows[0]) throw new Error('Campaign not found');
@@ -194,17 +195,32 @@ export const updateDrawService = async (
     updates.push(`prize_pool = $${idx++}`);
     values.push(data.prize_amount);
   }
-  if (data.draw_date !== undefined) {
-    const lastDay = drawDateFromString(data.draw_date);
+  // An explicit start pick wins; when only the draw date moves, the start snaps back
+  // to the 1st of the new month (the default pairing) rather than keeping a stale day.
+  const newDrawDate = data.draw_date !== undefined ? drawDateFromString(data.draw_date) : undefined;
+  const newStartDate = data.start_date !== undefined
+    ? nyMidnightFromString(data.start_date)
+    : data.draw_date !== undefined
+    ? drawStartDateFromString(data.draw_date)
+    : undefined;
+  const finalDrawDate = newDrawDate ?? (existing.rows[0].draw_date ? new Date(existing.rows[0].draw_date) : undefined);
+  const finalStartDate = newStartDate ?? (existing.rows[0].start_date ? new Date(existing.rows[0].start_date) : undefined);
+  if (finalStartDate && finalDrawDate && finalStartDate.getTime() >= finalDrawDate.getTime())
+    throw new Error('Start date must be before the draw date');
+  if (newDrawDate !== undefined) {
     updates.push(`draw_date = $${idx++}`);
-    values.push(lastDay);
+    values.push(newDrawDate);
+  }
+  if (newStartDate !== undefined) {
+    updates.push(`start_date = $${idx++}`);
+    values.push(newStartDate);
   }
 
   if (updates.length === 0) throw new Error('No fields to update');
 
   values.push(drawId);
   const result = await pool.query(
-    `UPDATE draw SET ${updates.join(', ')} WHERE id = $${idx} RETURNING id, name, prize_pool AS prize_amount, draw_date, status`,
+    `UPDATE draw SET ${updates.join(', ')} WHERE id = $${idx} RETURNING id, name, prize_pool AS prize_amount, start_date, draw_date, status`,
     values,
   );
   invalidatePublicBusinessData();
@@ -225,10 +241,17 @@ export const createDrawService = async (data: {
   name: string;
   prize_amount: number;
   draw_date: string;
+  start_date?: string;
 }) => {
-  // Campaigns must end on the last day of a month (00:00 NY time → last day 24:00 NY time).
-  // Normalise the provided date to the last day of its month in NY timezone.
+  // The draw always lands on the last day of its month (midnight NY). The start is
+  // admin-selectable (midnight NY on the picked day); without a pick it defaults to
+  // the 1st of the draw month.
   const drawDate = drawDateFromString(data.draw_date);
+  const startDate = data.start_date
+    ? nyMidnightFromString(data.start_date)
+    : drawStartDateFromString(data.draw_date);
+  if (startDate.getTime() >= drawDate.getTime())
+    throw new Error('Start date must be before the draw date');
 
   const pool = getPool();
   const client = await pool.connect();
@@ -237,10 +260,10 @@ export const createDrawService = async (data: {
     await client.query('BEGIN');
 
     const drawResult = await client.query(`
-      INSERT INTO draw (name, prize_pool, draw_date, status)
-      VALUES ($1, $2, $3, 'Upcoming')
+      INSERT INTO draw (name, prize_pool, start_date, draw_date, status)
+      VALUES ($1, $2, $3, $4, 'Upcoming')
       RETURNING *
-    `, [data.name, data.prize_amount, drawDate]);
+    `, [data.name, data.prize_amount, startDate, drawDate]);
 
     const draw = drawResult.rows[0];
 
@@ -1263,11 +1286,14 @@ export const duplicateDrawService = async (drawId: number) => {
   const existing = await pool.query(`SELECT name, prize_pool FROM draw WHERE id = $1`, [drawId]);
   if (!existing.rows[0]) throw new Error('Draw not found');
   const { name, prize_pool } = existing.rows[0];
+  // Land the copy in next month's campaign slot, normalised to the standard month
+  // boundaries (1st -> last day, midnight NY) like every other draw.
+  const inThirtyDays = new Date(Date.now() + 30 * 86_400_000).toISOString();
   const result = await pool.query(
-    `INSERT INTO draw (name, prize_pool, draw_date, status)
-     VALUES ($1, $2, NOW() + INTERVAL '30 days', 'Upcoming')
-     RETURNING id, name, prize_pool AS prize_amount, draw_date, status`,
-    [`${name} (Copy)`, prize_pool],
+    `INSERT INTO draw (name, prize_pool, start_date, draw_date, status)
+     VALUES ($1, $2, $3, $4, 'Upcoming')
+     RETURNING id, name, prize_pool AS prize_amount, start_date, draw_date, status`,
+    [`${name} (Copy)`, prize_pool, drawStartDateFromString(inThirtyDays), drawDateFromString(inThirtyDays)],
   );
   invalidatePublicBusinessData();
   return result.rows[0];

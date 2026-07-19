@@ -62,7 +62,7 @@ beforeEach(() => {
 // createDrawService
 // ─────────────────────────────────────────────
 describe('createDrawService', () => {
-  const DRAW_ROW = { id: 1, name: 'May 2026 Draw', prize_pool: 1000, draw_date: '2026-05-31', status: 'Upcoming' };
+  const DRAW_ROW = { id: 1, name: 'May 2026 Draw', prize_pool: 1000, start_date: '2026-05-01', draw_date: '2026-05-31', status: 'Upcoming' };
 
   test('creates a draw with the prize_amount provided directly', async () => {
     setupClientQueries(
@@ -220,7 +220,17 @@ describe('createDrawService — date normalisation', () => {
       ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO draw'),
     );
     expect(insertCall).toBeDefined();
-    // params array is the second argument; draw_date is $3 → index 2
+    // params array is the second argument; start_date is $3 → index 2, draw_date is $4 → index 3
+    const params: unknown[] = insertCall![1];
+    expect(params[3]).toBeInstanceOf(Date);
+    return params[3] as Date;
+  };
+
+  const getInsertStartDateParam = (): Date => {
+    const insertCall = mockClientQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO draw'),
+    );
+    expect(insertCall).toBeDefined();
     const params: unknown[] = insertCall![1];
     expect(params[2]).toBeInstanceOf(Date);
     return params[2] as Date;
@@ -239,6 +249,47 @@ describe('createDrawService — date normalisation', () => {
     const date = getInsertDateParam();
     // UTC month: May = 4 (0-based), day = 31
     expect(date.getUTCMonth()).toBe(4);   // May
+    expect(date.getUTCDate()).toBe(31);
+
+    // start_date pairs with draw_date: 1st of the SAME month (midnight NY = 04:00 UTC in May/EDT)
+    const start = getInsertStartDateParam();
+    expect(start.getUTCMonth()).toBe(4);  // May
+    expect(start.getUTCDate()).toBe(1);
+  });
+
+  test('should use an explicit admin-picked start date on the exact day (not month-normalised)', async () => {
+    setupClientQueries(
+      { rows: [] },                                           // BEGIN
+      { rows: [{ id: 1, name: 'Test', prize_pool: 500, start_date: '2026-05-10', draw_date: '2026-05-31', status: 'Upcoming' }] }, // INSERT draw
+      { rows: [] },                                           // COMMIT
+    );
+
+    await createDrawService({ name: 'May Draw', prize_amount: 500, draw_date: '2026-05-15', start_date: '2026-05-10' });
+
+    const start = getInsertStartDateParam();
+    expect(start.getUTCMonth()).toBe(4);  // May
+    expect(start.getUTCDate()).toBe(10);  // literal picked day, midnight NY
+  });
+
+  test('should reject a start date on or after the draw date', async () => {
+    await expect(
+      createDrawService({ name: 'Bad Draw', prize_amount: 500, draw_date: '2026-05-15', start_date: '2026-06-02' }),
+    ).rejects.toThrow('Start date must be before the draw date');
+  });
+
+  test('should not shift a 1st-of-month date-only pick into the previous month', async () => {
+    setupClientQueries(
+      { rows: [] },                                           // BEGIN
+      { rows: [{ id: 1, name: 'Test', prize_pool: 500, start_date: '2026-08-01', draw_date: '2026-08-31', status: 'Upcoming' }] }, // INSERT draw
+      { rows: [] },                                           // COMMIT
+    );
+
+    // "2026-08-01" parsed as an instant is July 31 in NY; the literal date-only parse
+    // must keep it in August.
+    await createDrawService({ name: 'Aug Draw', prize_amount: 500, draw_date: '2026-08-01' });
+
+    const date = getInsertDateParam();
+    expect(date.getUTCMonth()).toBe(7);   // August
     expect(date.getUTCDate()).toBe(31);
   });
 

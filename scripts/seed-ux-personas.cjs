@@ -178,8 +178,8 @@ function mintToken(user, locationId = null) {
   let june = (await q(`SELECT id FROM draw WHERE name='June 2026 (UX)'`)).rows[0];
   if (!june) {
     june = (await q(
-      `INSERT INTO draw (name, prize_pool, draw_date, status, opened_at, closed_at)
-       VALUES ('June 2026 (UX)', 4000, '2026-07-01T04:00:00Z', 'Closed', NOW() - INTERVAL '32 days', NOW() - INTERVAL '1 day')
+      `INSERT INTO draw (name, prize_pool, start_date, draw_date, status, opened_at, closed_at)
+       VALUES ('June 2026 (UX)', 4000, '2026-06-01T04:00:00Z', '2026-07-01T04:00:00Z', 'Closed', NOW() - INTERVAL '32 days', NOW() - INTERVAL '1 day')
        RETURNING id`)).rows[0];
   }
 

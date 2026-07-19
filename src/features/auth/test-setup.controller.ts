@@ -13,6 +13,7 @@ import { Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import { getPool } from '../../shared/db/db.js';
+import { drawDateFromString, drawStartDateFromString } from '../../shared/dates.js';
 
 const PERSONAS: Record<string, {
   fullName: string;
@@ -158,11 +159,15 @@ export const testSetup = async (req: Request, res: Response): Promise<void> => {
         let drawId: number;
         if (drawRow.rows.length === 0) {
           const now = new Date();
-          const drawDate = new Date(now.getFullYear(), now.getMonth() + 1, 0); // last day of current month
+          // Same NY-timezone month boundaries the real draw services use, so start/draw
+          // can never land in different months (server-local new Date() math could,
+          // e.g. on the 1st between 00:00-04:00 UTC).
+          const startDate = drawStartDateFromString(now.toISOString());
+          const drawDate = drawDateFromString(now.toISOString());
           const drawName = `${now.toLocaleString('en-US', { month: 'long' })} ${now.getFullYear()} Draw`;
           const newDraw = await client.query(
-            `INSERT INTO draw (name, prize_pool, draw_date, status) VALUES ($1, 0, $2, 'Open') RETURNING id`,
-            [drawName, drawDate],
+            `INSERT INTO draw (name, prize_pool, start_date, draw_date, status) VALUES ($1, 0, $2, $3, 'Open') RETURNING id`,
+            [drawName, startDate, drawDate],
           );
           drawId = newDraw.rows[0].id;
         } else {

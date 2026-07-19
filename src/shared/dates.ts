@@ -41,18 +41,49 @@ export function nextCampaignOpensNy(now: Date = new Date()): Date {
   return nyMidnightUtc(year, month, 1);
 }
 
-// Parse a draw_date string and normalise it to midnight NY on the last day of its month.
-// Encapsulates the 3-line parsing pattern duplicated across createDrawService and
-// updateDrawService in admin.service.ts.
-export function drawDateFromString(dateStr: string): Date {
+// Convert a 1-indexed year/month to a UTC Date for midnight NY on the FIRST day of that
+// month - the moment the campaign opens. Counterpart of lastDayOfMonthNyMidnightUtc.
+export function firstDayOfMonthNyMidnightUtc(year: number, month: number): Date {
+  return nyMidnightUtc(year, month - 1, 1);
+}
+
+// The calendar year/month/day (1-indexed month) the given input means in NY.
+// Date-only strings ("2026-08-01", what <input type=date> submits) are taken literally -
+// new Date() would read them as UTC MIDNIGHT, which is still the PREVIOUS calendar day
+// in NY, silently shifting a 1st-of-month pick into the prior month. Any other format
+// is treated as an instant and mapped to the NY calendar day it falls on.
+function nyCalendarParts(dateStr: string): { year: number; month: number; day: number } {
+  const dateOnly = /^(\d{4})-(\d{2})-(\d{2})$/.exec(dateStr.trim());
+  if (dateOnly) return { year: Number(dateOnly[1]), month: Number(dateOnly[2]), day: Number(dateOnly[3]) };
   const nyDateStr = new Date(dateStr).toLocaleDateString('en-US', {
     timeZone: 'America/New_York',
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
   });
-  const [month, , year] = nyDateStr.split('/').map(Number);
+  const [month, day, year] = nyDateStr.split('/').map(Number);
+  return { year, month, day };
+}
+
+// Parse a draw_date string and normalise it to midnight NY on the last day of its month.
+// Encapsulates the parsing pattern shared by createDrawService and updateDrawService.
+export function drawDateFromString(dateStr: string): Date {
+  const { year, month } = nyCalendarParts(dateStr);
   return lastDayOfMonthNyMidnightUtc(year, month);
+}
+
+// The DEFAULT campaign start for the same input: midnight NY on the 1st of the month the
+// draw_date falls in. Used when the admin does not pick an explicit start date.
+export function drawStartDateFromString(dateStr: string): Date {
+  const { year, month } = nyCalendarParts(dateStr);
+  return firstDayOfMonthNyMidnightUtc(year, month);
+}
+
+// Midnight NY on the exact calendar day the input means - for the admin-picked
+// campaign start date, which is NOT month-normalised.
+export function nyMidnightFromString(dateStr: string): Date {
+  const { year, month, day } = nyCalendarParts(dateStr);
+  return nyMidnightUtc(year, month - 1, day);
 }
 
 // ─── Charge day ────────────────────────────────────────────────────────────────

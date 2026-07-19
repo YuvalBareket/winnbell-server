@@ -102,18 +102,34 @@ export const getAllDraws = async (req: Request, res: Response) => {
 };
 
 export const createDraw = async (req: Request, res: Response) => {
-  const { prize_amount, name } = req.body as { prize_amount?: number; name?: string };
+  const { prize_amount, name, draw_date, start_date } = req.body as {
+    prize_amount?: number; name?: string; draw_date?: string; start_date?: string;
+  };
   const parsed = Number(prize_amount);
   if (!prize_amount || isNaN(parsed) || parsed <= 0) {
     res.status(400).json({ message: 'prize_amount must be a positive number' });
     return;
   }
+  if (typeof name !== 'string' || typeof draw_date !== 'string' || !draw_date) {
+    res.status(400).json({ message: 'name and draw_date are required' });
+    return;
+  }
+  if (start_date !== undefined && typeof start_date !== 'string') {
+    res.status(400).json({ message: 'start_date must be a date string' });
+    return;
+  }
   const lenErr = validateLengths([['Campaign name', name, 150]]);
   if (lenErr) { res.status(400).json({ message: lenErr }); return; }
   try {
-    const draw = await createDrawService(req.body);
+    const draw = await createDrawService({ name, prize_amount: parsed, draw_date, start_date });
     res.status(201).json(draw);
   } catch (error) {
+    const msg = error instanceof Error ? error.message : '';
+    if (msg === 'Start date must be before the draw date') {
+      res.status(400).json({ message: msg });
+      return;
+    }
+    console.error('[admin.createDraw]', error);
     res.status(500).json({ message: 'Failed to create campaign' });
   }
 };
@@ -124,22 +140,35 @@ export const updateDraw = async (req: Request, res: Response) => {
     res.status(400).json({ message: 'Invalid drawId' });
     return;
   }
-  const { name, prize_amount, draw_date } = req.body as {
+  const { name, prize_amount, draw_date, start_date } = req.body as {
     name?: string;
     prize_amount?: number;
     draw_date?: string;
+    start_date?: string;
   };
   if (prize_amount !== undefined && (isNaN(Number(prize_amount)) || Number(prize_amount) <= 0)) {
     res.status(400).json({ message: 'prize_amount must be a positive number' });
     return;
   }
+  if ((draw_date !== undefined && typeof draw_date !== 'string')
+    || (start_date !== undefined && typeof start_date !== 'string')) {
+    res.status(400).json({ message: 'dates must be date strings' });
+    return;
+  }
   const lenErr = validateLengths([['Campaign name', name, 150]]);
   if (lenErr) { res.status(400).json({ message: lenErr }); return; }
   try {
-    const draw = await updateDrawService(drawId, { name, prize_amount: prize_amount ? Number(prize_amount) : undefined, draw_date });
+    const draw = await updateDrawService(drawId, { name, prize_amount: prize_amount ? Number(prize_amount) : undefined, draw_date, start_date });
     res.json(draw);
   } catch (error) {
-    res.status(400).json({ message: 'Failed to update campaign' });
+    // These service messages are user-facing; anything else stays generic.
+    const msg = error instanceof Error ? error.message : '';
+    if (msg === 'Campaign not found') {
+      res.status(404).json({ message: msg });
+      return;
+    }
+    const known = ['Start date must be before the draw date', 'Only upcoming campaigns can be edited', 'No fields to update'];
+    res.status(400).json({ message: known.includes(msg) ? msg : 'Failed to update campaign' });
   }
 };
 
