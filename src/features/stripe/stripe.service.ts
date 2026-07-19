@@ -285,10 +285,11 @@ export const createFoundingMemberCheckoutSession = async (
       quantity: 1,
       price_data: {
         currency: 'usd',
-        unit_amount: 120000, // $1,200.00
+        // TEMP TEST PRICE - revert to 120000 ($1,200.00) before launch!
+        unit_amount: 100, // $1.00
         product_data: {
           name: 'Founding Partner - Winnbell',
-          description: 'One-time membership. Full year. 1,000 entries per location per month.',
+          description: 'One-time membership. Full year. 2,500 entries per location per month.',
         },
       },
     }],
