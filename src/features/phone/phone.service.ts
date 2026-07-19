@@ -1,4 +1,5 @@
 import twilio from 'twilio';
+import { randomInt } from 'crypto';
 import { getPool } from '../../shared/db/db.js';
 import { invalidateUserAuth } from '../../shared/cache/cache.js';
 import { grantPendingReferralBonus } from '../referral/referral.service.js';
@@ -6,14 +7,12 @@ import { grantPendingReferralBonus } from '../referral/referral.service.js';
 // Real SMS goes out ONLY when PHONE_VERIFY_ENABLED=true - set exclusively on the production
 // service (the same flag already gates the free-entry phone requirement in tickets.service).
 // Every other environment (local dev, staging, CI) NEVER sends an SMS; the code is always
-// the fixed dev code 123456. Production uses Twilio VERIFY (not messages.create): the A2P
-// 10DLC campaign registration kept failing (error 30896), and Verify is exempt from it for
-// OTP-only senders - Twilio generates, texts, and checks the real code itself.
+// the fixed dev code 123456. Production sends via Programmable Messaging from our own
+// 10DLC number (TWILIO_FROM_NUMBER) under the APPROVED A2P campaign (~1c/SMS); we generate
+// and check the code ourselves. (Twilio Verify was used 2026-07-14..19 while the campaign
+// was still unapproved; retired 2026-07-19 for its $0.05-per-verification fee.)
 const isSmsLive = () => process.env.PHONE_VERIFY_ENABLED === 'true';
 const DEV_OTP_CODE = '123456';
-// Stored in the code column for live sends: the real code lives at Twilio, never locally.
-// Can never match user input in the non-live compare path (codes are 6 digits).
-const LIVE_CODE_SENTINEL = 'LIVE';
 
 // Lazy so environments without Twilio credentials never construct the client (the factory
 // throws on a missing/malformed account SID at import time).
@@ -97,30 +96,31 @@ export const sendPhoneOtp = async (userId: number, phoneNumber: string): Promise
   if (recentSend.rows.length > 0) {
     throw new Error('RESEND_TOO_SOON');
   }
-  const code = isSmsLive() ? LIVE_CODE_SENTINEL : DEV_OTP_CODE;
+  // Live = fresh random 6-digit code per send; everywhere else the fixed dev code.
+  const code = isSmsLive() ? String(randomInt(100000, 1000000)) : DEV_OTP_CODE;
 
   // Insert new OTP — do NOT delete old unexpired rows first so rate limit history is
   // preserved. Old expired rows are cleaned up lazily on the next send.
   await pool.query(`DELETE FROM phone_otp WHERE user_id = $1 AND expires_at <= NOW()`, [userId]);
-  await pool.query(
+  const inserted = await pool.query(
     `INSERT INTO phone_otp (user_id, phone_number, code, expires_at)
-     VALUES ($1, $2, $3, NOW() + INTERVAL '${OTP_EXPIRY_MINUTES} minutes')`,
+     VALUES ($1, $2, $3, NOW() + INTERVAL '${OTP_EXPIRY_MINUTES} minutes')
+     RETURNING id`,
     [userId, normalizedPhone, code],
   );
 
   if (isSmsLive()) {
     try {
-      await getTwilio().verify.v2
-        .services(process.env.TWILIO_VERIFY_SERVICE_SID!)
-        .verifications.create({ to: normalizedPhone, channel: 'sms' });
+      await getTwilio().messages.create({
+        to: normalizedPhone,
+        from: process.env.TWILIO_FROM_NUMBER!,
+        body: `Your Winnbell verification code is ${code}. It expires in ${OTP_EXPIRY_MINUTES} minutes.`,
+      });
     } catch (err) {
       // The SMS never went out: remove the row so the user is not stuck in a "code sent"
       // state that cannot verify and blocks the next attempt via the 60s spacing check.
-      await pool.query(
-        `DELETE FROM phone_otp WHERE user_id = $1 AND code = $2`,
-        [userId, LIVE_CODE_SENTINEL],
-      );
-      console.error('[phone] Twilio Verify send failed:', err instanceof Error ? err.message : err);
+      await pool.query(`DELETE FROM phone_otp WHERE id = $1`, [inserted.rows[0].id]);
+      console.error('[phone] Twilio SMS send failed:', err instanceof Error ? err.message : err);
       throw new Error('SMS_SEND_FAILED');
     }
   }
@@ -166,21 +166,9 @@ export const verifyPhoneOtp = async (
     // the uniform gate the tests and the client rely on).
     await client.query(`UPDATE phone_otp SET attempts = attempts + 1 WHERE id = $1`, [otp.id]);
 
-    let codeOk: boolean;
-    if (isSmsLive()) {
-      // Twilio Verify holds the real code; 'approved' is the only success status. A dead or
-      // never-created verification raises (404) - treat it exactly like a wrong code.
-      try {
-        const check = await getTwilio().verify.v2
-          .services(process.env.TWILIO_VERIFY_SERVICE_SID!)
-          .verificationChecks.create({ to: otp.phone_number, code: code.trim() });
-        codeOk = check.status === 'approved';
-      } catch {
-        codeOk = false;
-      }
-    } else {
-      codeOk = otp.code === code.trim();
-    }
+    // We generate and store the code ourselves in BOTH modes (live = random per send,
+    // dev = fixed 123456), so the compare is always local - no Twilio round-trip.
+    const codeOk = otp.code === code.trim();
 
     if (!codeOk) {
       await client.query('COMMIT');

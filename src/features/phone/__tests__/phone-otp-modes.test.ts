@@ -1,9 +1,10 @@
 /**
  * Tests — OTP environment gating (PHONE_VERIFY_ENABLED).
  *
- * Production (PHONE_VERIFY_ENABLED=true): Twilio VERIFY generates, texts, and checks the real code;
- * locally only the 'LIVE' sentinel is stored. Every other environment: NO SMS is ever
- * sent (the Twilio client is never even constructed) and the code is always 123456.
+ * Production (PHONE_VERIFY_ENABLED=true): WE generate a random 6-digit code, store it,
+ * and text it via Programmable Messaging from TWILIO_FROM_NUMBER (approved A2P campaign).
+ * Every other environment: NO SMS is ever sent (the Twilio client is never even
+ * constructed) and the code is always 123456. The compare is local in both modes.
  */
 
 const mockPoolQuery = jest.fn();
@@ -19,25 +20,19 @@ jest.mock('../../../shared/db/db.js', () => ({
 jest.mock('../../../shared/cache/cache.js', () => ({ invalidateUserAuth: jest.fn() }));
 jest.mock('../../referral/referral.service.js', () => ({ grantPendingReferralBonus: jest.fn().mockResolvedValue(false) }));
 
-const mockVerificationsCreate = jest.fn();
-const mockChecksCreate = jest.fn();
+const mockMessagesCreate = jest.fn();
 const mockTwilioFactory = jest.fn(() => ({
-  verify: {
-    v2: {
-      services: jest.fn(() => ({
-        verifications: { create: mockVerificationsCreate },
-        verificationChecks: { create: mockChecksCreate },
-      })),
-    },
-  },
+  messages: { create: mockMessagesCreate },
 }));
 jest.mock('twilio', () => ({ __esModule: true, default: () => mockTwilioFactory() }));
 
 import { sendPhoneOtp, verifyPhoneOtp } from '../phone.service';
 
 const PHONE = '2025550123';
+const FROM = '+15550001111';
 
-/** pool.query order in sendPhoneOtp: verified check, taken check, phone-hour, user-hour, spacing, delete-expired, insert (+ delete-on-send-failure in live mode). */
+/** pool.query order in sendPhoneOtp: verified check, taken check, phone-hour, user-hour,
+    spacing, delete-expired, insert RETURNING id (+ delete-by-id on send failure in live mode). */
 const setupSendQueries = () => {
   const responses = [
     { rows: [{ is_phone_verified: false }] },
@@ -46,7 +41,7 @@ const setupSendQueries = () => {
     { rows: [{ cnt: 0 }] },
     { rows: [] },
     { rows: [] },
-    { rows: [] },
+    { rows: [{ id: 55 }] }, // INSERT ... RETURNING id
     { rows: [] },
   ];
   let i = 0;
@@ -67,21 +62,21 @@ const insertedCode = (): string | undefined => {
   return call?.[1]?.[2];
 };
 
-const OLD_ENV = { PHONE_VERIFY_ENABLED: process.env.PHONE_VERIFY_ENABLED, TWILIO_VERIFY_SERVICE_SID: process.env.TWILIO_VERIFY_SERVICE_SID };
+const OLD_ENV = { PHONE_VERIFY_ENABLED: process.env.PHONE_VERIFY_ENABLED, TWILIO_FROM_NUMBER: process.env.TWILIO_FROM_NUMBER };
 
 beforeEach(() => {
   jest.clearAllMocks();
   delete process.env.PHONE_VERIFY_ENABLED;
-  process.env.TWILIO_VERIFY_SERVICE_SID = 'VA_test_service';
   process.env.TWILIO_ACCOUNT_SID = 'AC_test';
   process.env.TWILIO_AUTH_TOKEN = 'token_test';
+  process.env.TWILIO_FROM_NUMBER = FROM;
 });
 
 afterAll(() => {
   if (OLD_ENV.PHONE_VERIFY_ENABLED === undefined) delete process.env.PHONE_VERIFY_ENABLED;
   else process.env.PHONE_VERIFY_ENABLED = OLD_ENV.PHONE_VERIFY_ENABLED;
-  if (OLD_ENV.TWILIO_VERIFY_SERVICE_SID === undefined) delete process.env.TWILIO_VERIFY_SERVICE_SID;
-  else process.env.TWILIO_VERIFY_SERVICE_SID = OLD_ENV.TWILIO_VERIFY_SERVICE_SID;
+  if (OLD_ENV.TWILIO_FROM_NUMBER === undefined) delete process.env.TWILIO_FROM_NUMBER;
+  else process.env.TWILIO_FROM_NUMBER = OLD_ENV.TWILIO_FROM_NUMBER;
 });
 
 describe('non-live environments (PHONE_VERIFY_ENABLED unset) - never send SMS, code is always 123456', () => {
@@ -90,69 +85,63 @@ describe('non-live environments (PHONE_VERIFY_ENABLED unset) - never send SMS, c
     await sendPhoneOtp(1, PHONE);
     expect(insertedCode()).toBe('123456');
     expect(mockTwilioFactory).not.toHaveBeenCalled();
-    expect(mockVerificationsCreate).not.toHaveBeenCalled();
+    expect(mockMessagesCreate).not.toHaveBeenCalled();
   });
 
   test('verify accepts 123456 locally without Twilio', async () => {
     setupVerifyQueries({ id: 9, phone_number: `+1${PHONE}`, attempts: 0, code: '123456', is_expired: false });
     await expect(verifyPhoneOtp(1, '123456')).resolves.toEqual({ referralBonusGranted: false });
-    expect(mockChecksCreate).not.toHaveBeenCalled();
+    expect(mockTwilioFactory).not.toHaveBeenCalled();
   });
 
   test('verify rejects a wrong code locally', async () => {
     setupVerifyQueries({ id: 9, phone_number: `+1${PHONE}`, attempts: 0, code: '123456', is_expired: false });
     await expect(verifyPhoneOtp(1, '999999')).rejects.toThrow('INVALID_CODE');
-    expect(mockChecksCreate).not.toHaveBeenCalled();
+    expect(mockTwilioFactory).not.toHaveBeenCalled();
   });
 });
 
-describe('production (PHONE_VERIFY_ENABLED=true) - Twilio Verify owns the real code', () => {
+describe('production (PHONE_VERIFY_ENABLED=true) - random code texted from our own number', () => {
   beforeEach(() => {
     process.env.PHONE_VERIFY_ENABLED = 'true';
   });
 
-  test('send stores the sentinel and asks Twilio Verify to text the code', async () => {
+  test('send stores a random 6-digit code and texts it via Programmable Messaging', async () => {
     setupSendQueries();
-    mockVerificationsCreate.mockResolvedValueOnce({ status: 'pending' });
+    mockMessagesCreate.mockResolvedValueOnce({ sid: 'SM_test' });
     await sendPhoneOtp(1, PHONE);
-    expect(insertedCode()).toBe('LIVE');
-    expect(mockVerificationsCreate).toHaveBeenCalledWith({ to: `+1${PHONE}`, channel: 'sms' });
+    const code = insertedCode();
+    expect(code).toMatch(/^\d{6}$/);
+    expect(mockMessagesCreate).toHaveBeenCalledWith({
+      to: `+1${PHONE}`,
+      from: FROM,
+      body: expect.stringContaining(code!),
+    });
   });
 
-  test('a failed Twilio send removes the row and throws SMS_SEND_FAILED', async () => {
+  test('a failed Twilio send removes the row by id and throws SMS_SEND_FAILED', async () => {
     setupSendQueries();
-    mockVerificationsCreate.mockRejectedValueOnce(new Error('twilio down'));
+    mockMessagesCreate.mockRejectedValueOnce(new Error('twilio down'));
     await expect(sendPhoneOtp(1, PHONE)).rejects.toThrow('SMS_SEND_FAILED');
     const cleanupDelete = mockPoolQuery.mock.calls.some(
-      ([sql, params]: [string, unknown[]]) => /DELETE FROM phone_otp/i.test(sql) && Array.isArray(params) && params[1] === 'LIVE',
+      ([sql, params]: [string, unknown[]]) => /DELETE FROM phone_otp WHERE id/i.test(sql) && Array.isArray(params) && params[0] === 55,
     );
     expect(cleanupDelete).toBe(true);
   });
 
-  test('verify approves through Twilio Verify', async () => {
-    setupVerifyQueries({ id: 9, phone_number: `+1${PHONE}`, attempts: 0, code: 'LIVE', is_expired: false });
-    mockChecksCreate.mockResolvedValueOnce({ status: 'approved' });
+  test('verify compares against the stored random code locally', async () => {
+    setupVerifyQueries({ id: 9, phone_number: `+1${PHONE}`, attempts: 0, code: '482913', is_expired: false });
     await expect(verifyPhoneOtp(1, '482913')).resolves.toEqual({ referralBonusGranted: false });
-    expect(mockChecksCreate).toHaveBeenCalledWith({ to: `+1${PHONE}`, code: '482913' });
+    expect(mockTwilioFactory).not.toHaveBeenCalled(); // check needs no Twilio round-trip
   });
 
-  test('verify rejects when Twilio does not approve', async () => {
-    setupVerifyQueries({ id: 9, phone_number: `+1${PHONE}`, attempts: 0, code: 'LIVE', is_expired: false });
-    mockChecksCreate.mockResolvedValueOnce({ status: 'pending' });
+  test('verify rejects a wrong code', async () => {
+    setupVerifyQueries({ id: 9, phone_number: `+1${PHONE}`, attempts: 0, code: '482913', is_expired: false });
     await expect(verifyPhoneOtp(1, '000000')).rejects.toThrow('INVALID_CODE');
   });
 
-  test('verify rejects when the Twilio check call itself fails (dead verification)', async () => {
-    setupVerifyQueries({ id: 9, phone_number: `+1${PHONE}`, attempts: 0, code: 'LIVE', is_expired: false });
-    mockChecksCreate.mockRejectedValueOnce(new Error('404 not found'));
-    await expect(verifyPhoneOtp(1, '482913')).rejects.toThrow('INVALID_CODE');
-  });
-
-  test('the dev code 123456 does NOT work in production (sentinel never matches, Twilio decides)', async () => {
-    setupVerifyQueries({ id: 9, phone_number: `+1${PHONE}`, attempts: 0, code: 'LIVE', is_expired: false });
-    mockChecksCreate.mockResolvedValueOnce({ status: 'pending' });
+  test('the dev code 123456 does NOT work in production (live codes are random)', async () => {
+    setupVerifyQueries({ id: 9, phone_number: `+1${PHONE}`, attempts: 0, code: '482913', is_expired: false });
     await expect(verifyPhoneOtp(1, '123456')).rejects.toThrow('INVALID_CODE');
-    // The decision went to Twilio, not a local string compare
-    expect(mockChecksCreate).toHaveBeenCalledWith({ to: `+1${PHONE}`, code: '123456' });
   });
 });
