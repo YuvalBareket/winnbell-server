@@ -1155,7 +1155,8 @@ async function activateFoundingMember(
     seatNumber = seatResult.rows[0].seat_number as number;
     console.log(`[Founding] Business ${businessId} claimed seat #${seatNumber}`);
 
-    // One-time payment: no stripe_subscription_id; period ends in 1 year; top entry tier
+    // One-time payment: no stripe_subscription_id; period ends in 1 year; Growth-tier
+    // entry allowance (2500 per location).
     const periodEnd = new Date();
     periodEnd.setFullYear(periodEnd.getFullYear() + 1);
     const monthlyEquivalent = Math.round(120000 / 12) / 100; // $100.00 ($1,200 / 12)
@@ -1164,7 +1165,7 @@ async function activateFoundingMember(
       INSERT INTO subscription
         (business_id, stripe_customer_id, stripe_subscription_id, stripe_price_id,
          status, current_period_end, cancel_at_period_end, fee_at_entry, entries_per_location, billing_interval)
-      VALUES ($1, $4, NULL, NULL, 'Active', $2, false, $3, 1000, 'yearly')
+      VALUES ($1, $4, NULL, NULL, 'Active', $2, false, $3, 2500, 'yearly')
       ON CONFLICT (business_id) DO UPDATE
         SET status               = 'Active',
             stripe_customer_id   = COALESCE(EXCLUDED.stripe_customer_id, subscription.stripe_customer_id),
@@ -1172,7 +1173,7 @@ async function activateFoundingMember(
             current_period_end   = EXCLUDED.current_period_end,
             cancel_at_period_end = false,
             fee_at_entry         = EXCLUDED.fee_at_entry,
-            entries_per_location = 1000,
+            entries_per_location = 2500,
             billing_interval     = 'yearly',
             updated_at           = NOW()
     `, [businessId, periodEnd, monthlyEquivalent, customerId]);
