@@ -286,7 +286,7 @@ export const createFoundingMemberCheckoutSession = async (
       price_data: {
         currency: 'usd',
         // TEMP TEST PRICE - revert to 120000 ($1,200.00) before launch!
-        unit_amount: 100, // $1.00
+        unit_amount: 50, // $0.50 - Stripe's minimum chargeable amount for USD
         product_data: {
           name: 'Founding Partner - Winnbell',
           description: 'One-time membership. Full year. 2,500 entries per location per month.',
