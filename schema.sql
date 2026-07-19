@@ -108,7 +108,7 @@ CREATE TABLE business (
   -- hard DB guarantee so login's business/subscription lookup is provably single-row.
   user_id                         INTEGER NOT NULL UNIQUE REFERENCES "user"(id) ON DELETE RESTRICT,
   name                            TEXT NOT NULL,
-  sector                          TEXT NOT NULL CHECK (sector IN ('Food','Coffee','Bakery','IceCream','Grocery','Liquor','Retail','Fashion','Electronics','Books','Flowers','Pets','Beauty','Health','Gym','Auto','Entertainment','Education','Service','Free')),
+  sector                          TEXT NOT NULL CHECK (sector IN ('Food','Coffee','Bakery','IceCream','Grocery','Liquor','Retail','Fashion','Electronics','Books','Flowers','Pets','Beauty','Health','Gym','Auto','Entertainment','Education','Service','Other','Free')),
   description                     TEXT,
   terms_text                      TEXT,
   logo_url                        TEXT,

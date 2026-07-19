@@ -32,7 +32,7 @@ import { validateLengths } from '../../shared/validation.js';
 const REGISTRATION_SECTORS = [
   'Food', 'Coffee', 'Bakery', 'IceCream', 'Grocery', 'Liquor', 'Retail',
   'Fashion', 'Electronics', 'Books', 'Flowers', 'Pets', 'Beauty', 'Health',
-  'Gym', 'Auto', 'Entertainment', 'Education', 'Service',
+  'Gym', 'Auto', 'Entertainment', 'Education', 'Service', 'Other',
 ];
 
 // Presence check: length validation deliberately skips missing values, so required fields
