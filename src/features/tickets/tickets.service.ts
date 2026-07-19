@@ -34,7 +34,7 @@ export const getUserTicketsService = async (userId: number, drawId: number) => {
       t.activated_at,
       CASE WHEN t.entry_source = 'promo' THEN 'Promotional Entry'
            WHEN t.entry_source = 'referral' THEN 'Invitation Entry'
-           WHEN t.entry_source = 'free' THEN 'Free Weekly Entry'
+           WHEN t.entry_source = 'free' THEN 'Weekly Entry'
            ELSE b.name END AS business_name,
       b.sector AS business_sector,
       b.logo_url,
@@ -248,7 +248,7 @@ export const activateFreeTicket = async (userId: number, claimIp?: string): Prom
 
     // Guard 1: email must be verified (blocks throwaway email accounts)
     if (lastUsage && !lastUsage.is_email_verified) {
-      throw new Error('Please verify your email address before claiming a free entry.');
+      throw new Error('Please verify your email address before claiming your weekly entry.');
     }
 
     // Guard 1b: phone must be verified (ties free entry to a real person)
