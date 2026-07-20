@@ -132,7 +132,7 @@ async function getGuardData(userId: number, res: Response): Promise<GuardData | 
 // Cached current role + whether the user still actively manages a location.
 // Used to detect stale elevated sessions (e.g. a manager removed from a location
 // whose 1h JWT still claims Business + location_id).
-type RoleState = { role: string; managedLocationIds: number[]; tokenEpoch: number };
+type RoleState = { role: string; managedLocationIds: number[]; tokenEpoch: number; isActive: boolean };
 
 async function getRoleState(userId: number): Promise<RoleState | null> {
   const cacheKey = `user:role:${userId}`;
@@ -142,7 +142,7 @@ async function getRoleState(userId: number): Promise<RoleState | null> {
   try {
     const pool = getPool();
     const result = await pool.query(
-      `SELECT u.role, u.token_epoch,
+      `SELECT u.role, u.token_epoch, u.is_active,
               COALESCE(
                 (SELECT array_agg(bl.id) FROM business_location bl
                  WHERE bl.manager_user_id = $1 AND bl.is_active = TRUE),
@@ -156,6 +156,7 @@ async function getRoleState(userId: number): Promise<RoleState | null> {
       role: result.rows[0].role,
       managedLocationIds: (result.rows[0].managed_location_ids ?? []).map(Number),
       tokenEpoch: Number(result.rows[0].token_epoch ?? 0),
+      isActive: result.rows[0].is_active === true,
     };
     // Best-effort cache write: a full cache (ECACHEFULL at maxKeys) must degrade to
     // per-request DB reads — NOT silently skip the revocation/role checks below.
@@ -205,6 +206,15 @@ export const authenticateToken = async (
     const fresh = await getRoleState(decoded.id);
     if (fresh) {
       if ((decoded.se ?? 0) < fresh.tokenEpoch) {
+        res.status(401).json({ message: 'Session no longer valid. Please sign in again.' });
+        return;
+      }
+      // Admin tokens get the STRICTEST liveness: the DB must still say Admin AND active
+      // on every request (60s cache). A directly-demoted or deactivated admin loses access
+      // within a minute even if nobody remembered to bump their token_epoch. Plain User
+      // tokens claim nothing elevated; their is_active is enforced at mutation points.
+      if (decoded.role === 'Admin' && (fresh.role !== 'Admin' || !fresh.isActive)) {
+        console.info(`[auth] stale ADMIN session rejected: userId=${decoded.id} dbRole=${fresh.role} active=${fresh.isActive}`);
         res.status(401).json({ message: 'Session no longer valid. Please sign in again.' });
         return;
       }
