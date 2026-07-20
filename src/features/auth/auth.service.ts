@@ -343,6 +343,13 @@ export const loginUser = async (
     throw new Error('Invalid credentials');
   }
 
+  // Supabase-managed accounts have no local password hash. Run the dummy compare (same
+  // timing as a wrong password) instead of letting bcrypt throw on a NULL hash.
+  if (!user.password_hash) {
+    await bcrypt.compare(password, DUMMY_PASSWORD_HASH);
+    throw new Error('Invalid credentials');
+  }
+
   const isMatch = await bcrypt.compare(password, user.password_hash);
   if (!isMatch) throw new Error('Invalid credentials');
 
@@ -552,10 +559,17 @@ export const syncExternalUser = async (
              registration_ip = COALESCE("user".registration_ip, EXCLUDED.registration_ip),
              city = COALESCE("user".city, EXCLUDED.city),
              updated_at = NOW()
-       RETURNING id, role, full_name AS "fullName", email, token_epoch, date_of_birth::text AS date_of_birth, gender, state, created_at`,
+       RETURNING id, role, full_name AS "fullName", email, token_epoch, is_active, date_of_birth::text AS date_of_birth, gender, state, created_at`,
       [externalId, email, fullName, role, detectedState, safeIp, detectedCity],
     );
     const dbUser = upsertResult.rows[0];
+
+    // TOCTOU guard: a concurrent deleteAccount can commit between the deleted-check above
+    // and this upsert (which deliberately does NOT resurrect is_active). Re-check on the
+    // authoritative RETURNING row so a just-deleted account can never receive a token.
+    if (dbUser.is_active === false) {
+      throw new Error('ACCOUNT_DELETED');
+    }
 
     // Write the acquisition row once (fresh signup). ON CONFLICT DO NOTHING so an existing user
     // re-syncing never overwrites their original acquisition.

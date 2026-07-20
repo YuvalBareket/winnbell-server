@@ -151,7 +151,19 @@ async function chargeNow(
   if (!draft.id) throw new Error('Stripe did not return an invoice id');
   let invoice = draft;
   if (invoice.status === 'draft') {
-    invoice = await stripe.invoices.finalizeInvoice(draft.id);
+    try {
+      invoice = await stripe.invoices.finalizeInvoice(draft.id);
+    } catch (finalizeErr: unknown) {
+      // A retried idempotent create can return a draft that was meanwhile voided/finalized
+      // out-of-band (e.g. manually in the dashboard after a crash). Treat "no longer
+      // editable" as a failed charge instead of corrupting the caller's billing state.
+      const code = (finalizeErr as { code?: string })?.code;
+      if (code === 'invoice_no_longer_editable' || code === 'invoice_not_editable') {
+        console.error(`[Stripe] invoice ${draft.id} not finalizable (voided out-of-band?) — treating charge as failed`);
+        return false;
+      }
+      throw finalizeErr;
+    }
   }
   if (invoice.status === 'paid') return true;
   if (invoice.status === 'open') {
@@ -288,7 +300,7 @@ export const createFoundingMemberCheckoutSession = async (
         unit_amount: 120000, // $1,200.00
         product_data: {
           name: 'Founding Partner - Winnbell',
-          description: 'One-time membership. Full year. 1,000 entries per location per month.',
+          description: 'One-time membership. Full year. 2,500 entries per location per month.',
         },
       },
     }],
@@ -988,7 +1000,7 @@ async function processStripeEvent(event: Stripe.Event, pool: Pool): Promise<void
               [subscriptionId],
             );
             if (biz.rows[0]?.email) {
-              await sendPaymentFailedEmail(biz.rows[0].email, biz.rows[0].name, invoice.amount_due / 100);
+              await sendPaymentFailedEmail(biz.rows[0].email, biz.rows[0].name, invoice.amount_due / 100, isSignupCharge);
             }
           } catch (mailErr: unknown) {
             console.error('[Stripe] payment-failed email error (non-fatal):', mailErr instanceof Error ? mailErr.message : mailErr);
@@ -1144,6 +1156,15 @@ async function activateFoundingMember(
     if ((seatResult.rowCount ?? 0) === 0) {
       await client.query('ROLLBACK');
       console.error(`[Founding] No seats available for business ${businessId} — issuing auto-refund`);
+      // Ledger the payment+refund BEFORE calling Stripe so the money trail exists even if
+      // the process dies mid-refund. Idempotent on the payment intent, so a retry can't
+      // double-record; Stripe itself rejects refunding an already-refunded payment.
+      await pool.query(
+        `INSERT INTO founding_payment (business_id, stripe_payment_intent_id, stripe_checkout_session_id, amount, refunded_amount)
+         VALUES ($1, $2, $3, 1200.00, 1200.00)
+         ON CONFLICT (stripe_payment_intent_id) DO UPDATE SET refunded_amount = 1200.00`,
+        [businessId, paymentIntentId, checkoutSessionId],
+      );
       try {
         await stripe.refunds.create({ payment_intent: paymentIntentId });
       } catch (refundErr: unknown) {
@@ -1191,6 +1212,14 @@ async function activateFoundingMember(
     console.log(`[Founding] subscription row upserted for business ${businessId} (seat #${seatNumber})`);
   } catch (err) {
     await client.query('ROLLBACK');
+    // Two concurrent activations (verify-session double-click / webhook + verify racing)
+    // both pass the pre-check; the loser hits the UNIQUE(business_id) seat constraint.
+    // That means the winner already fully activated - treat as the idempotent no-op the
+    // pre-check would have produced (no error, no second welcome email).
+    if ((err as { code?: string })?.code === '23505') {
+      console.log(`[Founding] Concurrent activation for business ${businessId} - already claimed, skipping`);
+      return;
+    }
     throw err;
   } finally {
     client.release();
@@ -1598,9 +1627,11 @@ export const syncSubscriptionQuantity = async (userId: number, newNextCampaignCo
   }
 
   // Step 3 — stage the new fee (and tier, unchanged here) to go live at the next open.
+  // Actively changing the plan/locations means the business intends to PARTICIPATE - a
+  // previously set skip-campaign opt-out no longer reflects their intent, so clear it.
   await pool.query(
     `UPDATE subscription
-     SET pending_entries_per_location = $1, pending_fee_at_entry = $2, updated_at = NOW()
+     SET pending_entries_per_location = $1, pending_fee_at_entry = $2, skip_next_campaign = false, updated_at = NOW()
      WHERE business_id = $3`,
     [effectiveTier, newTotalFee, sub.business_id],
   );
@@ -1726,9 +1757,11 @@ export const updateSubscriptionPlan = async (userId: number, newEntriesPerLocati
 
   // Step 3 — stage the plan to go live at the next campaign open. The running campaign
   // keeps its tier; stripe_price_id tracks the live Stripe price (just changed).
+  // Actively changing the plan means the business intends to PARTICIPATE - clear any
+  // previously set skip-campaign opt-out (it no longer reflects their intent).
   await pool.query(
     `UPDATE subscription
-     SET pending_entries_per_location = $1, pending_fee_at_entry = $2, stripe_price_id = $3, updated_at = NOW()
+     SET pending_entries_per_location = $1, pending_fee_at_entry = $2, stripe_price_id = $3, skip_next_campaign = false, updated_at = NOW()
      WHERE business_id = $4`,
     [newEntriesPerLocation, newTotalFee, priceId, sub.business_id],
   );
@@ -1953,7 +1986,8 @@ export const getSubscriptionDetails = async (userId: number) => {
       nd.name       AS next_campaign_name,
       nd.start_date AS next_campaign_start_date,
       nd.draw_date  AS next_campaign_date,
-      nd.prize_pool AS next_campaign_prize
+      nd.prize_pool AS next_campaign_prize,
+      b.user_id     AS owner_user_id
     FROM business b
     JOIN subscription s ON s.business_id = b.id
     LEFT JOIN founding_member fm ON fm.business_id = b.id
@@ -1998,6 +2032,24 @@ export const getSubscriptionDetails = async (userId: number) => {
     const openedAt = sub.open_campaign_opened_at ? new Date(sub.open_campaign_opened_at).getTime() : null;
     sub.in_charged_window = openedAt === null || lastChargeAtNy().getTime() > openedAt;
     delete sub.open_campaign_opened_at;
+
+    // Location managers may see CAMPAIGN facts (their prep view needs draw name/dates/
+    // prize/status) but never the owner's billing: fees, Stripe identifiers, staged plan
+    // changes, founding seat, billing window. Null them out rather than dropping the row -
+    // the manager client paths only read the campaign fields.
+    if (sub.owner_user_id !== userId) {
+      sub.fee_at_entry = null;
+      sub.entries_per_location = null;
+      sub.pending_fee_at_entry = null;
+      sub.pending_entries_per_location = null;
+      sub.stripe_subscription_id = null;
+      sub.stripe_price_id = null;
+      sub.current_period_end = null;
+      sub.founding_seat_number = null;
+      sub.founding_transition_available = false;
+      sub.in_charged_window = false;
+    }
+    delete sub.owner_user_id;
   }
   return sub;
 };

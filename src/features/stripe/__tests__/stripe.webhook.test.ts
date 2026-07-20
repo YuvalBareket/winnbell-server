@@ -369,7 +369,8 @@ describe('handleStripeWebhook — invoice.payment_failed', () => {
       ([sql]: [string]) => typeof sql === 'string' && sql.includes("status = 'Past_Due'"),
     );
     expect(pastDue).toBeDefined();
-    expect(mockSendPaymentFailedEmail).toHaveBeenCalledWith('owner@cafe.com', 'Cafe One', 920);
+    // 4th arg false = renewal-failure copy (not the first-charge variant)
+    expect(mockSendPaymentFailedEmail).toHaveBeenCalledWith('owner@cafe.com', 'Cafe One', 920, false);
   });
 
   it('does NOT re-email on later retry attempts (banner persists in-app)', async () => {
@@ -404,8 +405,8 @@ describe('handleStripeWebhook — invoice.payment_failed', () => {
       ([sql]: [string]) => typeof sql === 'string' && sql.includes("status = 'Past_Due'"),
     );
     expect(pastDue).toBeUndefined();
-    // But the business is still told to fix its card.
-    expect(mockSendPaymentFailedEmail).toHaveBeenCalledWith('new@cafe.com', 'New Cafe', 1460);
+    // But the business is still told to fix its card - with the FIRST-CHARGE copy (4th arg true).
+    expect(mockSendPaymentFailedEmail).toHaveBeenCalledWith('new@cafe.com', 'New Cafe', 1460, true);
   });
 
   it('ignores failed SETTLEMENT invoices — the change was rolled back, the campaign payment is fine', async () => {

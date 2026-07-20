@@ -188,10 +188,23 @@ export const deleteDraw = async (req: Request, res: Response) => {
 
 export const openDraw = async (req: Request, res: Response) => {
   const drawId = parseInt(req.params.drawId as string, 10);
+  if (isNaN(drawId)) {
+    res.status(400).json({ message: 'Invalid drawId' });
+    return;
+  }
   try {
     await openDrawService(drawId);
     res.status(200).json({ message: 'Campaign opened successfully' });
   } catch (error) {
+    // Surface the actionable service errors instead of a blind 500 - the admin needs to
+    // know WHY the open failed (most commonly: another campaign is already Open).
+    const msg = error instanceof Error ? error.message : '';
+    if (msg === 'Draw not found') { res.status(404).json({ message: msg }); return; }
+    if (msg === 'Only Upcoming draws can be opened' || msg.startsWith('A draw is already Open')) {
+      res.status(409).json({ message: msg });
+      return;
+    }
+    console.error('[admin.openDraw]', error);
     res.status(500).json({ message: 'Failed to open campaign' });
   }
 };
@@ -363,12 +376,20 @@ export const confirmWinner = async (req: Request, res: Response): Promise<void> 
     res.status(200).json(winner);
   } catch (error: unknown) {
     console.error('[admin.confirmWinner]', error);
-    res.status(400).json({ message: error instanceof Error ? error.message : 'Failed to confirm winner' });
+    const raw = error instanceof Error ? error.message : 'Failed to confirm winner';
+    const message = raw === 'WINNER_NO_LONGER_ELIGIBLE'
+      ? 'This candidate is no longer eligible (deactivated, under review, or high risk). Reject them and pick a new winner.'
+      : raw;
+    res.status(raw === 'WINNER_NO_LONGER_ELIGIBLE' ? 409 : 400).json({ message });
   }
 };
 
 export const reopenDraw = async (req: Request, res: Response) => {
   const drawId = parseInt(req.params.drawId as string, 10);
+  if (isNaN(drawId)) {
+    res.status(400).json({ message: 'Invalid drawId' });
+    return;
+  }
   try {
     await reopenDrawService(drawId);
     res.status(200).json({ message: 'Campaign reopened successfully' });
@@ -585,6 +606,15 @@ export const duplicateDraw = async (req: Request, res: Response) => {
     const draw = await duplicateDrawService(drawId);
     res.status(201).json(draw);
   } catch (error) {
+    const msg = error instanceof Error ? error.message : '';
+    if (msg === 'A campaign already exists for that month') {
+      res.status(409).json({ message: msg });
+      return;
+    }
+    if (msg === 'Draw not found') {
+      res.status(404).json({ message: msg });
+      return;
+    }
     console.error('[admin.duplicateDraw]', error);
     res.status(500).json({ message: 'Failed to duplicate draw' });
   }
@@ -627,7 +657,9 @@ export const removeBusinessFromDraw = async (req: Request, res: Response): Promi
     await removeBusinessFromDrawService(drawId, businessId);
     res.status(204).send();
   } catch (err: unknown) {
-    res.status(400).json({ message: 'Failed to remove business from draw' });
+    // Service messages here are admin-facing (e.g. the live-campaign guard) - surface them.
+    const msg = err instanceof Error && err.message ? err.message : 'Failed to remove business from draw';
+    res.status(400).json({ message: msg });
   }
 };
 

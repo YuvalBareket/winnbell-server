@@ -104,9 +104,9 @@ export const sendPhoneOtp = async (userId: number, phoneNumber: string): Promise
   await pool.query(`DELETE FROM phone_otp WHERE user_id = $1 AND expires_at <= NOW()`, [userId]);
   const inserted = await pool.query(
     `INSERT INTO phone_otp (user_id, phone_number, code, expires_at)
-     VALUES ($1, $2, $3, NOW() + INTERVAL '${OTP_EXPIRY_MINUTES} minutes')
+     VALUES ($1, $2, $3, NOW() + make_interval(mins => $4))
      RETURNING id`,
-    [userId, normalizedPhone, code],
+    [userId, normalizedPhone, code, OTP_EXPIRY_MINUTES],
   );
 
   if (isSmsLive()) {

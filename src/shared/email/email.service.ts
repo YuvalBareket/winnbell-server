@@ -494,14 +494,27 @@ export const sendPaymentFailedEmail = async (
   toEmail: string,
   businessName: string,
   amountDollars: number,
+  // First charge right after signup reads differently from a renewal failure - the
+  // business has never been active yet, so "your next campaign" copy would confuse them.
+  isFirstCharge = false,
 ): Promise<void> => {
   if (!process.env.SMTP_HOST) {
     console.warn('[Email] SMTP_HOST not configured — skipping payment failed email');
     return;
   }
 
-  const subject = `Action needed: payment could not be processed — ${businessName}`;
+  const subject = isFirstCharge
+    ? `Action needed: your first payment could not be processed — ${businessName}`
+    : `Action needed: payment could not be processed — ${businessName}`;
   const manageUrl = `${process.env.FRONTEND_URL ?? 'https://winnbell.com'}/subscription/manage`;
+  const failLine = isFirstCharge
+    ? `The first charge of <strong style="color:#1e293b;">$${amountDollars.toFixed(2)}</strong> to activate ${businessName}'s campaign plan did not go through.
+                We will retry automatically over the next few days, but the fastest fix is updating your payment method.`
+    : `The charge of <strong style="color:#1e293b;">$${amountDollars.toFixed(2)}</strong> for ${businessName}'s next campaign did not go through.
+                We will retry automatically over the next few days, but the fastest fix is updating your payment method.`;
+  const stakesLine = isFirstCharge
+    ? `Once the payment goes through, your subscription activates and your business joins the campaign automatically.`
+    : `Update your card before the end of the month and your business stays in the next campaign without missing a day.`;
 
   const html = `
 <!DOCTYPE html>
@@ -531,11 +544,10 @@ export const sendPaymentFailedEmail = async (
                 We could not process your payment
               </p>
               <p style="margin:0 0 20px;color:#64748b;font-size:15px;line-height:1.6;">
-                The charge of <strong style="color:#1e293b;">$${amountDollars.toFixed(2)}</strong> for ${businessName}'s next campaign did not go through.
-                We will retry automatically over the next few days, but the fastest fix is updating your payment method.
+                ${failLine}
               </p>
               <p style="margin:0 0 28px;color:#64748b;font-size:15px;line-height:1.6;">
-                Update your card before the end of the month and your business stays in the next campaign without missing a day.
+                ${stakesLine}
               </p>
 
               <table cellpadding="0" cellspacing="0">

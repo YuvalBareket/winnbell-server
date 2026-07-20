@@ -102,13 +102,22 @@ describe('getNearbyBusinessesService', () => {
     expect(params[4]).toBe('Food');
   });
 
-  it('caps the limit at 100', async () => {
+  it('caps the limit at 30 (hard map-budget rule)', async () => {
     setupPoolQueries({ rows: [] });
 
     await getNearbyBusinessesService(25.7, 25.8, -80.3, -80.1, undefined, 5000);
 
     const [, params] = mockQuery.mock.calls[0] as [string, unknown[]];
-    expect(params[params.length - 1]).toBe(100);
+    expect(params[params.length - 1]).toBe(30);
+  });
+
+  it('caps a NAME search at 30 too (used to widen to 100)', async () => {
+    setupPoolQueries({ rows: [] });
+
+    await getNearbyBusinessesService(25.7, 25.8, -80.3, -80.1, undefined, 5000, 'pizza');
+
+    const [, params] = mockQuery.mock.calls[0] as [string, unknown[]];
+    expect(params[params.length - 1]).toBe(30);
   });
 
   it('serves a repeated identical viewport from cache without hitting the DB again', async () => {

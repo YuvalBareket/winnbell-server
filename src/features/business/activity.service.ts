@@ -282,9 +282,14 @@ export const getCampaignEntries = async (
   // follows the exact same order. Cursor format is "<created_at ISO>|<id>".
   if (cursor) {
     const sep = cursor.lastIndexOf('|');
-    if (sep > 0) {
-      params.push(cursor.slice(0, sep)); const tsIdx = params.length;
-      params.push(parseInt(cursor.slice(sep + 1), 10)); const idIdx = params.length;
+    // Validate BOTH halves before they reach the query: a garbage cursor (NaN id or an
+    // unparseable timestamp) would 500 at the ::int/::timestamp cast. Malformed cursors
+    // are simply ignored - the feed restarts from the top instead of erroring.
+    const ts = sep > 0 ? cursor.slice(0, sep) : '';
+    const id = sep > 0 ? parseInt(cursor.slice(sep + 1), 10) : NaN;
+    if (sep > 0 && Number.isFinite(id) && !isNaN(Date.parse(ts))) {
+      params.push(ts); const tsIdx = params.length;
+      params.push(id); const idIdx = params.length;
       conditions.push(`(t.created_at, t.id) < ($${tsIdx}::timestamp, $${idIdx}::int)`);
     }
   }
