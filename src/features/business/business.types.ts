@@ -131,6 +131,9 @@ export interface BusinessSetupInput {
   businessName: string;
   businessSector: string;
   description: string;
+  // Registered legal entity name, captured on the business register page and carried
+  // through email-verify -> setup. Admin-facing only.
+  legal_name?: string | null;
   website_url?: string;
   logo_url?: string;
   locations: LocationInput[];
@@ -150,6 +153,7 @@ export interface UpdateBusinessInput {
   businessName: string;
   businessSector: string;
   description: string;
+  legal_name?: string | null;
   terms_text: string;
   website_url?: string | null;
 }

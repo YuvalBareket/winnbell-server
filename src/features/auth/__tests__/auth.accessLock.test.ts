@@ -54,7 +54,9 @@ describe('accessLock', () => {
     accessLock({} as Request, res, next);
 
     expect(res.status).toHaveBeenCalledWith(403);
-    expect(res.json).toHaveBeenCalledWith({ message: 'Winnbell is not open yet.' });
+    // The stable machine code is the client contract (useSupabaseSync branches on it);
+    // the human message is friendly copy and may be tweaked freely.
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'ACCESS_LOCKED' }));
     expect(next).not.toHaveBeenCalled();
   });
 

@@ -11,7 +11,10 @@ const router = Router();
 // any session that existed before the lock keeps working. Flip the env var off at launch.
 export const accessLock = (_req: Request, res: Response, next: NextFunction) => {
   if (process.env.ACCESS_LOCKED === 'true') {
-    res.status(403).json({ message: 'Winnbell is not open yet.' });
+    res.status(403).json({
+      code: 'ACCESS_LOCKED',
+      message: "We're so excited for you to join! Winnbell is coming very soon - stay tuned.",
+    });
     return;
   }
   next();

@@ -63,9 +63,9 @@ const makeNext = (): NextFunction => jest.fn();
  * managed_location_ids = the active locations the user manages; the middleware validates the
  * token's SPECIFIC location_id against this array (not just "manages anything").
  */
-const setupRoleState = (role: string, managedLocationIds: number[] = [], tokenEpoch = 0) => {
+const setupRoleState = (role: string, managedLocationIds: number[] = [], tokenEpoch = 0, isActive = true) => {
   mockPoolQuery.mockResolvedValueOnce({
-    rows: [{ role, managed_location_ids: managedLocationIds, token_epoch: tokenEpoch }],
+    rows: [{ role, managed_location_ids: managedLocationIds, token_epoch: tokenEpoch, is_active: isActive }],
   });
 };
 
@@ -532,5 +532,50 @@ describe('requireProfileComplete — entry routes require DOB + gender on record
     await requireProfileComplete({ user: undefined } as unknown as Request, res, next);
     expect(res.status).toHaveBeenCalledWith(401);
     expect(next).not.toHaveBeenCalled();
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Admin liveness — the DB must still say Admin AND active on every request
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('authenticateToken — Admin liveness (role + is_active re-checked)', () => {
+  it('passes a valid, active Admin token', async () => {
+    setupRoleState('Admin', [], 0, true);
+    const token = makeToken({ id: 9, role: 'Admin', se: 0 });
+    const req = makeReq(token);
+    const res = makeRes();
+    const next = makeNext();
+
+    await authenticateToken(req, res, next);
+
+    expect(next).toHaveBeenCalled();
+    expect(res.status).not.toHaveBeenCalled();
+  });
+
+  it('rejects an Admin token whose DB role was demoted (direct-DB change, no epoch bump)', async () => {
+    setupRoleState('User', [], 0, true);
+    const token = makeToken({ id: 9, role: 'Admin', se: 0 });
+    const req = makeReq(token);
+    const res = makeRes();
+    const next = makeNext();
+
+    await authenticateToken(req, res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(401);
+  });
+
+  it('rejects an Admin token whose account was deactivated', async () => {
+    setupRoleState('Admin', [], 0, false);
+    const token = makeToken({ id: 9, role: 'Admin', se: 0 });
+    const req = makeReq(token);
+    const res = makeRes();
+    const next = makeNext();
+
+    await authenticateToken(req, res, next);
+
+    expect(next).not.toHaveBeenCalled();
+    expect(res.status).toHaveBeenCalledWith(401);
   });
 });

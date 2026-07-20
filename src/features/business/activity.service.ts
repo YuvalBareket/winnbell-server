@@ -53,15 +53,24 @@ export interface CampaignHeader {
   cap_reached: boolean;
 }
 
-// created_at period predicate. WTD/MTD use calendar boundaries (week starts Monday in PG),
-// which is NOT the same as "last 7/30 days" — important so month-end numbers aren't misleading.
+// created_at period predicate. Calendar boundaries are computed in the PRODUCT timezone
+// (America/New_York) - the old CURRENT_DATE/date_trunc version used the server's UTC clock,
+// so evening ET entries fell into "tomorrow" and boundaries were hours off. The week starts
+// SUNDAY to match everything user-facing (the weekly entry resets every Sunday ET); Postgres
+// date_trunc('week') is Monday-based, so we shift by a day for the Sunday anchor.
+// The boundary math: NOW() in NY local time, truncated, then converted back to the naive-UTC
+// instants that created_at stores.
+const NY_NOW = `(NOW() AT TIME ZONE 'America/New_York')`;
+const nyBoundaryUtc = (truncExpr: string): string =>
+  `((${truncExpr}) AT TIME ZONE 'America/New_York' AT TIME ZONE 'UTC')`;
+
 function periodPredicate(range: DateRange): string {
   switch (range) {
     case '7d':  return "t.created_at >= NOW() - INTERVAL '7 days'";
     case '30d': return "t.created_at >= NOW() - INTERVAL '30 days'";
-    case 'wtd': return "t.created_at >= date_trunc('week', CURRENT_DATE)";
-    case 'mtd': return "t.created_at >= date_trunc('month', CURRENT_DATE)";
-    default:    return 't.created_at >= CURRENT_DATE'; // today
+    case 'wtd': return `t.created_at >= ${nyBoundaryUtc(`date_trunc('week', ${NY_NOW} + INTERVAL '1 day') - INTERVAL '1 day'`)}`;
+    case 'mtd': return `t.created_at >= ${nyBoundaryUtc(`date_trunc('month', ${NY_NOW})`)}`;
+    default:    return `t.created_at >= ${nyBoundaryUtc(`date_trunc('day', ${NY_NOW})`)}`; // today
   }
 }
 
@@ -252,6 +261,9 @@ export const getCampaignEntries = async (
   drawId?: number,
   cursor?: string,
   limit = 25,
+  // Scope the feed to the SAME period the KPI toggle uses, so the counter and the list
+  // below it always describe the same set of entries.
+  range?: DateRange,
 ): Promise<CampaignEntriesResult> => {
   const pool = getPool();
   const { businessId, scopedLocationId } = await resolveScope(userId, jwtLocationId, filterLocationId);
@@ -278,6 +290,7 @@ export const getCampaignEntries = async (
   const params: unknown[] = [businessId, resolvedDrawId];
   const conditions: string[] = ['t.business_id = $1', 't.draw_id = $2'];
   if (scopedLocationId) { params.push(scopedLocationId); conditions.push(`t.location_id = $${params.length}`); }
+  if (range) conditions.push(periodPredicate(range));
   // Keyset on (created_at, id): the feed is ordered by date, and id only breaks ties, so paging
   // follows the exact same order. Cursor format is "<created_at ISO>|<id>".
   if (cursor) {

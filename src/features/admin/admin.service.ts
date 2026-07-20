@@ -138,6 +138,7 @@ export const getAllDrawsService = async () => {
       d.id,
       d.name,
       d.prize_pool AS prize_amount,
+      d.prize_revealed,
       d.start_date,
       d.draw_date,
       d.status,
@@ -223,6 +224,21 @@ export const updateDrawService = async (
     `UPDATE draw SET ${updates.join(', ')} WHERE id = $${idx} RETURNING id, name, prize_pool AS prize_amount, start_date, draw_date, status`,
     values,
   );
+  invalidatePublicBusinessData();
+  return result.rows[0];
+};
+
+// Prize teaser toggle: while a campaign is Upcoming its prize is hidden publicly until
+// the admin reveals it. Only meaningful pre-open (Open/Closed always show the prize).
+export const setDrawPrizeRevealedService = async (drawId: number, revealed: boolean) => {
+  const pool = getPool();
+  const result = await pool.query(
+    `UPDATE draw SET prize_revealed = $2, updated_at = NOW()
+     WHERE id = $1 AND status = 'Upcoming'
+     RETURNING id, prize_revealed`,
+    [drawId, revealed],
+  );
+  if (result.rowCount === 0) throw new Error('Only upcoming campaigns have a prize reveal');
   invalidatePublicBusinessData();
   return result.rows[0];
 };
@@ -339,7 +355,10 @@ export const getDrawBusinessesService = async (
 //    cancelled on the 24th still shows a stale Active status because Stripe's deleted
 //    webhook has not landed yet - its period ended on the 24th, so it is excluded anyway.
 const openDrawInTx = async (client: import('pg').PoolClient, drawId: number): Promise<void> => {
-  await client.query(`UPDATE draw SET status = 'Open', opened_at = NOW() WHERE id = $1`, [drawId]);
+  // prize_revealed = TRUE on open: a live campaign's prize is public fact. Sticky on
+  // purpose - if a reopen later reverts this draw to Upcoming, the already-seen prize
+  // must not vanish back behind the teaser.
+  await client.query(`UPDATE draw SET status = 'Open', opened_at = NOW(), prize_revealed = TRUE WHERE id = $1`, [drawId]);
   // Apply staged plan changes (founding-to-regular hand-off) at the campaign boundary,
   // BEFORE enrollment snapshots tier/fee. A founding member who started a regular plan
   // during their final prepaid month keeps founding terms through that campaign; the new
@@ -571,6 +590,7 @@ export const reopenDrawService = async (drawId: number): Promise<void> => {
       `UPDATE draw
        SET status = 'Open',
            opened_at = COALESCE(opened_at, NOW()),
+           prize_revealed = TRUE,
            closed_at = NULL,
            winner_user_id = NULL,
            winner_ticket_id = NULL
@@ -984,18 +1004,24 @@ export const updateUserRoleService = async (userId: number, role: string) => {
   const allowed = ['User', 'Business'];
   if (!allowed.includes(role)) throw new Error('Invalid role');
   const pool = getPool();
+  // Epoch bump + cache flush = the change bites on the target's NEXT request, not after
+  // the 60s guard cache / 1h token expiry. They re-login and get a token with the new role.
   await pool.query(
-    `UPDATE "user" SET role=$1 WHERE id=$2 AND role!='Admin'`,
+    `UPDATE "user" SET role=$1, token_epoch = token_epoch + 1 WHERE id=$2 AND role!='Admin'`,
     [role, userId],
   );
+  invalidateUserAuth(userId);
 };
 
 export const toggleUserActiveService = async (userId: number, isActive: boolean) => {
   const pool = getPool();
+  // Deactivation must kill live sessions instantly (epoch check runs on every request).
+  // Reactivation bumps too - harmless, the user just signs in again.
   await pool.query(
-    `UPDATE "user" SET is_active=$1 WHERE id=$2 AND role!='Admin'`,
+    `UPDATE "user" SET is_active=$1, token_epoch = token_epoch + 1 WHERE id=$2 AND role!='Admin'`,
     [isActive, userId],
   );
+  invalidateUserAuth(userId);
 };
 
 export const getPlatformSettingsService = async (): Promise<{
@@ -1444,6 +1470,7 @@ export const getBusinessDetailService = async (businessId: number) => {
       SELECT
         b.id,
         b.name,
+        b.legal_name,
         b.sector,
         b.description,
         b.min_transaction_amount,

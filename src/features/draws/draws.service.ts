@@ -27,7 +27,10 @@ export const getDrawHistoryService = async () => {
     SELECT
       d.id,
       d.name,
-      d.prize_pool AS prize_amount,
+      -- Prize teaser: an UPCOMING campaign's prize stays NULL on the wire until the admin
+      -- reveals it. Server-enforced so the amount never reaches the client early.
+      CASE WHEN d.status = 'Upcoming' AND d.prize_revealed = FALSE THEN NULL
+           ELSE d.prize_pool END AS prize_amount,
       d.start_date,
       d.draw_date,
       d.status,
@@ -44,6 +47,10 @@ export const getDrawHistoryService = async () => {
     LEFT JOIN business b ON wt.business_id = b.id
     LEFT JOIN business_location bl ON wt.location_id = bl.id
     LEFT JOIN ticket t ON t.draw_id = d.id AND t.is_quarantined = FALSE AND t.activated_by_user_id IS NOT NULL
+    -- The hub needs the live + past campaigns plus ONLY the next upcoming one (its deck's
+    -- left neighbour). Far-future pre-created campaigns never leave the server.
+    WHERE d.status IN ('Open', 'Closed')
+       OR d.id = (SELECT id FROM draw WHERE status = 'Upcoming' ORDER BY draw_date ASC LIMIT 1)
     GROUP BY d.id, wt.id, u.id, b.id, bl.id
     ORDER BY d.draw_date DESC
     LIMIT 50
@@ -55,7 +62,10 @@ export const getDrawHistoryService = async () => {
 export const getDrawByIdService = async (drawId: number) => {
   const pool = getPool();
   const result = await pool.query(`
-    SELECT id, name, prize_pool AS prize_amount, start_date, draw_date, status
+    SELECT id, name,
+      CASE WHEN status = 'Upcoming' AND prize_revealed = FALSE THEN NULL
+           ELSE prize_pool END AS prize_amount,
+      start_date, draw_date, status
     FROM draw
     WHERE id = $1
   `, [drawId]);
@@ -68,7 +78,8 @@ export const getDrawResultService = async (drawId: number) => {
     SELECT
       d.id,
       d.name,
-      d.prize_pool AS prize_amount,
+      CASE WHEN d.status = 'Upcoming' AND d.prize_revealed = FALSE THEN NULL
+           ELSE d.prize_pool END AS prize_amount,
       d.start_date,
       d.draw_date,
       d.status,

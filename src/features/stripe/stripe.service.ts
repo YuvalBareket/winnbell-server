@@ -1966,7 +1966,10 @@ export const getSubscriptionDetails = async (userId: number) => {
       d.start_date AS draw_start_date,
       d.draw_date  AS draw_date,
       d.status     AS draw_status,
-      d.prize_pool AS prize_amount,
+      -- Prize teaser applies here too: an Upcoming enrollment's prize stays hidden from
+      -- business dashboards until the admin reveals it (no leak via a partner screen).
+      CASE WHEN d.status = 'Upcoming' AND d.prize_revealed = FALSE THEN NULL
+           ELSE d.prize_pool END AS prize_amount,
       CASE WHEN fm.id IS NOT NULL THEN true ELSE false END AS is_founding,
       fm.seat_number AS founding_seat_number,
       s.fee_at_entry,
@@ -1986,13 +1989,17 @@ export const getSubscriptionDetails = async (userId: number) => {
       nd.name       AS next_campaign_name,
       nd.start_date AS next_campaign_start_date,
       nd.draw_date  AS next_campaign_date,
+<<<<<<< HEAD
       nd.prize_pool AS next_campaign_prize,
+=======
+      CASE WHEN nd.prize_revealed = FALSE THEN NULL ELSE nd.prize_pool END AS next_campaign_prize,
+>>>>>>> develop
       b.user_id     AS owner_user_id
     FROM business b
     JOIN subscription s ON s.business_id = b.id
     LEFT JOIN founding_member fm ON fm.business_id = b.id
     LEFT JOIN LATERAL (
-      SELECT d2.id, d2.name, d2.start_date, d2.draw_date, d2.status, d2.prize_pool
+      SELECT d2.id, d2.name, d2.start_date, d2.draw_date, d2.status, d2.prize_pool, d2.prize_revealed
       FROM draw_entry de2
       JOIN draw d2 ON d2.id = de2.draw_id
       WHERE de2.business_id = b.id
@@ -2006,7 +2013,7 @@ export const getSubscriptionDetails = async (userId: number) => {
       -- The next campaign this business will be enrolled into when the admin opens
       -- it. Enrollment happens at open, so there is no draw_entry yet; this shows
       -- the soonest Upcoming campaign the business will join.
-      SELECT d4.id, d4.name, d4.start_date, d4.draw_date, d4.prize_pool
+      SELECT d4.id, d4.name, d4.start_date, d4.draw_date, d4.prize_pool, d4.prize_revealed
       FROM draw d4
       WHERE d4.status = 'Upcoming'
       ORDER BY d4.draw_date ASC
