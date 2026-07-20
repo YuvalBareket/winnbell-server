@@ -19,9 +19,14 @@ export const accessLock = (_req: Request, res: Response, next: NextFunction) => 
 
 router.get('/region-config', authController.getRegionConfig);
 router.get('/region-check', authController.checkRegion);
-router.post('/register', accessLock, authController.register);
+// Legacy password endpoints: the real product flow is 100% Supabase (/sync). These have
+// ZERO client consumers and /register would mint a JWT with NO email verification, so in
+// production they simply do not exist. Kept for local dev tooling and tests only.
+if (process.env.NODE_ENV !== 'production') {
+  router.post('/register', accessLock, authController.register);
+  router.post('/login', accessLock, authController.login);
+}
 router.post('/check-email', authController.checkEmail);
-router.post('/login', accessLock, authController.login);
 router.post('/sync', accessLock, authController.syncUser);
 router.post('/refresh', authController.refreshTokenController);
 router.post('/logout', authController.logoutController);

@@ -792,6 +792,8 @@ export const confirmWinnerService = async (drawId: number): Promise<{
         u.full_name,
         u.email,
         u.risk_score,
+        u.is_active,
+        t.is_quarantined,
         b.name AS business_name,
         bl.name AS location_name
       FROM ticket t
@@ -804,6 +806,13 @@ export const confirmWinnerService = async (drawId: number): Promise<{
     if (winnerRes.rows.length === 0) throw new Error('Winner ticket not found');
 
     const winner = winnerRes.rows[0];
+
+    // Re-verify eligibility at CONFIRM time: between pick and confirm the candidate can be
+    // deactivated, quarantined, or risk-bumped (independent admin actions). Confirming an
+    // ineligible candidate must be impossible - reject and let the admin pick again.
+    if (winner.is_active !== true || winner.is_quarantined === true || Number(winner.risk_score) >= 20) {
+      throw new Error('WINNER_NO_LONGER_ELIGIBLE');
+    }
 
     await client.query(
       `UPDATE draw SET winner_confirmed = TRUE WHERE id = $1`,
@@ -1289,11 +1298,16 @@ export const duplicateDrawService = async (drawId: number) => {
   // Land the copy in next month's campaign slot, normalised to the standard month
   // boundaries (1st -> last day, midnight NY) like every other draw.
   const inThirtyDays = new Date(Date.now() + 30 * 86_400_000).toISOString();
+  const targetDrawDate = drawDateFromString(inThirtyDays);
+  // One campaign per month: a second draw with the same draw_date would make the
+  // "next Upcoming" ordering non-deterministic at close/open time.
+  const clash = await pool.query(`SELECT id FROM draw WHERE draw_date = $1`, [targetDrawDate]);
+  if (clash.rows.length > 0) throw new Error('A campaign already exists for that month');
   const result = await pool.query(
     `INSERT INTO draw (name, prize_pool, start_date, draw_date, status)
      VALUES ($1, $2, $3, $4, 'Upcoming')
      RETURNING id, name, prize_pool AS prize_amount, start_date, draw_date, status`,
-    [`${name} (Copy)`, prize_pool, drawStartDateFromString(inThirtyDays), drawDateFromString(inThirtyDays)],
+    [`${name} (Copy)`, prize_pool, drawStartDateFromString(inThirtyDays), targetDrawDate],
   );
   invalidatePublicBusinessData();
   return result.rows[0];
@@ -1411,6 +1425,10 @@ export const removeBusinessFromDrawService = async (drawId: number, businessId: 
   if (!drawCheck.rows[0]) throw new Error('Draw not found');
   const drawStatus = drawCheck.rows[0].status as string;
   if (drawStatus === 'Closed') throw new Error('Cannot remove businesses from a closed draw');
+  // Removing a business from a LIVE campaign would leave its already-issued tickets
+  // drawable with no enrolled business behind them (the known H2 broken intermediate
+  // state). Forbid it outright: quarantine the business instead if it misbehaves.
+  if (drawStatus === 'Open') throw new Error('Cannot remove a business from a live campaign. Quarantine it instead - customer entries already issued must stay valid.');
   await pool.query(
     `DELETE FROM draw_entry WHERE draw_id = $1 AND business_id = $2`,
     [drawId, businessId],

@@ -27,6 +27,11 @@ jest.mock('../../tickets/tickets.service.js', () => ({
   generateGlobalUniqueCode: jest.fn().mockResolvedValue('TESTCODE'),
 }));
 
+// Risk decay runs AFTER winner confirmation commits (non-fatal) — stub it
+jest.mock('../../risk/risk.service.js', () => ({
+  decayAllUserRiskScores: jest.fn().mockResolvedValue({ unquarantinedUserIds: [] }),
+}));
+
 // email.service is imported for the founding final-campaign notice — stub it
 const mockSendFoundingFinalCampaignEmail = jest.fn();
 jest.mock('../../../shared/email/email.service.js', () => ({
@@ -34,7 +39,7 @@ jest.mock('../../../shared/email/email.service.js', () => ({
   sendFoundingFinalCampaignEmail: (...args: unknown[]) => mockSendFoundingFinalCampaignEmail(...args),
 }));
 
-import { createDrawService, openDrawService, closeDrawService } from '../admin.service';
+import { createDrawService, openDrawService, closeDrawService, confirmWinnerService, removeBusinessFromDrawService, duplicateDrawService } from '../admin.service';
 
 // ─────────────────────────────────────────────
 // Helpers
@@ -538,5 +543,109 @@ describe('openDrawInTx — staged plan changes (founding hand-off)', () => {
     const sql: string = calls[pendingIdx][0];
     expect(sql).toMatch(/entries_per_location\s*=\s*pending_entries_per_location/);
     expect(sql).toMatch(/pending_entries_per_location = NULL/);
+  });
+});
+
+// ─────────────────────────────────────────────
+// confirmWinnerService — eligibility re-check at confirm time
+// ─────────────────────────────────────────────
+describe('confirmWinnerService — eligibility re-check', () => {
+  const DRAW_ROW = { status: 'Closed', prize_pool: 1000, winner_user_id: 5, winner_ticket_id: 9, winner_confirmed: false };
+  const eligibleWinner = {
+    code: 'WIN123', receipt_identifier: 'R-1', transaction_amount: 25, transaction_date: '2026-07-10',
+    receipt_image_url: null, entry_source: 'receipt', image_validation_status: 'approved',
+    full_name: 'Jane Doe', email: 'jane@test.com', risk_score: 3, is_active: true, is_quarantined: false,
+    business_name: 'Cafe', location_name: 'Main St',
+  };
+
+  test('confirms an eligible candidate and marks winner_confirmed', async () => {
+    setupClientQueries(
+      { rows: [] },                    // BEGIN
+      { rows: [DRAW_ROW] },            // draw FOR UPDATE
+      { rows: [eligibleWinner] },      // winner ticket + user
+      { rows: [] },                    // UPDATE winner_confirmed
+      { rows: [] },                    // audit log
+      { rows: [] },                    // COMMIT
+    );
+    await expect(confirmWinnerService(1)).resolves.toBeDefined();
+    const confirmed = mockClientQuery.mock.calls.some(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('winner_confirmed = TRUE'),
+    );
+    expect(confirmed).toBe(true);
+  });
+
+  test('rejects a candidate DEACTIVATED between pick and confirm', async () => {
+    setupClientQueries(
+      { rows: [] },
+      { rows: [DRAW_ROW] },
+      { rows: [{ ...eligibleWinner, is_active: false }] },
+      { rows: [] },
+    );
+    await expect(confirmWinnerService(1)).rejects.toThrow('WINNER_NO_LONGER_ELIGIBLE');
+    const confirmed = mockClientQuery.mock.calls.some(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('winner_confirmed = TRUE'),
+    );
+    expect(confirmed).toBe(false);
+  });
+
+  test('rejects a candidate QUARANTINED between pick and confirm', async () => {
+    setupClientQueries(
+      { rows: [] },
+      { rows: [DRAW_ROW] },
+      { rows: [{ ...eligibleWinner, is_quarantined: true }] },
+      { rows: [] },
+    );
+    await expect(confirmWinnerService(1)).rejects.toThrow('WINNER_NO_LONGER_ELIGIBLE');
+  });
+
+  test('rejects a candidate whose risk score climbed to the quarantine threshold', async () => {
+    setupClientQueries(
+      { rows: [] },
+      { rows: [DRAW_ROW] },
+      { rows: [{ ...eligibleWinner, risk_score: 20 }] },
+      { rows: [] },
+    );
+    await expect(confirmWinnerService(1)).rejects.toThrow('WINNER_NO_LONGER_ELIGIBLE');
+  });
+});
+
+// ─────────────────────────────────────────────
+// removeBusinessFromDrawService — live-campaign guard (the old H2 hole)
+// ─────────────────────────────────────────────
+describe('removeBusinessFromDrawService — live-campaign guard', () => {
+  test('refuses to remove a business from an OPEN draw (tickets would stay drawable)', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 1, status: 'Open' }] });
+    await expect(removeBusinessFromDrawService(1, 42)).rejects.toThrow(/live campaign/i);
+    const deleted = mockQuery.mock.calls.some(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('DELETE FROM draw_entry'),
+    );
+    expect(deleted).toBe(false);
+  });
+
+  test('still allows removal from an UPCOMING draw (no tickets exist yet)', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 1, status: 'Upcoming' }] })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 });
+    await expect(removeBusinessFromDrawService(1, 42)).resolves.toBeUndefined();
+    const deleted = mockQuery.mock.calls.some(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('DELETE FROM draw_entry'),
+    );
+    expect(deleted).toBe(true);
+  });
+});
+
+// ─────────────────────────────────────────────
+// duplicateDrawService — one campaign per month
+// ─────────────────────────────────────────────
+describe('duplicateDrawService — same-month collision guard', () => {
+  test('refuses to duplicate into a month that already has a campaign', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ name: 'July 2026', prize_pool: 1000 }] }) // source draw
+      .mockResolvedValueOnce({ rows: [{ id: 7 }] });                              // clash check hit
+    await expect(duplicateDrawService(1)).rejects.toThrow('A campaign already exists for that month');
+    const inserted = mockQuery.mock.calls.some(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO draw'),
+    );
+    expect(inserted).toBe(false);
   });
 });

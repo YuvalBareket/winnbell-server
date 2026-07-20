@@ -326,6 +326,9 @@ export const deleteAccount = async (req: Request, res: Response): Promise<void> 
       // this deletion cannot commit a new token that our DELETE would miss (MVCC snapshot).
       await client.query(`SELECT pg_advisory_xact_lock(11, $1)`, [userId]);
       await client.query(`DELETE FROM refresh_token WHERE user_id = $1`, [userId]);
+      // A self-deleting location manager must release their location: the user row is
+      // UPDATEd (not deleted), so the FK's ON DELETE SET NULL never fires on its own.
+      await client.query(`UPDATE business_location SET manager_user_id = NULL WHERE manager_user_id = $1`, [userId]);
       await client.query(
         `UPDATE "user" SET
            full_name    = 'Deleted User',

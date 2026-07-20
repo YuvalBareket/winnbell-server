@@ -39,11 +39,12 @@ export const getNearbyBusinessesService = async (
 
   const pool = getPool();
 
-  const cappedLimit = Math.min(limit, 100);
+  // Hard project rule: map responses never exceed 30 rows - name searches included.
+  const cappedLimit = Math.min(limit, 30);
   const params: (number | string)[] = [minLat, maxLat, minLng, maxLng];
   const sectorClause = safeSector ? `AND b.sector = $${params.push(safeSector)}` : '';
   const nameClause = safeName ? `AND b.name ILIKE $${params.push(`%${safeName}%`)}` : '';
-  const limitPlaceholder = `$${params.push(safeName ? 100 : cappedLimit)}`;
+  const limitPlaceholder = `$${params.push(cappedLimit)}`;
 
   const query = `
     SELECT

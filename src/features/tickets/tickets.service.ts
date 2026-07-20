@@ -684,9 +684,9 @@ export const submitReceiptEntryService = async (
             i === 0 ? null : insertedTickets[0].ticketId, // siblings link back to anchor
           ],
         );
-      } catch (insertErr: any) {
+      } catch (insertErr: unknown) {
         // PostgreSQL unique constraint violation — receipt was already submitted
-        if (insertErr?.code === '23505') {
+        if ((insertErr as { code?: string })?.code === '23505') {
           throw new Error('This receipt has already been submitted.');
         }
         throw insertErr;
