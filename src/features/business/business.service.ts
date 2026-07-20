@@ -527,6 +527,15 @@ export const searchParticipatingLocationsService = async (query: string): Promis
         JOIN draw d ON d.id = de.draw_id
         WHERE de.business_id = b.id AND d.status = 'Open'
       )
+      -- A location at its campaign capacity cannot accept entries, so search (the
+      -- "where can I enter" tool) omits it entirely. NULL cap = uncapped, always shown.
+      AND (
+        SELECT COUNT(*)::int FROM ticket t
+        WHERE t.business_id = b.id
+          AND t.location_id = bl.id
+          AND t.draw_id = ${OPEN_DRAW_ID_SUBQUERY}
+          AND t.is_quarantined = FALSE
+      ) < COALESCE(s.entries_per_location, (SELECT global_entry_cap FROM platform_settings WHERE id = 1), 2147483647)
       AND (
         b.name ILIKE $1 OR
         bl.name ILIKE $1 OR
