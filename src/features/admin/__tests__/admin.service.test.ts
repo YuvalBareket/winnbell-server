@@ -649,3 +649,40 @@ describe('duplicateDrawService — same-month collision guard', () => {
     expect(inserted).toBe(false);
   });
 });
+
+// ─────────────────────────────────────────────
+// Prize reveal — teaser flag for upcoming campaigns
+// ─────────────────────────────────────────────
+describe('setDrawPrizeRevealedService', () => {
+  test('toggles the flag for an Upcoming draw', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 5, prize_revealed: true }], rowCount: 1 });
+    await expect((await import('../admin.service')).setDrawPrizeRevealedService(5, true))
+      .resolves.toEqual({ id: 5, prize_revealed: true });
+    const [sql] = mockQuery.mock.calls[0];
+    expect(sql).toMatch(/status = 'Upcoming'/);
+  });
+
+  test('rejects non-upcoming draws (Open/Closed prizes are always public)', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 });
+    await expect((await import('../admin.service')).setDrawPrizeRevealedService(5, true))
+      .rejects.toThrow('Only upcoming campaigns have a prize reveal');
+  });
+});
+
+describe('openDrawService — opening reveals the prize permanently', () => {
+  test('the open UPDATE sets prize_revealed = TRUE (sticky across a later reopen-revert)', async () => {
+    setupClientQueries(
+      { rows: [] },                                    // BEGIN
+      { rows: [] },                                    // advisory lock
+      { rows: [{ id: 3, status: 'Upcoming' }] },       // draw FOR UPDATE
+      { rows: [] },                                    // no open draw check
+      { rows: [] },                                    // everything else
+    );
+    await openDrawService(3);
+    const openUpdate = mockClientQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes("SET status = 'Open'"),
+    );
+    expect(openUpdate).toBeDefined();
+    expect(openUpdate![0]).toMatch(/prize_revealed = TRUE/);
+  });
+});

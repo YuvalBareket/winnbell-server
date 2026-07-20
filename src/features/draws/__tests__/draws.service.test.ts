@@ -142,7 +142,7 @@ describe('getDrawHistoryService', () => {
     expect(draw.winner_location_name).toBeNull();
   });
 
-  it('should NOT filter by status — the SQL must not contain WHERE d.status = \'Closed\'', async () => {
+  it('returns Open + Closed draws plus ONLY the next upcoming one (deck contract)', async () => {
     mockQuery.mockResolvedValueOnce({ rows: [] });
 
     await getDrawHistoryService();
@@ -150,11 +150,11 @@ describe('getDrawHistoryService', () => {
     // pool.query is called with a single SQL string (no params for this query)
     const [sqlArg] = mockQuery.mock.calls[0];
     expect(typeof sqlArg).toBe('string');
-    // The query must not restrict to only closed draws
-    expect(sqlArg).not.toMatch(/WHERE\s+d\.status\s*=\s*'Closed'/i);
-    // And must not have any WHERE clause that references status at all
-    // (the only WHERE-like clause allowed is inside the JOIN conditions)
-    expect(sqlArg).not.toMatch(/WHERE.*d\.status/i);
+    // Live + past campaigns are always included...
+    expect(sqlArg).toMatch(/d\.status IN \('Open', 'Closed'\)/);
+    // ...and exactly one Upcoming draw (the soonest) rides along for the hub deck's
+    // left neighbour - far-future pre-created campaigns must never leave the server.
+    expect(sqlArg).toMatch(/OR d\.id = \(SELECT id FROM draw WHERE status = 'Upcoming' ORDER BY draw_date ASC LIMIT 1\)/);
   });
 
   it('should call pool.query exactly once per invocation', async () => {

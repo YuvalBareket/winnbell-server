@@ -20,6 +20,7 @@ router.patch('/users/:userId/risk', adminController.setUserRisk);
 router.post('/business', adminController.createBusiness);
 router.post('/draw', adminController.createDraw);
 router.patch('/draws/:drawId', adminController.updateDraw);
+router.patch('/draws/:drawId/prize-reveal', adminController.setDrawPrizeRevealed);
 router.delete('/draws/:drawId', adminController.deleteDraw);
 router.post('/draws/:drawId/duplicate', adminController.duplicateDraw);
 router.post('/draws/:drawId/open', adminController.openDraw);

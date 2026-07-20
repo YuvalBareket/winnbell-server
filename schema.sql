@@ -267,6 +267,10 @@ CREATE TABLE draw (
   start_date       TIMESTAMP NOT NULL,
   draw_date        TIMESTAMP NOT NULL,
   status           draw_status_enum NOT NULL DEFAULT 'Upcoming',
+  -- Prize teaser gate: while a campaign is UPCOMING its prize stays hidden on public
+  -- surfaces until an admin flips this from the campaigns panel. Open/Closed campaigns
+  -- always show their prize regardless.
+  prize_revealed   BOOLEAN NOT NULL DEFAULT FALSE,
   -- Populated by pickDrawWinnerService after the draw closes.
   -- Rejected winner candidates live ONLY in draw_rejected_winner (normalized, FK-safe).
   winner_user_id      INTEGER REFERENCES "user"(id) ON DELETE SET NULL,

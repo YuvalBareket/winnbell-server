@@ -13,6 +13,7 @@ import {
   createDrawService,
   updateDrawService,
   deleteDrawService,
+  setDrawPrizeRevealedService,
   getActiveDraws,
   getAllDrawsService,
   getBusinessesWithStats,
@@ -169,6 +170,31 @@ export const updateDraw = async (req: Request, res: Response) => {
     }
     const known = ['Start date must be before the draw date', 'Only upcoming campaigns can be edited', 'No fields to update'];
     res.status(400).json({ message: known.includes(msg) ? msg : 'Failed to update campaign' });
+  }
+};
+
+export const setDrawPrizeRevealed = async (req: Request, res: Response) => {
+  const drawId = parseInt(req.params.drawId as string, 10);
+  if (isNaN(drawId)) {
+    res.status(400).json({ message: 'Invalid drawId' });
+    return;
+  }
+  const { revealed } = req.body as { revealed?: boolean };
+  if (typeof revealed !== 'boolean') {
+    res.status(400).json({ message: 'revealed must be a boolean' });
+    return;
+  }
+  try {
+    const row = await setDrawPrizeRevealedService(drawId, revealed);
+    res.json(row);
+  } catch (error) {
+    const msg = error instanceof Error ? error.message : '';
+    if (msg === 'Only upcoming campaigns have a prize reveal') {
+      res.status(409).json({ message: msg });
+      return;
+    }
+    console.error('[admin.setDrawPrizeRevealed]', error);
+    res.status(500).json({ message: 'Failed to update prize reveal' });
   }
 };
 

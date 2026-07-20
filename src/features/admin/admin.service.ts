@@ -138,6 +138,7 @@ export const getAllDrawsService = async () => {
       d.id,
       d.name,
       d.prize_pool AS prize_amount,
+      d.prize_revealed,
       d.start_date,
       d.draw_date,
       d.status,
@@ -223,6 +224,21 @@ export const updateDrawService = async (
     `UPDATE draw SET ${updates.join(', ')} WHERE id = $${idx} RETURNING id, name, prize_pool AS prize_amount, start_date, draw_date, status`,
     values,
   );
+  invalidatePublicBusinessData();
+  return result.rows[0];
+};
+
+// Prize teaser toggle: while a campaign is Upcoming its prize is hidden publicly until
+// the admin reveals it. Only meaningful pre-open (Open/Closed always show the prize).
+export const setDrawPrizeRevealedService = async (drawId: number, revealed: boolean) => {
+  const pool = getPool();
+  const result = await pool.query(
+    `UPDATE draw SET prize_revealed = $2, updated_at = NOW()
+     WHERE id = $1 AND status = 'Upcoming'
+     RETURNING id, prize_revealed`,
+    [drawId, revealed],
+  );
+  if (result.rowCount === 0) throw new Error('Only upcoming campaigns have a prize reveal');
   invalidatePublicBusinessData();
   return result.rows[0];
 };
@@ -339,7 +355,10 @@ export const getDrawBusinessesService = async (
 //    cancelled on the 24th still shows a stale Active status because Stripe's deleted
 //    webhook has not landed yet - its period ended on the 24th, so it is excluded anyway.
 const openDrawInTx = async (client: import('pg').PoolClient, drawId: number): Promise<void> => {
-  await client.query(`UPDATE draw SET status = 'Open', opened_at = NOW() WHERE id = $1`, [drawId]);
+  // prize_revealed = TRUE on open: a live campaign's prize is public fact. Sticky on
+  // purpose - if a reopen later reverts this draw to Upcoming, the already-seen prize
+  // must not vanish back behind the teaser.
+  await client.query(`UPDATE draw SET status = 'Open', opened_at = NOW(), prize_revealed = TRUE WHERE id = $1`, [drawId]);
   // Apply staged plan changes (founding-to-regular hand-off) at the campaign boundary,
   // BEFORE enrollment snapshots tier/fee. A founding member who started a regular plan
   // during their final prepaid month keeps founding terms through that campaign; the new
@@ -571,6 +590,7 @@ export const reopenDrawService = async (drawId: number): Promise<void> => {
       `UPDATE draw
        SET status = 'Open',
            opened_at = COALESCE(opened_at, NOW()),
+           prize_revealed = TRUE,
            closed_at = NULL,
            winner_user_id = NULL,
            winner_ticket_id = NULL
