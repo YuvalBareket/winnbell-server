@@ -172,9 +172,10 @@ export const getAddressCoordsController = async (req: Request, res: Response) =>
 export const setupBusiness = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
     const userId = req.user!.id;
-    const { businessName, businessSector, description, terms_text, logo_url, website_url } = req.body;
+    const { businessName, businessSector, description, terms_text, logo_url, website_url, legal_name } = req.body;
     const lenErr = validateLengths([
       ['Business name', businessName, 150],
+      ['Business legal name', legal_name, 200],
       ['Sector', businessSector, 50],
       ['Description', description, 2000],
       ['Terms', terms_text, 5000],
@@ -250,16 +251,18 @@ export const getMyBusiness = async (req: AuthRequest, res: Response): Promise<vo
 
 export const updateBusiness = async (req: AuthRequest, res: Response): Promise<void> => {
   try {
-    const { businessName, businessSector, description, terms_text, website_url } = req.body as {
+    const { businessName, businessSector, description, legal_name, terms_text, website_url } = req.body as {
       businessName: string;
       businessSector: string;
       description: string;
+      legal_name?: string;
       terms_text: string;
       website_url?: string;
     };
 
     const lenErr = validateLengths([
       ['Business name', businessName, 150],
+      ['Business legal name', legal_name, 200],
       ['Sector', businessSector, 50],
       ['Description', description, 2000],
       ['Terms', terms_text, 5000],
@@ -278,7 +281,7 @@ export const updateBusiness = async (req: AuthRequest, res: Response): Promise<v
       return;
     }
 
-    await updateBusinessProfile(req.user!.id, { businessName, businessSector, description, terms_text, website_url });
+    await updateBusinessProfile(req.user!.id, { businessName, businessSector, description, legal_name, terms_text, website_url });
     res.status(204).send();
   } catch (error: unknown) {
     if (error instanceof Error && error.message === 'BUSINESS_NOT_FOUND') {

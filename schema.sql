@@ -107,6 +107,9 @@ CREATE TABLE business (
   -- One user = one business (a business owner IS a user). UNIQUE makes the 1:1 relationship a
   -- hard DB guarantee so login's business/subscription lookup is provably single-row.
   user_id                         INTEGER NOT NULL UNIQUE REFERENCES "user"(id) ON DELETE RESTRICT,
+  -- Registered legal entity name, captured at business registration. May differ from the
+  -- public display name (name); shown to admins, never on customer-facing surfaces.
+  legal_name                      TEXT NULL,
   name                            TEXT NOT NULL,
   sector                          TEXT NOT NULL CHECK (sector IN ('Food','Coffee','Bakery','IceCream','Grocery','Liquor','Retail','Fashion','Electronics','Books','Flowers','Pets','Beauty','Health','Gym','Auto','Entertainment','Education','Service','Other','Free')),
   description                     TEXT,

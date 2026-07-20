@@ -1450,6 +1450,7 @@ export const getBusinessDetailService = async (businessId: number) => {
       SELECT
         b.id,
         b.name,
+        b.legal_name,
         b.sector,
         b.description,
         b.min_transaction_amount,

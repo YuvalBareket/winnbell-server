@@ -164,12 +164,12 @@ export const createFullBusinessProfile = async (userId: number, data: BusinessSe
     }
 
     const businessResult = await client.query(
-      `INSERT INTO business (user_id, name, sector, description, website_url, logo_url, min_transaction_amount)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
+      `INSERT INTO business (user_id, name, legal_name, sector, description, website_url, logo_url, min_transaction_amount)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
        RETURNING id`,
       // A specific minimum is mandatory; default to $20 when the setup form omits one
       // (the subscribe flow no longer collects it - owners tune it in the Business Hub).
-      [userId, data.businessName, data.businessSector, data.description, data.website_url || null, data.logo_url || null, data.min_transaction_amount ?? 20],
+      [userId, data.businessName, data.legal_name?.trim() || null, data.businessSector, data.description, data.website_url || null, data.logo_url || null, data.min_transaction_amount ?? 20],
     );
     const businessId = businessResult.rows[0].id;
 
@@ -200,6 +200,7 @@ export const getMyBusinessData = async (userId: number, managedLocationId?: numb
       SELECT
         b.id,
         b.name,
+        b.legal_name,
         b.sector,
         b.description,
         b.terms_text,
@@ -372,11 +373,14 @@ export const removeLocationManagerService = async (locationId: number, ownerUser
 export const updateBusinessProfile = async (ownerUserId: number, data: UpdateBusinessInput): Promise<void> => {
   const pool = getPool();
 
+  // legal_name: COALESCE keeps the stored value when the client omits it or sends empty -
+  // the legal name can be corrected but never cleared from the settings dialog.
   const result = await pool.query(`
     UPDATE business
-    SET name = $1, sector = $2, description = $3, terms_text = $4, website_url = $5
-    WHERE user_id = $6
-  `, [data.businessName.trim(), data.businessSector, data.description, data.terms_text, data.website_url ?? null, ownerUserId]);
+    SET name = $1, sector = $2, description = $3, terms_text = $4, website_url = $5,
+        legal_name = COALESCE($6, legal_name)
+    WHERE user_id = $7
+  `, [data.businessName.trim(), data.businessSector, data.description, data.terms_text, data.website_url ?? null, data.legal_name?.trim() || null, ownerUserId]);
 
   if (result.rowCount === 0) throw new Error('BUSINESS_NOT_FOUND');
 
