@@ -17,9 +17,6 @@ services:
     envVars:
       - key: NODE_ENV
         value: production
-      # Pre-launch lock: 'true' blocks login/register/sync (flip to 'false' at launch)
-      - key: ACCESS_LOCKED
-        sync: false
       - key: DATABASE_URL
         sync: false
       - key: JWT_SECRET
