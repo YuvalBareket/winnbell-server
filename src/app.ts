@@ -157,6 +157,20 @@ const businessLimiter = rateLimit({
   message: { message: 'Too many requests, please slow down.' },
 });
 
+// Admin-area limiter. Every /admin request already needs a valid Admin JWT (global
+// authenticateToken + router-wide requireRole), so this is defense-in-depth: it caps how
+// fast a leaked admin token could be scripted against the API. Keyed per user (falls back
+// to IP for the pre-auth 401 path); generous enough for heavy dashboard use.
+const adminLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 120 * RATE_LIMIT_MULTIPLIER,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: express.Request) => req.user?.id?.toString() ?? getClientIpKey(req),
+  store: makeRateLimitStore('admin'),
+  message: { message: 'Too many requests, please slow down.' },
+});
+
 // Stripe webhook must receive raw body — register BEFORE express.json()
 app.use('/webhooks/stripe', express.raw({ type: 'application/json' }), stripeWebhookRoutes);
 
@@ -217,7 +231,7 @@ app.use('/contact', contactLimiter, contactRoutes);
 // ── Authenticated routes ──
 app.use(authenticateToken);
 
-app.use('/admin', adminRoutes);
+app.use('/admin', adminLimiter, adminRoutes);
 app.use('/tickets', ticketsLimiter, ticketsRoutes);
 app.use('/draws', drawsRoutes);
 app.use('/business', businessLimiter, businessRoutes);

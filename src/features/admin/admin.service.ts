@@ -984,18 +984,24 @@ export const updateUserRoleService = async (userId: number, role: string) => {
   const allowed = ['User', 'Business'];
   if (!allowed.includes(role)) throw new Error('Invalid role');
   const pool = getPool();
+  // Epoch bump + cache flush = the change bites on the target's NEXT request, not after
+  // the 60s guard cache / 1h token expiry. They re-login and get a token with the new role.
   await pool.query(
-    `UPDATE "user" SET role=$1 WHERE id=$2 AND role!='Admin'`,
+    `UPDATE "user" SET role=$1, token_epoch = token_epoch + 1 WHERE id=$2 AND role!='Admin'`,
     [role, userId],
   );
+  invalidateUserAuth(userId);
 };
 
 export const toggleUserActiveService = async (userId: number, isActive: boolean) => {
   const pool = getPool();
+  // Deactivation must kill live sessions instantly (epoch check runs on every request).
+  // Reactivation bumps too - harmless, the user just signs in again.
   await pool.query(
-    `UPDATE "user" SET is_active=$1 WHERE id=$2 AND role!='Admin'`,
+    `UPDATE "user" SET is_active=$1, token_epoch = token_epoch + 1 WHERE id=$2 AND role!='Admin'`,
     [isActive, userId],
   );
+  invalidateUserAuth(userId);
 };
 
 export const getPlatformSettingsService = async (): Promise<{
