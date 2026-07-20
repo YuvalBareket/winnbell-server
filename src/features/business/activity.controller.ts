@@ -36,7 +36,10 @@ export const getCampaignEntriesController = async (req: AuthRequest, res: Respon
   try {
     const cursor = req.query.cursor ? (req.query.cursor as string) : undefined;
     const limit = req.query.limit ? parseInt(req.query.limit as string, 10) : 25;
-    const data = await getCampaignEntries(req.user!.id, req.user!.location_id ?? null, parseLoc(req), parseDrawId(req), cursor, limit);
+    // Whitelisted period filter - mirrors the KPI toggle so the feed matches the counters.
+    const rawRange = req.query.range as string | undefined;
+    const range = rawRange === 'today' || rawRange === 'wtd' || rawRange === 'mtd' ? rawRange : undefined;
+    const data = await getCampaignEntries(req.user!.id, req.user!.location_id ?? null, parseLoc(req), parseDrawId(req), cursor, limit, range);
     res.json(data);
   } catch {
     res.status(500).json({ message: 'Failed to load entries' });
