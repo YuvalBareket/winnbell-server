@@ -491,17 +491,19 @@ export const syncExternalUser = async (
 
   // Region check: country must be US and state must be in allowed_states (when configured).
   // Detection failures fail open inside evaluateRegionRestriction.
-  // Existing Admin accounts are exempt — admins must be able to sign in from anywhere
-  // (e.g. operating the platform from outside the allowed states).
+  // The block applies ONLY to NEW account creation. Region eligibility is a signup/entry
+  // concern, not an account-access concern: existing users must be able to sign in while
+  // traveling (and mobile-carrier IPs often resolve to the wrong state). Receipt entries
+  // stay anchored to in-region purchases regardless of where the user logs in from.
   let detectedState: string | null = null;
   let detectedCity: string | null = null;
   if (metadata?.ip) {
-    const adminCheck = await pool.query(
-      `SELECT role FROM "user" WHERE external_auth_id = $1 OR email = $2 LIMIT 1`,
+    const existingCheck = await pool.query(
+      `SELECT 1 FROM "user" WHERE external_auth_id = $1 OR email = $2 LIMIT 1`,
       [externalId, email],
     );
-    const isExistingAdmin = adminCheck.rows[0]?.role === 'Admin';
-    if (!isExistingAdmin) {
+    const isExistingUser = existingCheck.rows.length > 0;
+    if (!isExistingUser) {
       const region = await evaluateRegionRestriction(metadata.ip);
       if (region.blocked) throw new Error('REGION_RESTRICTED');
       detectedState = region.state ?? region.country;
