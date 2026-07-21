@@ -192,8 +192,8 @@ describe('syncExternalUser — region blocking via IP', () => {
     const originalFetch = global.fetch;
     global.fetch = mockIpinfo({ country: 'IL', region: 'Tel Aviv' });
 
-    // getAllowedStates returns FL only
-    mockPoolQuery.mockResolvedValue({ rows: [{ allowed_states: ['FL'] }] });
+    // pool #1 = existence check (no account → new signup, block applies), #2 = allowed_states
+    setupPoolQueries({ rows: [] }, { rows: [{ allowed_states: ['FL'] }] });
 
     try {
       await expect(
@@ -208,7 +208,8 @@ describe('syncExternalUser — region blocking via IP', () => {
     const originalFetch = global.fetch;
     global.fetch = mockIpinfo({ country: 'US', region: 'Georgia' });
 
-    mockPoolQuery.mockResolvedValue({ rows: [{ allowed_states: ['FL'] }] });
+    // pool #1 = existence check (no account → new signup, block applies), #2 = allowed_states
+    setupPoolQueries({ rows: [] }, { rows: [{ allowed_states: ['FL'] }] });
 
     try {
       await expect(
@@ -223,7 +224,8 @@ describe('syncExternalUser — region blocking via IP', () => {
     const originalFetch = global.fetch;
     global.fetch = mockIpinfo({ country: 'US', region: 'Florida' });
 
-    setupPoolQueries({ rows: [{ allowed_states: ['FL'] }] });
+    // pool #1 = existence check (new signup), #2 = allowed_states
+    setupPoolQueries({ rows: [] }, { rows: [{ allowed_states: ['FL'] }] });
 
     setupClientQueries(
       { rows: [] },
@@ -252,7 +254,8 @@ describe('syncExternalUser — region blocking via IP', () => {
     global.fetch = jest.fn().mockRejectedValue(new Error('network error')) as unknown as typeof fetch;
 
     // allowed_states restricted — but detection failed, so we must fail open
-    setupPoolQueries({ rows: [{ allowed_states: ['FL'] }] });
+    // pool #1 = existence check (new signup), #2 = allowed_states
+    setupPoolQueries({ rows: [] }, { rows: [{ allowed_states: ['FL'] }] });
 
     setupClientQueries(
       { rows: [] },
@@ -275,7 +278,8 @@ describe('syncExternalUser — region blocking via IP', () => {
     const originalFetch = global.fetch;
     global.fetch = mockIpinfo({ country: 'US' }); // no region field
 
-    setupPoolQueries({ rows: [{ allowed_states: ['FL'] }] });
+    // pool #1 = existence check (new signup), #2 = allowed_states
+    setupPoolQueries({ rows: [] }, { rows: [{ allowed_states: ['FL'] }] });
 
     setupClientQueries(
       { rows: [] },
@@ -298,7 +302,8 @@ describe('syncExternalUser — region blocking via IP', () => {
     const originalFetch = global.fetch;
     global.fetch = mockIpinfo({ country: 'IL', region: 'Tel Aviv' });
 
-    setupPoolQueries({ rows: [{ allowed_states: [] }] });
+    // pool #1 = existence check (new signup), #2 = allowed_states (empty = unrestricted)
+    setupPoolQueries({ rows: [] }, { rows: [{ allowed_states: [] }] });
 
     setupClientQueries(
       { rows: [] },
@@ -317,28 +322,28 @@ describe('syncExternalUser — region blocking via IP', () => {
     }
   });
 
-  it('should allow an existing Admin to sign in from a blocked region (admin exemption)', async () => {
+  it('should allow an EXISTING user to sign in from a blocked region (login is never region-blocked)', async () => {
     const originalFetch = global.fetch;
-    // Non-US IP + restricted states — would block a normal user
+    // Non-US IP + restricted states — would block a brand-new signup
     global.fetch = mockIpinfo({ country: 'IL', region: 'Tel Aviv' });
 
-    // pool.query #1 = admin role lookup → Admin. (Region queries never fire after that.)
-    setupPoolQueries({ rows: [{ role: 'Admin' }] });
+    // pool.query #1 = existence check → account already exists. (Region queries never fire after that.)
+    setupPoolQueries({ rows: [{ '?column?': 1 }] });
 
     setupClientQueries(
       { rows: [] },
       { rows: [] }, // deletedCheck
-      { rows: [{ id: 90, role: 'Admin', fullName: 'Platform Admin', email: 'admin@winnbell.com' }] },
+      { rows: [{ id: 90, role: 'User', fullName: 'Traveling User', email: 'traveler@test.com' }] },
       { rows: [] }, // user_acquisition INSERT (added after upsert)
       { rows: [] },
       { rows: [] },
     );
 
     try {
-      const res = await syncExternalUser('ext-admin-il', 'admin@winnbell.com', 'Platform Admin', { ip: '82.80.1.1' });
+      const res = await syncExternalUser('ext-traveler-il', 'traveler@test.com', 'Traveling User', { ip: '82.80.1.1' });
       expect(res.message).toBe('Sync successful');
-      expect(res.user.role).toBe('Admin');
-      // The ipinfo lookup must not even run for admins
+      expect(res.user.role).toBe('User');
+      // The ipinfo lookup must not even run for existing accounts
       expect(global.fetch).not.toHaveBeenCalled();
     } finally {
       global.fetch = originalFetch;
