@@ -87,8 +87,11 @@ export const verifySession = async (req: Request, res: Response) => {
       res.status(400).json({ error: 'Invalid or missing sessionId.' });
       return;
     }
-    await verifyAndActivateSession(sessionId, userId);
-    res.json({ activated: true });
+    const { subscriptionStatus } = await verifyAndActivateSession(sessionId, userId);
+    // subscriptionStatus 'Incomplete' = the in-window signup charge was DECLINED: the
+    // subscription exists but the business is NOT enrolled until the card is fixed. The
+    // success page must not celebrate in that case.
+    res.json({ activated: true, subscriptionStatus });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : '';
     // Sold-out founding payment was already auto-refunded — the client must tell the

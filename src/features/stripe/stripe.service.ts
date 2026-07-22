@@ -414,7 +414,13 @@ export const createCheckoutSession = async (
 
 // ─── Verify Session ───────────────────────────────────────────────────────────
 
-export const verifyAndActivateSession = async (sessionId: string, userId: number): Promise<void> => {
+// Returns the resulting subscription status so the success page can tell the truth when the
+// in-window signup charge was DECLINED (business stored Incomplete, NOT enrolled at open).
+// null = branches with no recurring subscription involved (founding payment, card update).
+export const verifyAndActivateSession = async (
+  sessionId: string,
+  userId: number,
+): Promise<{ subscriptionStatus: 'Active' | 'Incomplete' | null }> => {
   const pool = getPool();
 
   const bizResult = await pool.query(`SELECT id FROM business WHERE user_id = $1`, [userId]);
@@ -431,21 +437,21 @@ export const verifyAndActivateSession = async (sessionId: string, userId: number
     const customerId = (session.customer as string | null) ?? null;
     await activateFoundingMember(pool, businessId, paymentIntentId, sessionId, customerId);
     invalidatePublicBusinessData();
-    return;
+    return { subscriptionStatus: null };
   }
 
   // ── Update payment method branch (setup mode with an existing customer) ─────
   if (session.mode === 'setup' && session.metadata?.purpose === 'update_payment_method') {
     if (session.status !== 'complete') throw new Error('Setup not completed');
     await handleUpdatePaymentMethodSession(pool, session);
-    return;
+    return { subscriptionStatus: null };
   }
 
   // ── Recurring subscription branch (setup mode → server-created sub) ─────────
   if (session.mode === 'setup') {
     if (session.status !== 'complete') throw new Error('Setup not completed');
-    await createSubscriptionForSetupSession(pool, session);
-    return;
+    const subscriptionStatus = await createSubscriptionForSetupSession(pool, session);
+    return { subscriptionStatus };
   }
 
   throw new Error('Unrecognized checkout session');
@@ -559,7 +565,9 @@ async function handleUpdatePaymentMethodSession(pool: Pool, session: Stripe.Chec
 // After a setup-mode Checkout completes (card saved, no charge), create the
 // recurring subscription billed on the LAST DAY of each month. Called by BOTH
 // the webhook and the success-page verify; idempotent so it can never create two.
-async function createSubscriptionForSetupSession(pool: Pool, session: Stripe.Checkout.Session): Promise<void> {
+// Returns the status the subscription ends up in ('Incomplete' = in-window signup charge
+// declined, business NOT enrolled at open) so the verify path can surface it to the client.
+async function createSubscriptionForSetupSession(pool: Pool, session: Stripe.Checkout.Session): Promise<'Active' | 'Incomplete'> {
   const businessId = Number(session.metadata?.business_id);
   if (!businessId) throw new Error('Setup session missing business_id');
 
@@ -570,14 +578,18 @@ async function createSubscriptionForSetupSession(pool: Pool, session: Stripe.Che
   // replacement the row has a stripe_subscription_id, so a duplicate webhook/verify
   // call still returns here.
   const existing = await pool.query(
-    `SELECT s.stripe_subscription_id,
+    `SELECT s.stripe_subscription_id, s.status,
             EXISTS(SELECT 1 FROM founding_member fm WHERE fm.business_id = s.business_id) AS is_founding
      FROM subscription s
      WHERE s.business_id = $1 AND s.status != 'Cancelled'`,
     [businessId],
   );
   const existingSub = existing.rows[0];
-  if (existingSub && !(existingSub.is_founding && !existingSub.stripe_subscription_id)) return;
+  if (existingSub && !(existingSub.is_founding && !existingSub.stripe_subscription_id)) {
+    // Duplicate webhook/verify call: report the already-stored outcome (the other caller
+    // may have created it as Incomplete when the signup charge was declined).
+    return existingSub.status === 'Incomplete' ? 'Incomplete' : 'Active';
+  }
 
   const customerId = session.customer as string;
   const priceId = session.metadata?.price_id ?? '';
@@ -642,6 +654,7 @@ async function createSubscriptionForSetupSession(pool: Pool, session: Stripe.Che
 
   await activateBusinessSubscription(pool, businessId, subscription.id, customerId, priceId, currentPeriodEnd, monthlyFee, entriesPerLocation, initialStatus, chargedToday);
   invalidatePublicBusinessData();
+  return initialStatus;
 }
 
 // ─── Handle Webhook ───────────────────────────────────────────────────────────
