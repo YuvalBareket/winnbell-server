@@ -669,6 +669,10 @@ export const createInviteLink = async (req: AuthRequest, res: Response): Promise
       res.status(403).json({ message: 'Forbidden' });
       return;
     }
+    if (error instanceof Error && error.message === 'LOCATION_HAS_MANAGER') {
+      res.status(409).json({ message: 'This location already has a manager. Remove the current manager before inviting a new one.' });
+      return;
+    }
     res.status(500).json({ message: 'Failed to generate invite link' });
   }
 };

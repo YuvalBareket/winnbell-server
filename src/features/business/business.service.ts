@@ -263,7 +263,7 @@ export const createManagerInviteToken = async (locationId: number, ownerUserId: 
   const pool = getPool();
 
   const result = await pool.query(`
-    SELECT b.id AS business_id
+    SELECT b.id AS business_id, bl.manager_user_id
     FROM business b
     JOIN business_location bl ON b.id = bl.business_id
     WHERE b.user_id = $1 AND bl.id = $2
@@ -271,6 +271,12 @@ export const createManagerInviteToken = async (locationId: number, ownerUserId: 
 
   const businessRecord = result.rows[0];
   if (!businessRecord) throw new Error('UNAUTHORIZED_OR_INVALID_LOCATION');
+
+  // One manager per location, enforced at mint time. Accepting an invite overwrites
+  // manager_user_id WITHOUT demoting the incumbent (no role reset, no session revoke),
+  // which would strand the displaced manager as a business-less 'Business' user. The UI
+  // already hides Invite when a manager exists; this guard closes the API path.
+  if (businessRecord.manager_user_id != null) throw new Error('LOCATION_HAS_MANAGER');
 
   const businessId = businessRecord.business_id;
 
