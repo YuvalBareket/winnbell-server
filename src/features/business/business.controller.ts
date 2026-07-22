@@ -408,8 +408,9 @@ export const addLocation = async (req: AuthRequest, res: Response): Promise<void
   try {
     const pool = getPool();
 
-    // Founding partners are limited to 3 locations (counted as the NEXT campaign will
-    // run: active minus scheduled removals plus scheduled adds).
+    // Founding plans pay $1,200 PER LOCATION at purchase and the location set is FIXED
+    // for the year: no adds, no removals - only edits. (Deliberate simplification over
+    // prorated mid-year billing.)
     const foundingCheck = await pool.query(`
       SELECT fm.id FROM founding_member fm
       JOIN business b ON b.id = fm.business_id
@@ -417,17 +418,8 @@ export const addLocation = async (req: AuthRequest, res: Response): Promise<void
     `, [userId]);
 
     if (foundingCheck.rows.length > 0) {
-      const locCount = await pool.query(
-        `SELECT COUNT(*)::int AS cnt FROM business_location bl
-         JOIN business b ON b.id = bl.business_id
-         WHERE b.user_id = $1
-           AND ((bl.is_active = TRUE AND bl.deactivate_at_open = FALSE) OR bl.activate_at_open = TRUE)`,
-        [userId],
-      );
-      if (Number(locCount.rows[0]?.cnt ?? 0) >= 3) {
-        res.status(403).json({ message: 'Founding partner accounts are limited to 3 locations. Please contact support to upgrade your plan.' });
-        return;
-      }
+      res.status(403).json({ message: 'Founding Partner plans cover the locations purchased with them, so locations cannot be added during the founding year. Contact support if you need help.' });
+      return;
     }
 
     // While the business participates in the Open campaign, the new location is staged:
@@ -536,6 +528,17 @@ export const deleteLocation = async (req: AuthRequest, res: Response): Promise<v
       return;
     }
     const newCount = currentCount - 1;
+
+    // Founding plans: the location set is FIXED for the year - no removals, only edits.
+    // (Same rule as addLocation; deliberate simplification over prorated refunds.)
+    const founding = await pool.query(
+      `SELECT fm.id FROM founding_member fm JOIN business b ON b.id = fm.business_id WHERE b.user_id = $1`,
+      [userId],
+    );
+    if (founding.rows.length > 0) {
+      res.status(403).json({ message: 'Founding Partner plans cover the locations purchased with them, so locations cannot be removed during the founding year. Contact support if you need help.' });
+      return;
+    }
 
     // Sync billing first (settles any already-charged difference) — if it fails, abort
     // without touching the DB. No credits are ever issued for time already used; inside

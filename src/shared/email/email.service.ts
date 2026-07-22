@@ -178,14 +178,18 @@ export const sendSubscriptionConfirmationEmail = async (
                     <div style="font-size:11px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:#94a3b8;">Your plan</div>
                   </td>
                 </tr>
+                <!-- Stacked full-width rows (no side-by-side columns): the old two-column
+                     layout squeezed and wrapped badly on narrow phone screens. -->
                 <tr>
-                  <td style="padding:14px 0 20px 22px;vertical-align:bottom;">
+                  <td colspan="2" style="padding:14px 22px 0;">
                     <div style="font-size:17px;font-weight:700;color:#0f2747;">${plan.planName} &middot; ${locationLabel}</div>
                     <div style="font-size:12.5px;color:#94a3b8;font-weight:600;margin-top:3px;">${plan.entriesPerLocation.toLocaleString('en-US')} entries per location, every campaign</div>
                   </td>
-                  <td align="right" style="padding:14px 22px 20px 0;vertical-align:bottom;">
-                    <div style="font-size:22px;font-weight:700;letter-spacing:-0.02em;color:#0f2747;">${totalLabel}<span style="font-size:12.5px;font-weight:600;color:#94a3b8;"> / mo</span></div>
-                    <div style="font-size:11.5px;color:#94a3b8;font-weight:600;">billed on ${CHARGE_DAY_LABEL}</div>
+                </tr>
+                <tr>
+                  <td colspan="2" style="padding:12px 22px 20px;">
+                    <div style="font-size:24px;font-weight:700;letter-spacing:-0.02em;color:#0f2747;">${totalLabel}<span style="font-size:12.5px;font-weight:600;color:#94a3b8;"> / mo</span></div>
+                    <div style="font-size:11.5px;color:#94a3b8;font-weight:600;margin-top:2px;">billed on ${CHARGE_DAY_LABEL}</div>
                   </td>
                 </tr>
               </table>
@@ -257,7 +261,9 @@ ${stepsHtml}
 export const sendFoundingWelcomeEmail = async (
   toEmail: string,
   businessName: string,
-  details: { termEnd: Date },
+  // Per-location pricing: the amount actually charged ($1,200 x locations) and the
+  // location count paid for, so the confirmation states real numbers.
+  details: { termEnd: Date; amountPaid?: number; locationCount?: number },
 ): Promise<void> => {
   if (!process.env.SMTP_HOST) {
     console.warn('[Email] SMTP_HOST not configured — skipping founding welcome email');
@@ -271,6 +277,10 @@ export const sendFoundingWelcomeEmail = async (
   const openDate = fmtNyDate(campaignOpen);
   const termEndLabel = fmtNyDate(details.termEnd);
   const goldGradient = 'linear-gradient(90deg,#fcd34d,#f59e0b)';
+  const locationCount = Math.max(1, details.locationCount ?? 1);
+  const amountPaid = details.amountPaid ?? 1200 * locationCount;
+  const amountLabel = `$${amountPaid.toLocaleString('en-US')}`;
+  const locationLabel = locationCount === 1 ? '1 location' : `${locationCount} locations`;
 
   // 2,500 must match the founding entries_per_location set in activateFoundingMember
   // (stripe.service.ts, Growth-tier allowance) - the email is prose, not wired to the DB.
@@ -376,14 +386,18 @@ export const sendFoundingWelcomeEmail = async (
                     <div style="font-size:11px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:#94a3b8;">Your founding membership</div>
                   </td>
                 </tr>
+                <!-- Stacked full-width rows (no side-by-side columns): the old two-column
+                     layout squeezed and wrapped badly on narrow phone screens. -->
                 <tr>
-                  <td style="padding:14px 0 16px 22px;vertical-align:bottom;">
-                    <div style="font-size:17px;font-weight:700;color:#0f2747;">Founding Partner</div>
+                  <td colspan="2" style="padding:14px 22px 0;">
+                    <div style="font-size:17px;font-weight:700;color:#0f2747;">Founding Partner &middot; ${locationLabel}</div>
                     <div style="font-size:12.5px;color:#94a3b8;font-weight:600;margin-top:3px;">2,500 entries per location, every campaign</div>
                   </td>
-                  <td align="right" style="padding:14px 22px 16px 0;vertical-align:bottom;">
-                    <div style="font-size:22px;font-weight:700;letter-spacing:-0.02em;color:#0f2747;">$1,200<span style="font-size:12.5px;font-weight:600;color:#94a3b8;"> one-time</span></div>
-                    <div style="font-size:11.5px;color:#94a3b8;font-weight:600;">then $0 / month for 12 months</div>
+                </tr>
+                <tr>
+                  <td colspan="2" style="padding:12px 22px 16px;">
+                    <div style="font-size:24px;font-weight:700;letter-spacing:-0.02em;color:#0f2747;">${amountLabel}<span style="font-size:12.5px;font-weight:600;color:#94a3b8;"> one-time</span></div>
+                    <div style="font-size:11.5px;color:#94a3b8;font-weight:600;margin-top:2px;">$1,200 per location &middot; then $0 / month for 12 months</div>
                   </td>
                 </tr>
                 <tr>
@@ -403,9 +417,10 @@ ${includedHtml}
                 <tr>
                   <td style="padding:16px 20px;">
                     <div style="font-size:13px;font-weight:700;color:#0f2747;margin-bottom:6px;">About your payment</div>
-                    <div style="font-size:13px;color:#475569;line-height:1.65;"><strong style="color:#0f2747;">Your card was charged $1,200 today, and that is the only charge.</strong>
+                    <div style="font-size:13px;color:#475569;line-height:1.65;"><strong style="color:#0f2747;">Your card was charged ${amountLabel} today ($1,200 per location), and that is the only charge.</strong>
                     This email is your confirmation, not an invoice. Nothing is billed monthly, and your membership does not auto-renew.
-                    It covers every campaign that opens before <strong style="color:#0f2747;">${termEndLabel}</strong>.
+                    It covers your ${locationLabel} in every campaign that opens before <strong style="color:#0f2747;">${termEndLabel}</strong>.
+                    Your location set is fixed for the founding year - you can edit location details anytime, and our support team is happy to help with anything else.
                     Before your final included campaign ends we'll email you, and you can pick a regular monthly plan to continue without missing a day.</div>
                   </td>
                 </tr>

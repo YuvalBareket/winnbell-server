@@ -69,10 +69,6 @@ export const createCheckout = async (req: Request, res: Response) => {
       res.status(409).json({ error: 'All founding partner spots have been claimed.' });
       return;
     }
-    if (msg === 'FOUNDING_LOCATION_LIMIT') {
-      res.status(403).json({ error: 'The founding partner plan covers up to 3 locations. Please choose a regular plan for more locations.' });
-      return;
-    }
     console.error('[stripe.createCheckout]', err);
     res.status(500).json({ error: 'Subscription setup failed. Please try again.' });
   }

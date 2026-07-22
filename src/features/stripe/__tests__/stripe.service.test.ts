@@ -213,6 +213,8 @@ describe('cancelSubscription — recurring', () => {
 // ─────────────────────────────────────────────
 describe('cancelSubscription — founding refund', () => {
   const FOUNDING_ROW = { stripe_payment_intent_id: 'pi_1', business_id: 42 };
+  // Per-location pricing: the refund base is the founding_payment ledger (net paid).
+  const LEDGER_ROW = { stripe_payment_intent_id: 'pi_1', amount: '1200.00', refunded_amount: '0.00' };
 
   beforeEach(() => {
     // Double-refund guard verifies prior refunds on Stripe before refunding; default: none.
@@ -228,7 +230,8 @@ describe('cancelSubscription — founding refund', () => {
 
     mockQuery
       .mockResolvedValueOnce({ rows: [FOUNDING_ROW] })                                              // founding check
-      .mockResolvedValueOnce({ rows: [{ paid_at: createdAt, current_period_end: periodEnd }] }); // membership period
+      .mockResolvedValueOnce({ rows: [{ paid_at: createdAt, current_period_end: periodEnd }] })     // membership period
+      .mockResolvedValueOnce({ rows: [LEDGER_ROW] });                                               // payments ledger
     // Destructive writes (ledger + deletes + cancel) now run in a client transaction.
     mockClientQuery.mockImplementation((sql: string) =>
       Promise.resolve(
@@ -256,7 +259,8 @@ describe('cancelSubscription — founding refund', () => {
 
     mockQuery
       .mockResolvedValueOnce({ rows: [FOUNDING_ROW] })
-      .mockResolvedValueOnce({ rows: [{ paid_at: new RealDate('2026-01-01T00:00:00.000Z'), current_period_end: new RealDate('2027-01-01T00:00:00.000Z') }] });
+      .mockResolvedValueOnce({ rows: [{ paid_at: new RealDate('2026-01-01T00:00:00.000Z'), current_period_end: new RealDate('2027-01-01T00:00:00.000Z') }] })
+      .mockResolvedValueOnce({ rows: [LEDGER_ROW] }); // payments ledger
 
     await expect(cancelSubscription(7)).rejects.toThrow('REFUND_FAILED');
 
@@ -281,12 +285,13 @@ describe('cancelSubscription — founding refund', () => {
     expect(res.removedFromDraw).toBe(false);
   });
 
-  it('refund never exceeds 50% of the $1,200 fee, even cancelling on day one', async () => {
+  it('refund never exceeds 50% of the net paid, even cancelling on day one', async () => {
     mockDateNow(new RealDate('2026-01-01T00:01:00.000Z')); // ~1 minute into the year
     mockRefundsCreate.mockResolvedValue({ id: 're_1' });
     mockQuery
       .mockResolvedValueOnce({ rows: [FOUNDING_ROW] })
-      .mockResolvedValueOnce({ rows: [{ paid_at: new RealDate('2026-01-01T00:00:00.000Z'), current_period_end: new RealDate('2027-01-01T00:00:00.000Z') }] });
+      .mockResolvedValueOnce({ rows: [{ paid_at: new RealDate('2026-01-01T00:00:00.000Z'), current_period_end: new RealDate('2027-01-01T00:00:00.000Z') }] })
+      .mockResolvedValueOnce({ rows: [LEDGER_ROW] }); // payments ledger ($1,200 net)
     mockClientQuery.mockResolvedValue({ rows: [], rowCount: 0 });
 
     await cancelSubscription(7);
@@ -298,16 +303,19 @@ describe('cancelSubscription — founding refund', () => {
 
   it('does NOT refund again on a retry after a failed commit — Stripe already shows the refund', async () => {
     mockDateNow(new RealDate('2026-07-02T00:00:00.000Z'));
-    // A prior attempt refunded $302 (say) and the DB commit then failed; Stripe remembers.
+    // A prior attempt refunded $600 and the DB commit then failed: Stripe remembers,
+    // the LEDGER does not (refunded_amount still 0). The unledgered amount counts
+    // toward the entitlement, so a retry must not pay again.
     mockPaymentIntentsRetrieve.mockResolvedValue({ latest_charge: { amount: 120000, amount_refunded: 60000 } });
     mockQuery
       .mockResolvedValueOnce({ rows: [FOUNDING_ROW] })
-      .mockResolvedValueOnce({ rows: [{ paid_at: new RealDate('2026-01-01T00:00:00.000Z'), current_period_end: new RealDate('2027-01-01T00:00:00.000Z') }] });
+      .mockResolvedValueOnce({ rows: [{ paid_at: new RealDate('2026-01-01T00:00:00.000Z'), current_period_end: new RealDate('2027-01-01T00:00:00.000Z') }] })
+      .mockResolvedValueOnce({ rows: [LEDGER_ROW] }); // ledger unaware of the prior refund
     mockClientQuery.mockResolvedValue({ rows: [], rowCount: 0 });
 
     const res = await cancelSubscription(7);
 
-    // $60,000c already refunded >= the ~$302 entitled now → nothing more goes out,
+    // $60,000c already refunded >= the ~$300 entitled now → nothing more goes out,
     // but the teardown still completes.
     expect(mockRefundsCreate).not.toHaveBeenCalled();
     expect(res.refundAmount).toBe(0);
@@ -322,7 +330,8 @@ describe('cancelSubscription — founding refund', () => {
     mockPaymentIntentsRetrieve.mockRejectedValue(new Error('stripe unavailable'));
     mockQuery
       .mockResolvedValueOnce({ rows: [FOUNDING_ROW] })
-      .mockResolvedValueOnce({ rows: [{ paid_at: new RealDate('2026-01-01T00:00:00.000Z'), current_period_end: new RealDate('2027-01-01T00:00:00.000Z') }] });
+      .mockResolvedValueOnce({ rows: [{ paid_at: new RealDate('2026-01-01T00:00:00.000Z'), current_period_end: new RealDate('2027-01-01T00:00:00.000Z') }] })
+      .mockResolvedValueOnce({ rows: [LEDGER_ROW] }); // payments ledger
 
     await expect(cancelSubscription(7)).rejects.toThrow('REFUND_FAILED');
     expect(mockRefundsCreate).not.toHaveBeenCalled();
@@ -691,7 +700,8 @@ describe('verifyAndActivateSession — founding activation guards', () => {
     payment_status: 'paid',
     payment_intent: pi,
     customer: 'cus_1',
-    metadata: { business_id: '42', founding: 'true' },
+    amount_total: 120000, // per-location pricing: 1 location x $1,200
+    metadata: { business_id: '42', founding: 'true', locations: '1' },
   });
 
   it('auto-refunds a DUPLICATE founding purchase (seat already held via another session)', async () => {
@@ -707,12 +717,14 @@ describe('verifyAndActivateSession — founding activation guards', () => {
     // Full $1,200 refunded automatically; no seat claim transaction ever starts.
     expect(mockRefundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_dup' });
     expect(mockClientQuery).not.toHaveBeenCalled();
-    // Recorded on the append-only ledger as fully refunded.
+    // Recorded on the append-only ledger as fully refunded (amount = what the session
+    // actually charged; per-location pricing makes this dynamic, bound as $4).
     const ledger = mockQuery.mock.calls.find(
       ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO founding_payment'),
     );
     expect(ledger).toBeDefined();
-    expect(ledger![0]).toMatch(/1200\.00,\s*1200\.00/);
+    expect(ledger![0]).toMatch(/\$4,\s*\$4/);
+    expect(ledger![1]).toContain(1200);
   });
 
   it('is still idempotent for the SAME session (webhook + verify double call)', async () => {
@@ -781,19 +793,27 @@ describe('verifyAndActivateSession — founding activation guards', () => {
 });
 
 // ─────────────────────────────────────────────
-// createFoundingMemberCheckoutSession — server-side location limit
+// createFoundingMemberCheckoutSession — per-location pricing (no location limit)
 // ─────────────────────────────────────────────
-describe('createFoundingMemberCheckoutSession — location limit', () => {
-  it('rejects founding checkout for a business with more than 3 locations', async () => {
+describe('createFoundingMemberCheckoutSession — per-location pricing', () => {
+  it('prices the checkout per location ($1,200 x N) with no location limit', async () => {
     invalidatePlatformSettings(); // force the settings read through the mocked pool
+    mockSessionsCreate.mockResolvedValue({ url: 'https://checkout.stripe.com/f/1' });
     mockQuery
       .mockResolvedValueOnce({ rows: [{ founding_phase_active: true, founding_member_cap: 30 }] }) // platform settings
       .mockResolvedValueOnce({ rows: [{ taken: 5 }] })                                             // seats taken
       .mockResolvedValueOnce({ rows: [] })                                                         // no existing subscription
-      .mockResolvedValueOnce({ rows: [{ cnt: 4 }] });                                              // 4 locations
+      .mockResolvedValueOnce({ rows: [{ cnt: 4 }] });                                              // 4 locations — allowed now
 
-    await expect(createFoundingMemberCheckoutSession(42, 'owner@test.com')).rejects.toThrow('FOUNDING_LOCATION_LIMIT');
-    expect(mockSessionsCreate).not.toHaveBeenCalled();
+    const res = await createFoundingMemberCheckoutSession(42, 'owner@test.com');
+
+    expect(res.url).toBe('https://checkout.stripe.com/f/1');
+    const sessionArgs = mockSessionsCreate.mock.calls[0][0];
+    // quantity = location count, unit price $1,200 → Stripe totals $4,800 for 4 locations
+    expect(sessionArgs.line_items[0].quantity).toBe(4);
+    expect(sessionArgs.line_items[0].price_data.unit_amount).toBe(120000);
+    // location count stamped into metadata so activation records what was paid for
+    expect(sessionArgs.metadata.locations).toBe('4');
   });
 });
 
