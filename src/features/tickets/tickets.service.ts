@@ -589,11 +589,19 @@ export const submitReceiptEntryService = async (
       throw new Error('This receipt has already been used for an entry.');
     }
 
-    // Block same-user re-submit — no penalty (honest mistake).
-    // The probe signal in evaluateUserRisk already penalizes same-receipt-different-amount attempts.
+    // Block when the receipt has a STANDING claim: an active ticket, a ticket awaiting its
+    // OCR verdict (provisionally valid - the slot is held during the wait), or any ticket of
+    // the SAME user (no resubmit churn, regardless of state). A REJECTED claim by another
+    // user (high_risk_user shadowban / ocr_validation_failed / superseded_by_admin_decision)
+    // releases the receipt so the person holding the real paper receipt can still enter -
+    // this mirrors the partial unique index idx_ticket_receipt_unique.
     const existingEntry = await client.query(
-      `SELECT id FROM ticket WHERE business_id = $1 AND receipt_identifier = $2`,
-      [business_id, input.receiptIdentifier],
+      `SELECT id FROM ticket
+       WHERE business_id = $1 AND receipt_identifier = $2
+         AND (is_quarantined = FALSE
+              OR quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review')
+              OR activated_by_user_id = $3)`,
+      [business_id, input.receiptIdentifier, userId],
     );
     if (existingEntry.rows.length > 0) {
       throw new Error('This receipt identifier has already been used.');

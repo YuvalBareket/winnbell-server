@@ -408,6 +408,12 @@ export const checkDuplicateReceiptIdentifier = async (
 export const syncUserQuarantineState = async (userId: number, drawId: number, client?: PoolClient): Promise<void> => {
   const db = client ?? getPool();
 
+  // The un-quarantine branch carries a slot guard: while a ticket sat shadowbanned, its
+  // receipt number was released (partial unique index idx_ticket_receipt_unique) and someone
+  // else may have legitimately claimed it. Lifting such a ticket would collide with the new
+  // claim (and violate the index), so it stays quarantined - the active claim wins. The
+  // guard is keyed on the receipt group's ANCHOR identifier so anchor + siblings lift (or
+  // stay) together; tickets without a receipt identifier (free/promo/referral) lift freely.
   await db.query(
     `WITH r AS (SELECT risk_score > $3 AS is_high FROM "user" WHERE id = $1)
      UPDATE ticket SET
@@ -417,7 +423,20 @@ export const syncUserQuarantineState = async (userId: number, drawId: number, cl
      WHERE activated_by_user_id = $1 AND draw_id = $2
        AND (
          ((SELECT is_high FROM r) IS TRUE  AND is_quarantined = FALSE AND (image_validation_status IS NULL OR image_validation_status != 'passed'))
-         OR ((SELECT is_high FROM r) IS FALSE AND is_quarantined = TRUE AND quarantine_reason = 'high_risk_user')
+         OR (
+           (SELECT is_high FROM r) IS FALSE AND is_quarantined = TRUE AND quarantine_reason = 'high_risk_user'
+           AND NOT EXISTS (
+             SELECT 1
+             FROM ticket a
+             JOIN ticket o
+               ON o.business_id = a.business_id
+              AND o.receipt_identifier = a.receipt_identifier
+              AND o.id <> a.id
+              AND (o.is_quarantined = FALSE OR o.quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review'))
+             WHERE a.id = COALESCE(ticket.anchor_ticket_id, ticket.id)
+               AND a.receipt_identifier IS NOT NULL
+           )
+         )
        )
        AND id NOT IN (
          SELECT winner_ticket_id FROM draw WHERE winner_ticket_id IS NOT NULL

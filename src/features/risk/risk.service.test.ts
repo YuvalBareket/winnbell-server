@@ -13,7 +13,7 @@ jest.mock('../../shared/db/db.js', () => ({
   getPool: jest.fn().mockReturnValue({ query: mockQuery }),
 }));
 
-import { evaluateUserRisk } from './risk.service';
+import { evaluateUserRisk, syncUserQuarantineState } from './risk.service';
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -245,5 +245,29 @@ describe('Trash Picker — velocity + rapid both fire', () => {
     expect(result.flags).toContain('rapid_submission');
     // 4 (velocity) + 3 (rapid) = 7 minimum delta
     expect(result.delta).toBeGreaterThanOrEqual(7);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Receipt slot release (audit P2-4): while a ticket sat shadowbanned its receipt
+// number was released; if someone else claimed it, rehabilitation must NOT lift
+// that ticket (the active claim wins). The guard lives in the lift branch's SQL.
+// ─────────────────────────────────────────────────────────────────────────────
+describe('syncUserQuarantineState — rehabilitation slot guard (P2-4)', () => {
+  test('lift branch carries the claimed-receipt guard, keyed on the group anchor', async () => {
+    setupQueries([{ rows: [] }]);
+
+    await syncUserQuarantineState(7, 42);
+
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+    const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]];
+    // Guard: skip lifting when another STANDING claim (active or OCR-pending) holds the receipt.
+    expect(sql).toContain('NOT EXISTS');
+    expect(sql).toContain("quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review')");
+    // Keyed on the receipt group's anchor so anchor + siblings lift (or stay) together.
+    expect(sql).toContain('COALESCE(ticket.anchor_ticket_id, ticket.id)');
+    // Winner tickets remain protected from any state change.
+    expect(sql).toContain('winner_ticket_id');
+    expect(params).toEqual([7, 42, 19]);
   });
 });

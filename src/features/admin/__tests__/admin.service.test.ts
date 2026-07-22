@@ -27,9 +27,13 @@ jest.mock('../../tickets/tickets.service.js', () => ({
   generateGlobalUniqueCode: jest.fn().mockResolvedValue('TESTCODE'),
 }));
 
-// Risk decay runs AFTER winner confirmation commits (non-fatal) — stub it
+// Risk decay runs AFTER winner confirmation commits (non-fatal) — stub it.
+// updateUserRiskScore/syncUserQuarantineState are dynamically imported by
+// adminImageDecisionService — stub them too so its tests don't hit real SQL.
 jest.mock('../../risk/risk.service.js', () => ({
   decayAllUserRiskScores: jest.fn().mockResolvedValue({ unquarantinedUserIds: [] }),
+  updateUserRiskScore: jest.fn().mockResolvedValue(undefined),
+  syncUserQuarantineState: jest.fn().mockResolvedValue(undefined),
 }));
 
 // email.service is imported for the founding final-campaign notice — stub it
@@ -39,7 +43,7 @@ jest.mock('../../../shared/email/email.service.js', () => ({
   sendFoundingFinalCampaignEmail: (...args: unknown[]) => mockSendFoundingFinalCampaignEmail(...args),
 }));
 
-import { createDrawService, openDrawService, closeDrawService, confirmWinnerService, removeBusinessFromDrawService, duplicateDrawService } from '../admin.service';
+import { createDrawService, openDrawService, closeDrawService, confirmWinnerService, removeBusinessFromDrawService, duplicateDrawService, adminImageDecisionService } from '../admin.service';
 
 // ─────────────────────────────────────────────
 // Helpers
@@ -684,5 +688,49 @@ describe('openDrawService — opening reveals the prize permanently', () => {
     );
     expect(openUpdate).toBeDefined();
     expect(openUpdate![0]).toMatch(/prize_revealed = TRUE/);
+  });
+});
+
+// ─────────────────────────────────────────────
+// adminImageDecisionService — admin approval outranks competing claims (audit P2-4)
+// While a ticket sat rejected its receipt slot was released; approval must first
+// silently supersede any competing claim (shadowban style) or the partial unique
+// index would reject the un-quarantine. Winner tickets are never displaced.
+// ─────────────────────────────────────────────
+describe('adminImageDecisionService — approval supersedes competing claims (P2-4)', () => {
+  const TICKET_ROW = { id: 9, activated_by_user_id: 7, draw_id: 42, image_validation_status: 'failed' };
+
+  test('approve quarantines the competing group BEFORE un-quarantining the approved ticket', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [TICKET_ROW] })      // ticket lookup
+      .mockResolvedValueOnce({ rows: [] })                 // winner-conflict pre-check: none
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })    // supersede competing group
+      .mockResolvedValueOnce({ rows: [] })                 // approve ticket (passed + un-quarantine)
+      .mockResolvedValueOnce({ rows: [] });                // siblings un-quarantine
+
+    await adminImageDecisionService(9, 'approve');
+
+    const calls = mockQuery.mock.calls.map(([sql]) => sql as string);
+    const supersedeIdx = calls.findIndex(s => s.includes('superseded_by_admin_decision'));
+    const approveIdx = calls.findIndex(s => s.includes("image_validation_status = 'passed'"));
+    expect(supersedeIdx).toBeGreaterThan(-1);
+    expect(approveIdx).toBeGreaterThan(-1);
+    // Kick first — otherwise the partial unique index rejects the approval.
+    expect(supersedeIdx).toBeLessThan(approveIdx);
+    // The kick displaces the whole competing group (anchor + siblings) but never winners.
+    expect(calls[supersedeIdx]).toContain('COALESCE(t.anchor_ticket_id, t.id)');
+    expect(calls[supersedeIdx]).toContain('winner_ticket_id');
+  });
+
+  test('approve fails cleanly when the competing claim already won a draw', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [TICKET_ROW] })          // ticket lookup
+      .mockResolvedValueOnce({ rows: [{ found: 1 }] });        // winner-conflict pre-check: hit
+
+    await expect(adminImageDecisionService(9, 'approve')).rejects.toThrow(/already won a draw/);
+
+    // No mutation happened — only the two SELECTs ran.
+    const updates = mockQuery.mock.calls.filter(([sql]) => (sql as string).includes('UPDATE'));
+    expect(updates).toHaveLength(0);
   });
 });

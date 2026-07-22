@@ -337,7 +337,9 @@ CREATE TABLE ticket (
   -- Quarantine: ticket excluded from draw pool and cap count ─────────────────
   is_quarantined          BOOLEAN NOT NULL DEFAULT FALSE,
   -- Reason codes: high_risk_user | ocr_pending | ocr_validation_failed |
-  --               ocr_error_pending_review | shared_receipt_suspected
+  --               ocr_error_pending_review | shared_receipt_suspected |
+  --               superseded_by_admin_decision (an admin approved a COMPETING ticket for the
+  --               same receipt; this claim silently loses the slot - shadowban style)
   quarantine_reason       TEXT NULL,
   quarantined_at          TIMESTAMP NULL,
 
@@ -524,10 +526,17 @@ CREATE INDEX idx_ticket_cap_check
   ON ticket (business_id, draw_id, is_quarantined);
 
 -- Receipt duplicate check + unique enforcement
--- Partial unique index: only one ticket per (business, receipt_identifier)
+-- Partial unique index: only one ticket per (business, receipt_identifier) among tickets
+-- whose claim on the receipt STANDS: active tickets, plus quarantined ones still awaiting
+-- an OCR verdict (ocr_pending / ocr_error_pending_review - provisionally valid, the slot
+-- is held during the wait). REJECTED claims (high_risk_user shadowban, ocr_validation_failed,
+-- superseded_by_admin_decision) fall out of the index, releasing the receipt so the person
+-- holding the real paper receipt can still enter (anti-poisoning: a scammer's quarantined
+-- submission must not burn the number for the legitimate owner).
 CREATE UNIQUE INDEX idx_ticket_receipt_unique
   ON ticket (business_id, receipt_identifier)
-  WHERE receipt_identifier IS NOT NULL;
+  WHERE receipt_identifier IS NOT NULL
+    AND (is_quarantined = FALSE OR quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review'));
 
 -- Quarantine filter (admin views, draw pool exclusion)
 CREATE INDEX idx_ticket_quarantine

@@ -1616,6 +1616,54 @@ export const adminImageDecisionService = async (
     const ticketDeltaChange = prevStatus === 'failed' ? -5 : -3;
     const userDelta = prevStatus === 'failed' ? -5 : -3;
 
+    // Admin approval outranks any competing claim on the same receipt. While this ticket
+    // sat rejected/quarantined its receipt number was released (partial unique index), so
+    // another user may hold an active or OCR-pending ticket for it. Silently quarantine
+    // that competing group (anchor + siblings, shadowban style - its owner sees nothing)
+    // BEFORE un-quarantining the approved ticket, or the index would reject the approval.
+    // Winner tickets are never displaced (mirrors syncUserQuarantineState's protection).
+
+    // If the competing claim already WON a draw it can never be displaced - fail up front
+    // with a clear message instead of erroring mid-way on the unique index.
+    const winnerConflict = await pool.query(
+      `SELECT 1
+       FROM ticket me
+       JOIN ticket o
+         ON o.business_id = me.business_id
+        AND o.receipt_identifier = me.receipt_identifier
+        AND o.id <> me.id
+        AND (o.is_quarantined = FALSE OR o.quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review'))
+       JOIN draw d ON d.winner_ticket_id = o.id
+       WHERE me.id = $1 AND me.receipt_identifier IS NOT NULL
+       LIMIT 1`,
+      [ticketId],
+    );
+    if (winnerConflict.rows.length > 0) {
+      throw new Error('Cannot approve: another entry with this receipt already won a draw and cannot be displaced.');
+    }
+
+    await pool.query(
+      `WITH approved AS (
+         SELECT business_id, receipt_identifier, id
+         FROM ticket
+         WHERE id = $1 AND receipt_identifier IS NOT NULL
+       )
+       UPDATE ticket t
+       SET is_quarantined    = TRUE,
+           quarantine_reason = 'superseded_by_admin_decision',
+           quarantined_at    = NOW()
+       FROM approved a
+       WHERE COALESCE(t.anchor_ticket_id, t.id) IN (
+               SELECT o.id FROM ticket o
+               WHERE o.business_id = a.business_id
+                 AND o.receipt_identifier = a.receipt_identifier
+                 AND o.id <> a.id
+                 AND (o.is_quarantined = FALSE OR o.quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review'))
+             )
+         AND t.id NOT IN (SELECT winner_ticket_id FROM draw WHERE winner_ticket_id IS NOT NULL)`,
+      [ticketId],
+    );
+
     await pool.query(
       `UPDATE ticket
        SET image_validation_status = 'passed',
