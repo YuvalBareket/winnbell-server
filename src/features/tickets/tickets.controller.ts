@@ -53,7 +53,11 @@ export const activate = async (req: AuthRequest, res: Response) => {
     const result = await ticketService.activateFreeTicket(userId, getClientIp(req));
     res.status(201).json(result);
   } catch (error: unknown) {
-    res.status(400).json({ message: 'Activation failed' });
+    // Surface the service's curated, user-facing reason (weekly limit, no open campaign,
+    // 30-entry cap, email not verified) - same pattern as activatePromotional/submitReceiptEntry.
+    // PHONE_NOT_VERIFIED never reaches here (requirePhoneVerified middleware runs first).
+    const message = error instanceof Error && error.message ? error.message : 'Activation failed';
+    res.status(400).json({ message });
   }
 };
 
