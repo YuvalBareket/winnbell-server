@@ -1819,8 +1819,8 @@ export const getSubscriptionInvoices = async (userId: number): Promise<Subscript
   const pool = getPool();
 
   // Single round-trip: pull the customer id plus any founding payments at once.
-  // The founding ledger is append-only and records refunds when issued, so the
-  // history read is pure DB — no per-load Stripe call.
+  // The founding ledger is append-only and records refunds when issued; amounts come
+  // straight from the DB (the only Stripe lookups below are the hosted receipt links).
   const result = await pool.query(
     `SELECT s.stripe_customer_id,
             fp.stripe_payment_intent_id, fp.amount, fp.refunded_amount, fp.created_at
@@ -1841,6 +1841,22 @@ export const getSubscriptionInvoices = async (userId: number): Promise<Subscript
   // resubscribes to a regular plan keeps its founding_payment ledger rows, so we must show BOTH
   // the founding history AND any recurring Stripe invoices - merged, newest first - not one or the other.
   const foundingRows = result.rows.filter(r => r.stripe_payment_intent_id);
+
+  // No invoice exists for a one-time payment, but every charge has a Stripe-hosted
+  // receipt page (receipt_url) — surface it through hosted_invoice_url so the client's
+  // Invoice button works for founding rows too. One small Stripe call per founding
+  // payment (almost always exactly one); non-fatal, the row just has no link on failure.
+  const foundingReceiptUrls = new Map<string, string | null>();
+  await Promise.all(foundingRows.map(async (row) => {
+    try {
+      const pi = await stripe.paymentIntents.retrieve(row.stripe_payment_intent_id, { expand: ['latest_charge'] });
+      const charge = pi.latest_charge as Stripe.Charge | null;
+      foundingReceiptUrls.set(row.stripe_payment_intent_id, charge?.receipt_url ?? null);
+    } catch {
+      foundingReceiptUrls.set(row.stripe_payment_intent_id, null);
+    }
+  }));
+
   const foundingInvoices: SubscriptionInvoice[] = foundingRows.map((row) => {
     const grossDollars = Number(row.amount);
     const refundedDollars = Number(row.refunded_amount);
@@ -1865,7 +1881,7 @@ export const getSubscriptionInvoices = async (userId: number): Promise<Subscript
       invoice_description: null,
       description: [{ description: lineDesc, quantity: 1, amount: grossDollars, period_start: undefined, period_end: undefined }],
       invoice_pdf: null,
-      hosted_invoice_url: null,
+      hosted_invoice_url: foundingReceiptUrls.get(row.stripe_payment_intent_id) ?? null,
       kind: 'founding',
     };
   });
@@ -1893,12 +1909,27 @@ export const getSubscriptionInvoices = async (userId: number): Promise<Subscript
     hosted_invoice_url: null,
   }));
 
+  // One charges.list serves two purposes: receipt links for the history rows here, and
+  // the refund entries below. Charges carry receipt_url directly, so no per-invoice calls.
+  let customerCharges: Stripe.Charge[] = [];
+  if (stripeCustomerId) {
+    const chargeList = await stripe.charges.list({ customer: stripeCustomerId, limit: 24, expand: ['data.refunds'] });
+    customerCharges = chargeList.data;
+  }
+  const receiptUrlByPaymentIntent = new Map<string, string>();
+  for (const charge of customerCharges) {
+    const chargePi = typeof charge.payment_intent === 'string' ? charge.payment_intent : charge.payment_intent?.id;
+    if (chargePi && charge.receipt_url) receiptUrlByPaymentIntent.set(chargePi, charge.receipt_url);
+  }
+
   let stripeInvoices: SubscriptionInvoice[] = [];
   if (stripeCustomerId) {
     const invoiceList = await stripe.invoices.list({
       customer: stripeCustomerId,
       limit: 24,
-      expand: ['data.lines'],
+      // payments expanded so invoicePaymentIntentId can resolve the PI under the Basil API
+      // shape - needed to link each paid invoice to its charge's receipt page.
+      expand: ['data.lines', 'data.payments'],
     });
     stripeInvoices = invoiceList.data
       // Drop Stripe accounting artifacts: subscription creation (and similar) produces a
@@ -1906,23 +1937,30 @@ export const getSubscriptionInvoices = async (userId: number): Promise<Subscript
       // description to explain anything, so showing it as a payment only confuses the
       // business. Zero-total invoices WITH a description (change notes) are kept.
       .filter((invoice) => !(invoice.amount_due === 0 && invoice.amount_paid === 0 && !invoice.description))
-      .map((invoice): SubscriptionInvoice => ({
-      id: invoice.id,
-      date: invoice.created,
-      amount_paid: invoice.amount_paid / 100,
-      amount_due: invoice.amount_due / 100,
-      status: invoice.status,
-      invoice_description: invoice.description ?? null,
-      description: invoice.lines.data.map(line => ({
-        description: line.description,
-        quantity: line.quantity ?? null,
-        amount: line.amount / 100,
-        period_start: line.period?.start,
-        period_end: line.period?.end,
-      })),
-      invoice_pdf: invoice.invoice_pdf ?? null,
-      hosted_invoice_url: invoice.hosted_invoice_url ?? null,
-    }));
+      .map((invoice): SubscriptionInvoice => {
+        // Link the charge's receipt page (same clean look as the founding receipt) so every
+        // history row opens the same document style; the hosted invoice page is the fallback
+        // for rows whose charge is not in the recent charge list (or unpaid invoices).
+        const invoicePi = invoicePaymentIntentId(invoice);
+        const receiptUrl = invoicePi ? receiptUrlByPaymentIntent.get(invoicePi) : undefined;
+        return {
+          id: invoice.id,
+          date: invoice.created,
+          amount_paid: invoice.amount_paid / 100,
+          amount_due: invoice.amount_due / 100,
+          status: invoice.status,
+          invoice_description: invoice.description ?? null,
+          description: invoice.lines.data.map(line => ({
+            description: line.description,
+            quantity: line.quantity ?? null,
+            amount: line.amount / 100,
+            period_start: line.period?.start,
+            period_end: line.period?.end,
+          })),
+          invoice_pdf: invoice.invoice_pdf ?? null,
+          hosted_invoice_url: receiptUrl ?? invoice.hosted_invoice_url ?? null,
+        };
+      });
   }
 
   // Refunds on regular (Stripe-invoice) charges. In-window downgrades and location removals
@@ -1932,9 +1970,9 @@ export const getSubscriptionInvoices = async (userId: number): Promise<Subscript
   // ledger above, so skip any PaymentIntent that belongs to a founding payment.
   const foundingPIs = new Set(foundingRows.map((r) => r.stripe_payment_intent_id as string));
   let refundEntries: SubscriptionInvoice[] = [];
-  if (stripeCustomerId) {
-    const chargeList = await stripe.charges.list({ customer: stripeCustomerId, limit: 24, expand: ['data.refunds'] });
-    for (const charge of chargeList.data) {
+  {
+    // Reuses the customerCharges list fetched above (refunds already expanded there).
+    for (const charge of customerCharges) {
       const refunds = (charge as unknown as { refunds?: { data?: Stripe.Refund[] } }).refunds?.data ?? [];
       for (const refund of refunds) {
         if (refund.status !== 'succeeded') continue;
