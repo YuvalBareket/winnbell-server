@@ -670,8 +670,8 @@ export const submitReceiptEntryService = async (
             drawId,
             userId,
             i === 0 ? input.receiptIdentifier : null,
-            input.transactionAmount,
-            input.transactionDate ?? null,
+            i === 0 ? input.transactionAmount : null, // amount lives only on the anchor, or revenue SUMs count it once per sibling
+            i === 0 ? (input.transactionDate ?? null) : null,
             i === 0 ? (input.receiptImageUrl ?? null) : null,
             riskEval.totalScore,
             i === 0 ? riskEval.delta : 0,
