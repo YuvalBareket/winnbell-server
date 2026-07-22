@@ -213,6 +213,10 @@ CREATE TABLE founding_member (
   stripe_checkout_session_id TEXT UNIQUE,
   amount_paid                NUMERIC(10, 2) NOT NULL DEFAULT 1200.00,
   paid_at                    TIMESTAMP NOT NULL DEFAULT NOW(),
+  -- Special Terms Section 6: the second-year renewal is a ONE-TIME option. Set when the
+  -- renewal payment lands; a non-null value blocks any further renewal (after the second
+  -- year the business subscribes through the regular plans).
+  renewed_at                 TIMESTAMP NULL,
   created_at                 TIMESTAMP NOT NULL DEFAULT NOW(),
   updated_at                 TIMESTAMP NOT NULL DEFAULT NOW()
 );

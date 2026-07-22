@@ -321,6 +321,125 @@ export const createFoundingMemberCheckoutSession = async (
   return { url: session.url as string };
 };
 
+// ─── Founding: Second-Year Renewal (Special Terms Section 6) ──────────────────
+// In the FINAL 30 days of the founding year the partner may renew for ONE additional
+// twelve-month term at the EXACT price paid for the initial term (fm.amount_paid).
+// Renewal is a separate explicit checkout (never auto-charged, per the Special Terms)
+// and extends current_period_end by 12 months FROM the existing term end, so renewing
+// early loses no time.
+
+export const FOUNDING_RENEWAL_WINDOW_DAYS = 30;
+
+export const createFoundingRenewalCheckoutSession = async (userId: number): Promise<{ url: string }> => {
+  const pool = getPool();
+
+  const res = await pool.query(`
+    SELECT b.id AS business_id, u.email, fm.amount_paid, fm.renewed_at, s.current_period_end
+    FROM business b
+    JOIN "user" u ON u.id = b.user_id
+    JOIN founding_member fm ON fm.business_id = b.id
+    JOIN subscription s ON s.business_id = b.id
+    WHERE b.user_id = $1 AND s.status = 'Active'
+  `, [userId]);
+  const row = res.rows[0];
+  if (!row) throw new Error('No active founding membership found');
+
+  // ONE-TIME option: after the single renewal is used, the founding price is gone -
+  // when the second year ends the business subscribes through the regular plans.
+  if (row.renewed_at) throw new Error('RENEWAL_ALREADY_USED');
+
+  const periodEnd = new Date(row.current_period_end);
+  const now = new Date();
+  const windowOpen = new Date(periodEnd);
+  windowOpen.setDate(windowOpen.getDate() - FOUNDING_RENEWAL_WINDOW_DAYS);
+  if (now < windowOpen) throw new Error('RENEWAL_NOT_OPEN');
+  if (now > periodEnd) throw new Error('RENEWAL_EXPIRED');
+
+  const amountCents = Math.round(Number(row.amount_paid) * 100);
+  if (amountCents < 50) throw new Error('RENEWAL_AMOUNT_INVALID');
+
+  const baseUrl = process.env.FRONTEND_URL || 'http://localhost:8081';
+  const session = await stripe.checkout.sessions.create({
+    mode: 'payment',
+    payment_method_types: ['card'],
+    customer_email: row.email,
+    line_items: [{
+      quantity: 1,
+      price_data: {
+        currency: 'usd',
+        unit_amount: amountCents,
+        product_data: {
+          name: 'Founding Partner Renewal - Winnbell',
+          description: 'One additional twelve-month term at your original Founding Partner price.',
+        },
+      },
+    }],
+    metadata: { business_id: String(row.business_id), founding_renewal: 'true' },
+    payment_intent_data: { metadata: { business_id: String(row.business_id), founding_renewal: 'true' } },
+    success_url: `${baseUrl}/subscription/success?session_id={CHECKOUT_SESSION_ID}&purpose=frenew`,
+    cancel_url: `${baseUrl}/subscription/manage`,
+  });
+
+  return { url: session.url as string };
+};
+
+// Payment landed (verify or webhook): ledger the renewal and extend the term.
+export const activateFoundingRenewal = async (pool: Pool, session: Stripe.Checkout.Session): Promise<void> => {
+  const businessId = Number(session.metadata?.business_id);
+  const paymentIntentId = session.payment_intent as string;
+  const amountDollars = (session.amount_total ?? 0) / 100;
+  if (!businessId || !paymentIntentId) throw new Error('founding_renewal session missing metadata');
+
+  // Idempotency (webhook + verify double call): the ledger's unique payment intent is
+  // the claim - only the first caller proceeds to extend the term.
+  const ledger = await pool.query(
+    `INSERT INTO founding_payment (business_id, stripe_payment_intent_id, stripe_checkout_session_id, amount)
+     VALUES ($1, $2, $3, $4)
+     ON CONFLICT (stripe_payment_intent_id) DO NOTHING`,
+    [businessId, paymentIntentId, session.id, amountDollars],
+  );
+  if ((ledger.rowCount ?? 0) === 0) return;
+
+  const upd = await pool.query(
+    `UPDATE subscription
+     SET current_period_end = current_period_end + INTERVAL '1 year',
+         status = 'Active',
+         cancel_at_period_end = false,
+         updated_at = NOW()
+     WHERE business_id = $1
+     RETURNING current_period_end`,
+    [businessId],
+  );
+  const newEnd: Date | null = upd.rows[0]?.current_period_end ?? null;
+
+  // The renewal is a ONE-TIME option: mark it used so no further renewal is offered.
+  await pool.query(
+    `UPDATE founding_member SET renewed_at = NOW(), updated_at = NOW()
+     WHERE business_id = $1 AND renewed_at IS NULL`,
+    [businessId],
+  );
+  console.log(`[Founding] Business ${businessId} renewed for a second year ($${amountDollars}); term now ends ${newEnd?.toISOString?.() ?? newEnd}`);
+  invalidatePublicBusinessData();
+
+  // Confirmation email with the new term end - non-fatal (renewal is already committed).
+  try {
+    const biz = await pool.query(`
+      SELECT b.name, u.email,
+             (SELECT COUNT(*)::int FROM business_location bl WHERE bl.business_id = b.id AND bl.is_active = TRUE) AS locs
+      FROM business b JOIN "user" u ON u.id = b.user_id WHERE b.id = $1
+    `, [businessId]);
+    if (biz.rows[0]?.email && newEnd) {
+      await sendFoundingWelcomeEmail(biz.rows[0].email, biz.rows[0].name, {
+        termEnd: new Date(newEnd),
+        amountPaid: amountDollars,
+        locationCount: Math.max(1, Number(biz.rows[0].locs ?? 1)),
+      });
+    }
+  } catch (err: unknown) {
+    console.error(`[Founding] Renewal email failed for business ${businessId} (non-fatal):`, err instanceof Error ? err.message : err);
+  }
+};
+
 // ─── Founding Member: Count / Availability ────────────────────────────────────
 
 export const getFoundingMemberCount = async (): Promise<{
@@ -446,6 +565,13 @@ export const verifyAndActivateSession = async (
     const locationCount = Math.max(1, Number(session.metadata?.locations ?? 1));
     await activateFoundingMember(pool, businessId, paymentIntentId, sessionId, customerId, amountPaidDollars, locationCount);
     invalidatePublicBusinessData();
+    return { subscriptionStatus: null };
+  }
+
+  // ── Founding second-year renewal branch ─────────────────────────────────────
+  if (session.mode === 'payment' && session.metadata?.founding_renewal === 'true') {
+    if (session.payment_status !== 'paid') throw new Error('Payment not completed');
+    await activateFoundingRenewal(pool, session);
     return { subscriptionStatus: null };
   }
 
@@ -835,6 +961,12 @@ async function processStripeEvent(event: Stripe.Event, pool: Pool): Promise<void
           break;
         }
 
+        // ── Founding second-year renewal ─────────────────────────────────────
+        if (session.mode === 'payment' && session.metadata?.founding_renewal === 'true') {
+          await activateFoundingRenewal(pool, session);
+          break;
+        }
+
         // ── Update payment method (setup mode on an existing customer) ────────
         if (session.mode === 'setup' && session.metadata?.purpose === 'update_payment_method') {
           await handleUpdatePaymentMethodSession(pool, session);
@@ -1125,7 +1257,7 @@ async function activateFoundingMember(
     await pool.query(`
       INSERT INTO founding_payment (business_id, stripe_payment_intent_id, stripe_checkout_session_id, amount, refunded_amount)
       VALUES ($1, $2, $3, $4, $4)
-      ON CONFLICT (stripe_payment_intent_id) DO NOTHING
+      ON CONFLICT (stripe_payment_intent_id) DO UPDATE SET refunded_amount = EXCLUDED.refunded_amount
     `, [businessId, paymentIntentId, checkoutSessionId, amountPaidDollars]);
     return;
   }
@@ -1269,7 +1401,7 @@ async function activateFoundingMember(
         await pool.query(`
           INSERT INTO founding_payment (business_id, stripe_payment_intent_id, stripe_checkout_session_id, amount, refunded_amount)
           VALUES ($1, $2, $3, $4, $4)
-          ON CONFLICT (stripe_payment_intent_id) DO NOTHING
+          ON CONFLICT (stripe_payment_intent_id) DO UPDATE SET refunded_amount = EXCLUDED.refunded_amount
         `, [businessId, paymentIntentId, checkoutSessionId, amountPaidDollars]);
         return;
       }
@@ -1305,166 +1437,6 @@ async function activateFoundingMember(
   } catch (err: unknown) {
     console.error(`[Founding] Welcome email failed for business ${businessId} (non-fatal):`, err instanceof Error ? err.message : err);
   }
-}
-
-// ─── Founding Member: Cancel + Prorated Refund ────────────────────────────────
-
-async function cancelFoundingMembership(
-  pool: Pool,
-  businessId: number,
-): Promise<CancelResult> {
-  // Membership period for the time-based refund. The year STARTS at the founding payment
-  // (founding_member.paid_at) - NOT subscription.created_at, which can be years older when
-  // the business had a regular plan before buying founding (the upsert never resets it)
-  // and would wrongly shrink the refund.
-  const subResult = await pool.query(
-    `SELECT fm.paid_at, s.current_period_end
-     FROM founding_member fm
-     JOIN subscription s ON s.business_id = fm.business_id
-     WHERE fm.business_id = $1`,
-    [businessId],
-  );
-  const sub = subResult.rows[0] as { paid_at: Date; current_period_end: Date } | undefined;
-
-  // 50% refund of remaining time on the TOTAL net paid: with per-location pricing a
-  // membership may hold several payments (initial $1,200 x N plus later location adds),
-  // so the base is SUM(amount - refunded_amount) across the founding_payment ledger,
-  // and the refund is drawn from those payments newest-first.
-  // The refund is issued BEFORE any destructive change — if Stripe rejects it,
-  // the whole cancellation aborts and the business keeps its membership intact.
-  let refundType: CancelRefundType = 'none';
-  let refundAmount = 0;
-  let refundCents = 0;
-
-  const payments = await pool.query(
-    `SELECT stripe_payment_intent_id, amount, refunded_amount
-     FROM founding_payment
-     WHERE business_id = $1
-     ORDER BY created_at DESC`,
-    [businessId],
-  );
-  const netPaidCents = payments.rows.reduce(
-    (sum: number, p: { amount: string; refunded_amount: string }) =>
-      sum + Math.max(0, Math.round((Number(p.amount) - Number(p.refunded_amount)) * 100)),
-    0,
-  );
-
-  if (sub && netPaidCents > 0) {
-    const now = new Date();
-    const periodEnd = new Date(sub.current_period_end);
-    const periodStart = new Date(sub.paid_at);
-    const totalMs = periodEnd.getTime() - periodStart.getTime();
-    const remainingMs = Math.max(0, periodEnd.getTime() - now.getTime());
-    const remainingFraction = totalMs > 0 ? remainingMs / totalMs : 0;
-    refundCents = Math.round(netPaidCents * remainingFraction * 0.5);
-  }
-
-  // Step 1 — Stripe refunds FIRST (they cannot be rolled back, so they must precede
-  // every DB change). Drawn newest-first across the ledger. Per payment, the amount is
-  // capped by what Stripe says is still refundable (source of truth for prior refunds:
-  // if an earlier cancel attempt refunded but our DB commit failed, a retry must not
-  // pay twice). If verification fails, abort rather than risk over-refunding.
-  const refundedByPi: Array<{ pi: string; cents: number }> = [];
-  if (refundCents > 0) {
-    let remainingToRefund = refundCents;
-    for (const p of payments.rows as Array<{ stripe_payment_intent_id: string; amount: string; refunded_amount: string }>) {
-      if (remainingToRefund <= 0) break;
-      const ledgerNetCents = Math.max(0, Math.round((Number(p.amount) - Number(p.refunded_amount)) * 100));
-      if (ledgerNetCents <= 0) continue;
-      let stripeAvailableCents = 0;
-      try {
-        const pi = await stripe.paymentIntents.retrieve(p.stripe_payment_intent_id, { expand: ['latest_charge'] });
-        const charge = pi.latest_charge;
-        stripeAvailableCents = charge && typeof charge !== 'string'
-          ? Math.max(0, (charge.amount ?? 0) - (charge.amount_refunded ?? 0))
-          : 0;
-      } catch (err: unknown) {
-        console.error(`[Founding] Could not verify prior refunds — cancellation aborted for business ${businessId}: ${err instanceof Error ? err.message : err}`);
-        throw new Error('REFUND_FAILED');
-      }
-      // Refunds Stripe knows about that our ledger missed (a prior attempt refunded but
-      // the DB commit failed) already count toward this entitlement - a retry must not
-      // pay them again.
-      const unledgeredCents = Math.max(0, ledgerNetCents - stripeAvailableCents);
-      remainingToRefund = Math.max(0, remainingToRefund - unledgeredCents);
-      const cents = Math.min(remainingToRefund, stripeAvailableCents);
-      if (cents <= 0) continue;
-      try {
-        await stripe.refunds.create({ payment_intent: p.stripe_payment_intent_id, amount: cents });
-      } catch (err: unknown) {
-        console.error(`[Founding] Stripe refund failed — cancellation aborted for business ${businessId}: ${err instanceof Error ? err.message : err}`);
-        throw new Error('REFUND_FAILED');
-      }
-      refundedByPi.push({ pi: p.stripe_payment_intent_id, cents });
-      remainingToRefund -= cents;
-    }
-    const issuedCents = refundedByPi.reduce((s, r) => s + r.cents, 0);
-    if (issuedCents > 0) {
-      refundAmount = issuedCents / 100;
-      refundType = 'prorated'; // always 50% of remaining time — never the full payment
-    }
-  }
-
-  // Step 2 — all DB writes atomically. Record the refund on the ledger AND apply the
-  // destructive cancellation in ONE transaction, so the business is never left
-  // half-cancelled (e.g. refunded but still a founding_member with an active sub).
-  const client = await pool.connect();
-  let removedFromDraw = false;
-  let removedCount = 0;
-  try {
-    await client.query('BEGIN');
-
-    // Ledger records so the plan page shows net/refund state from the DB alone —
-    // one update per payment the refund was actually drawn from.
-    for (const r of refundedByPi) {
-      await client.query(
-        `UPDATE founding_payment SET refunded_amount = refunded_amount + $1 WHERE stripe_payment_intent_id = $2`,
-        [r.cents / 100, r.pi],
-      );
-    }
-
-    // Remove from all upcoming draws
-    const deleteResult = await client.query(
-      `DELETE FROM draw_entry de
-       USING draw d
-       WHERE de.draw_id = d.id AND de.business_id = $1 AND d.status = 'Upcoming'
-       RETURNING de.draw_id`,
-      [businessId],
-    );
-    removedCount = deleteResult.rowCount ?? 0;
-    removedFromDraw = removedCount > 0;
-
-    // Remove founding_member record entirely — they had their chance, no longer founding.
-    await client.query(`DELETE FROM founding_member WHERE business_id = $1`, [businessId]);
-
-    // Cancel subscription immediately (one-time payment, nothing to cancel on Stripe).
-    await client.query(
-      `UPDATE subscription SET status = 'Cancelled', cancel_at_period_end = false, updated_at = NOW()
-       WHERE business_id = $1`,
-      [businessId],
-    );
-
-    await client.query('COMMIT');
-    console.log(`[Founding] Business ${businessId} cancelled. Removed from ${removedCount} upcoming draws. Refunded $${refundAmount} (50% of remaining time).`);
-  } catch (err) {
-    await client.query('ROLLBACK');
-    // Stripe-vs-DB can't be one atomic unit: if the refund already went through but the
-    // DB cancellation rolled back, the money was returned yet the membership is intact.
-    // This is the unavoidable edge — make it LOUD so ops can reconcile manually.
-    if (refundAmount > 0) {
-      console.error(
-        `[Founding] CRITICAL: refund of $${refundAmount} was issued to Stripe for business ${businessId} ` +
-        `but the DB cancellation ROLLED BACK — manual reconciliation needed.`,
-        err instanceof Error ? err.message : err,
-      );
-    }
-    throw err;
-  } finally {
-    client.release();
-  }
-
-  invalidatePublicBusinessData();
-  return { removedFromDraw, refundType, refundAmount };
 }
 
 // ─── Shared Activation Logic ──────────────────────────────────────────────────
@@ -2093,10 +2065,10 @@ export const getSubscriptionDetails = async (userId: number) => {
            ELSE d.prize_pool END AS prize_amount,
       CASE WHEN fm.id IS NOT NULL THEN true ELSE false END AS is_founding,
       fm.seat_number AS founding_seat_number,
-      -- Per-location pricing: total net paid across the founding ledger (initial payment
-      -- plus location adds minus refunds) - drives the client's cancel-refund estimate.
-      (SELECT COALESCE(SUM(fp.amount - fp.refunded_amount), 0)::float
-       FROM founding_payment fp WHERE fp.business_id = b.id) AS founding_net_paid,
+      -- Special Terms Section 6: second-year renewal at the EXACT price of the initial term.
+      -- ONE-TIME option: founding_renewed = the single renewal was already used.
+      fm.amount_paid::float AS founding_amount_paid,
+      (fm.renewed_at IS NOT NULL) AS founding_renewed,
       s.fee_at_entry,
       s.entries_per_location,
       s.pending_fee_at_entry,
@@ -2257,6 +2229,10 @@ export const cancelSubscription = async (userId: number): Promise<CancelResult> 
   const pool = getPool();
 
   // ── Founding member branch ─────────────────────────────────────────────────
+  // Founding Partner Special Terms: a fixed 12-month term with NO early termination and
+  // NO refund. Cancellation does not exist for founding - the membership runs through
+  // its year, stays enrolled in every campaign it covers, and simply does not renew
+  // (expiry is automatic: enrollment requires current_period_end >= NOW()).
   const foundingResult = await pool.query(`
     SELECT b.id AS business_id
     FROM founding_member fm
@@ -2265,9 +2241,7 @@ export const cancelSubscription = async (userId: number): Promise<CancelResult> 
   `, [userId]);
 
   if (foundingResult.rows.length > 0) {
-    // Refunds are drawn from the founding_payment ledger (all payments, newest first),
-    // so the seat's original payment intent is no longer needed here.
-    return cancelFoundingMembership(pool, foundingResult.rows[0].business_id);
+    throw new Error('FOUNDING_NO_CANCEL');
   }
 
   // ── Recurring subscription branch ─────────────────────────────────────────

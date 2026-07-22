@@ -14,6 +14,7 @@ import {
   getSubscriptionInvoices,
   setSkipNextCampaign,
   createUpdatePaymentMethodSession,
+  createFoundingRenewalCheckoutSession,
 } from './stripe.service.js';
 
 // GET /business/subscription/founding-availability  (public — no auth)
@@ -121,8 +122,9 @@ export const cancelSub = async (req: Request, res: Response) => {
     res.json(result);
   } catch (err: unknown) {
     console.error('[stripe.cancelSub]', err);
-    if (err instanceof Error && err.message === 'REFUND_FAILED') {
-      res.status(502).json({ error: 'Your refund could not be processed, so the membership was NOT cancelled. Please try again or contact support.' });
+    // Founding Partner Special Terms: fixed 12-month term, no early termination, no refund.
+    if (err instanceof Error && err.message === 'FOUNDING_NO_CANCEL') {
+      res.status(400).json({ error: 'Founding Partner plans run for a fixed 12-month term and do not renew, so there is nothing to cancel. Your membership stays active through its full year.' });
       return;
     }
     res.status(400).json({ error: 'Cancellation failed. Please try again.' });
@@ -237,6 +239,37 @@ export const updatePaymentMethod = async (req: Request, res: Response) => {
     }
     console.error('[stripe.updatePaymentMethod]', err);
     res.status(500).json({ error: 'Could not open the payment update page. Please try again.' });
+  }
+};
+
+// POST /business/subscription/founding-renewal
+// Special Terms Section 6: renew the founding membership for one additional 12-month
+// term at the exact original price. Only available in the final 30 days of the term.
+export const foundingRenewal = async (req: Request, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const result = await createFoundingRenewalCheckoutSession(userId);
+    res.json(result);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : '';
+    if (msg === 'RENEWAL_NOT_OPEN') {
+      res.status(409).json({ error: 'Renewal opens in the final 30 days of your founding year.' });
+      return;
+    }
+    if (msg === 'RENEWAL_EXPIRED') {
+      res.status(409).json({ error: 'Your founding year has ended, so the founding renewal is no longer available. You can start a regular plan instead.' });
+      return;
+    }
+    if (msg === 'RENEWAL_ALREADY_USED') {
+      res.status(409).json({ error: 'The founding renewal can only be used once. When your second year ends, you can continue with a regular plan.' });
+      return;
+    }
+    if (msg.includes('No active founding membership')) {
+      res.status(404).json({ error: 'No active founding membership found.' });
+      return;
+    }
+    console.error('[stripe.foundingRenewal]', err);
+    res.status(500).json({ error: 'Could not start the renewal. Please try again.' });
   }
 };
 

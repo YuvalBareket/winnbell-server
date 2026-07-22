@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tests — stripe.service.ts: checkout, activation (24th anchor + immediate window charge),
  * cancellation/refunds, the founding transition, and fee resolution.
  *
@@ -77,7 +77,7 @@ process.env.STRIPE_PRICE_ID_1000 = 'price_test_1000';
 process.env.STRIPE_PRICE_ID_2500 = 'price_test_2500';
 process.env.STRIPE_PRICE_ID_5000 = 'price_test_5000';
 
-import { createCheckoutSession, createFoundingMemberCheckoutSession, cancelSubscription, verifyAndActivateSession, resumeSubscription, resolveMonthlyFee, isFoundingTransitionWindow, updateSubscriptionPlan, invoicePaymentIntentId } from '../stripe.service';
+import { createCheckoutSession, createFoundingMemberCheckoutSession, cancelSubscription, verifyAndActivateSession, resumeSubscription, resolveMonthlyFee, isFoundingTransitionWindow, updateSubscriptionPlan, invoicePaymentIntentId, createFoundingRenewalCheckoutSession, activateFoundingRenewal } from '../stripe.service';
 import { invalidatePlatformSettings } from '../../../shared/cache/cache';
 import { CHARGE_DAY_OF_MONTH } from '../../../shared/dates';
 
@@ -209,133 +209,23 @@ describe('cancelSubscription — recurring', () => {
 });
 
 // ─────────────────────────────────────────────
-// cancelSubscription — FOUNDING member refund flow (the refund path)
+// cancelSubscription — FOUNDING member (Special Terms: fixed term, no cancellation)
 // ─────────────────────────────────────────────
-describe('cancelSubscription — founding refund', () => {
-  const FOUNDING_ROW = { stripe_payment_intent_id: 'pi_1', business_id: 42 };
-  // Per-location pricing: the refund base is the founding_payment ledger (net paid).
-  const LEDGER_ROW = { stripe_payment_intent_id: 'pi_1', amount: '1200.00', refunded_amount: '0.00' };
+describe('cancelSubscription — founding (no cancellation per Special Terms)', () => {
+  const FOUNDING_ROW = { business_id: 42 };
 
-  beforeEach(() => {
-    // Double-refund guard verifies prior refunds on Stripe before refunding; default: none.
-    mockPaymentIntentsRetrieve.mockResolvedValue({ latest_charge: { amount: 120000, amount_refunded: 0 } });
-  });
+  it('throws FOUNDING_NO_CANCEL and makes NO changes: no refund, no teardown', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [FOUNDING_ROW] }); // founding check
 
-  it('issues a prorated 50%-of-remaining-time refund, then tears down the membership', async () => {
-    const createdAt = new RealDate('2026-01-01T00:00:00.000Z');
-    const periodEnd = new RealDate('2027-01-01T00:00:00.000Z');
-    const now = new RealDate('2026-07-02T00:00:00.000Z');
-    mockDateNow(now);
-    mockRefundsCreate.mockResolvedValue({ id: 're_1' });
+    await expect(cancelSubscription(7)).rejects.toThrow('FOUNDING_NO_CANCEL');
 
-    mockQuery
-      .mockResolvedValueOnce({ rows: [FOUNDING_ROW] })                                              // founding check
-      .mockResolvedValueOnce({ rows: [{ paid_at: createdAt, current_period_end: periodEnd }] })     // membership period
-      .mockResolvedValueOnce({ rows: [LEDGER_ROW] });                                               // payments ledger
-    // Destructive writes (ledger + deletes + cancel) now run in a client transaction.
-    mockClientQuery.mockImplementation((sql: string) =>
-      Promise.resolve(
-        typeof sql === 'string' && sql.includes('DELETE FROM draw_entry')
-          ? { rows: [{ draw_id: 9 }], rowCount: 1 }
-          : { rows: [], rowCount: 1 },
-      ),
-    );
-
-    const res = await cancelSubscription(7);
-
-    const totalMs = periodEnd.getTime() - createdAt.getTime();
-    const remainingMs = periodEnd.getTime() - now.getTime();
-    const expectedCents = Math.round(120000 * (remainingMs / totalMs) * 0.5);
-
-    expect(mockRefundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_1', amount: expectedCents });
-    expect(res.refundType).toBe('prorated');
-    expect(res.refundAmount).toBeCloseTo(expectedCents / 100, 2);
-    expect(res.removedFromDraw).toBe(true);
-  });
-
-  it('aborts with REFUND_FAILED and makes NO destructive change when the Stripe refund fails', async () => {
-    mockDateNow(new RealDate('2026-07-02T00:00:00.000Z'));
-    mockRefundsCreate.mockRejectedValue(new Error('charge_already_refunded'));
-
-    mockQuery
-      .mockResolvedValueOnce({ rows: [FOUNDING_ROW] })
-      .mockResolvedValueOnce({ rows: [{ paid_at: new RealDate('2026-01-01T00:00:00.000Z'), current_period_end: new RealDate('2027-01-01T00:00:00.000Z') }] })
-      .mockResolvedValueOnce({ rows: [LEDGER_ROW] }); // payments ledger
-
-    await expect(cancelSubscription(7)).rejects.toThrow('REFUND_FAILED');
-
-    // Membership must remain intact — the refund fails BEFORE the DB transaction opens,
-    // so the client (which now runs all destructive writes) is never even acquired.
-    expect(mockClientQuery).not.toHaveBeenCalled();
-  });
-
-  it('no refund when the membership year has already ended, but still tears down', async () => {
-    mockDateNow(new RealDate('2026-06-01T00:00:00.000Z'));
-    mockQuery
-      .mockResolvedValueOnce({ rows: [FOUNDING_ROW] })
-      .mockResolvedValueOnce({ rows: [{ paid_at: new RealDate('2025-01-01T00:00:00.000Z'), current_period_end: new RealDate('2026-01-01T00:00:00.000Z') }] });
-    // No refund, but the teardown still runs in a transaction; DELETE draw_entry finds none.
-    mockClientQuery.mockResolvedValue({ rows: [], rowCount: 0 });
-
-    const res = await cancelSubscription(7);
-
+    // The Special Terms give no early termination and no refund: nothing may move.
     expect(mockRefundsCreate).not.toHaveBeenCalled();
-    expect(res.refundType).toBe('none');
-    expect(res.refundAmount).toBe(0);
-    expect(res.removedFromDraw).toBe(false);
-  });
-
-  it('refund never exceeds 50% of the net paid, even cancelling on day one', async () => {
-    mockDateNow(new RealDate('2026-01-01T00:01:00.000Z')); // ~1 minute into the year
-    mockRefundsCreate.mockResolvedValue({ id: 're_1' });
-    mockQuery
-      .mockResolvedValueOnce({ rows: [FOUNDING_ROW] })
-      .mockResolvedValueOnce({ rows: [{ paid_at: new RealDate('2026-01-01T00:00:00.000Z'), current_period_end: new RealDate('2027-01-01T00:00:00.000Z') }] })
-      .mockResolvedValueOnce({ rows: [LEDGER_ROW] }); // payments ledger ($1,200 net)
-    mockClientQuery.mockResolvedValue({ rows: [], rowCount: 0 });
-
-    await cancelSubscription(7);
-
-    const amount = mockRefundsCreate.mock.calls[0][0].amount;
-    expect(amount).toBeLessThanOrEqual(60000); // never more than $600 (50% of $1,200)
-    expect(amount).toBeGreaterThan(59900);     // ~$600 on day one
-  });
-
-  it('does NOT refund again on a retry after a failed commit — Stripe already shows the refund', async () => {
-    mockDateNow(new RealDate('2026-07-02T00:00:00.000Z'));
-    // A prior attempt refunded $600 and the DB commit then failed: Stripe remembers,
-    // the LEDGER does not (refunded_amount still 0). The unledgered amount counts
-    // toward the entitlement, so a retry must not pay again.
-    mockPaymentIntentsRetrieve.mockResolvedValue({ latest_charge: { amount: 120000, amount_refunded: 60000 } });
-    mockQuery
-      .mockResolvedValueOnce({ rows: [FOUNDING_ROW] })
-      .mockResolvedValueOnce({ rows: [{ paid_at: new RealDate('2026-01-01T00:00:00.000Z'), current_period_end: new RealDate('2027-01-01T00:00:00.000Z') }] })
-      .mockResolvedValueOnce({ rows: [LEDGER_ROW] }); // ledger unaware of the prior refund
-    mockClientQuery.mockResolvedValue({ rows: [], rowCount: 0 });
-
-    const res = await cancelSubscription(7);
-
-    // $60,000c already refunded >= the ~$300 entitled now → nothing more goes out,
-    // but the teardown still completes.
-    expect(mockRefundsCreate).not.toHaveBeenCalled();
-    expect(res.refundAmount).toBe(0);
-    const teardown = mockClientQuery.mock.calls.find(
-      ([sql]: [string]) => typeof sql === 'string' && sql.includes('DELETE FROM founding_member'),
-    );
-    expect(teardown).toBeDefined();
-  });
-
-  it('aborts when prior refunds cannot be verified (never risk a double refund)', async () => {
-    mockDateNow(new RealDate('2026-07-02T00:00:00.000Z'));
-    mockPaymentIntentsRetrieve.mockRejectedValue(new Error('stripe unavailable'));
-    mockQuery
-      .mockResolvedValueOnce({ rows: [FOUNDING_ROW] })
-      .mockResolvedValueOnce({ rows: [{ paid_at: new RealDate('2026-01-01T00:00:00.000Z'), current_period_end: new RealDate('2027-01-01T00:00:00.000Z') }] })
-      .mockResolvedValueOnce({ rows: [LEDGER_ROW] }); // payments ledger
-
-    await expect(cancelSubscription(7)).rejects.toThrow('REFUND_FAILED');
-    expect(mockRefundsCreate).not.toHaveBeenCalled();
-    expect(mockClientQuery).not.toHaveBeenCalled(); // no destructive change happened
+    expect(mockClientQuery).not.toHaveBeenCalled(); // no destructive transaction opened
+    // No draw removal, no founding_member delete, no subscription status change.
+    const destructive = mockQuery.mock.calls.filter(([sql]) =>
+      typeof sql === 'string' && (sql.includes('DELETE') || sql.includes('UPDATE')));
+    expect(destructive).toHaveLength(0);
   });
 });
 
@@ -956,5 +846,97 @@ describe('invoicePaymentIntentId — Basil + legacy PaymentIntent resolution', (
     expect(invoicePaymentIntentId(asInvoice({}))).toBeUndefined();
     expect(invoicePaymentIntentId(asInvoice({ payments: { data: [] } }))).toBeUndefined();
     expect(invoicePaymentIntentId(asInvoice({ payments: { data: [{ payment: {} }] } }))).toBeUndefined();
+  });
+});
+
+// ─────────────────────────────────────────────
+// Founding second-year renewal (Special Terms Section 6)
+// ─────────────────────────────────────────────
+describe('createFoundingRenewalCheckoutSession — window + exact-price', () => {
+  const FOUNDING_SUB_ROW = {
+    business_id: 42, email: 'owner@cafe.com', amount_paid: '2400.00',
+    current_period_end: new RealDate('2026-08-10T00:00:00.000Z'),
+  };
+
+  it('rejects before the final-30-days window opens (RENEWAL_NOT_OPEN)', async () => {
+    mockDateNow(new RealDate('2026-06-01T00:00:00.000Z')); // >30 days before term end
+    mockQuery.mockResolvedValueOnce({ rows: [FOUNDING_SUB_ROW] });
+
+    await expect(createFoundingRenewalCheckoutSession(7)).rejects.toThrow('RENEWAL_NOT_OPEN');
+    expect(mockSessionsCreate).not.toHaveBeenCalled();
+  });
+
+  it('rejects after the term already ended (RENEWAL_EXPIRED)', async () => {
+    mockDateNow(new RealDate('2026-08-15T00:00:00.000Z')); // after term end
+    mockQuery.mockResolvedValueOnce({ rows: [FOUNDING_SUB_ROW] });
+
+    await expect(createFoundingRenewalCheckoutSession(7)).rejects.toThrow('RENEWAL_EXPIRED');
+    expect(mockSessionsCreate).not.toHaveBeenCalled();
+  });
+
+  it('rejects when the ONE-TIME renewal was already used (RENEWAL_ALREADY_USED)', async () => {
+    mockDateNow(new RealDate('2026-07-25T00:00:00.000Z')); // within the window
+    mockQuery.mockResolvedValueOnce({ rows: [{ ...FOUNDING_SUB_ROW, renewed_at: new RealDate('2026-07-20T00:00:00.000Z') }] });
+
+    await expect(createFoundingRenewalCheckoutSession(7)).rejects.toThrow('RENEWAL_ALREADY_USED');
+    expect(mockSessionsCreate).not.toHaveBeenCalled();
+  });
+
+  it('creates a checkout at the EXACT original amount inside the window', async () => {
+    mockDateNow(new RealDate('2026-07-25T00:00:00.000Z')); // within final 30 days
+    mockQuery.mockResolvedValueOnce({ rows: [FOUNDING_SUB_ROW] });
+    mockSessionsCreate.mockResolvedValue({ url: 'https://checkout.stripe.com/r/1' });
+
+    const res = await createFoundingRenewalCheckoutSession(7);
+
+    expect(res.url).toBe('https://checkout.stripe.com/r/1');
+    const args = mockSessionsCreate.mock.calls[0][0];
+    // Section 6: same Founding Partner price paid for the initial term ($2,400 here).
+    expect(args.line_items[0].price_data.unit_amount).toBe(240000);
+    expect(args.metadata.founding_renewal).toBe('true');
+  });
+});
+
+describe('activateFoundingRenewal — term extension + idempotency', () => {
+  const RENEWAL_SESSION = {
+    id: 'cs_renew', payment_intent: 'pi_renew', amount_total: 240000,
+    metadata: { business_id: '42', founding_renewal: 'true' },
+  } as never;
+
+  it('ledgers the payment and extends current_period_end by 1 year FROM the term end', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })   // ledger claim (fresh)
+      .mockResolvedValueOnce({ rows: [{ current_period_end: new RealDate('2027-08-10T00:00:00.000Z') }], rowCount: 1 }) // extend
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 })   // mark renewed_at (one-time option used)
+      .mockResolvedValueOnce({ rows: [{ name: 'Cafe One', email: 'owner@cafe.com', locs: 2 }] }); // email lookup
+
+    const { getPool } = jest.requireMock('../../../shared/db/db.js') as { getPool: () => never };
+    await activateFoundingRenewal(getPool(), RENEWAL_SESSION);
+
+    const extend = mockQuery.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes("current_period_end + INTERVAL '1 year'"),
+    );
+    expect(extend).toBeDefined();
+    // The one-time renewal is marked as used.
+    const marked = mockQuery.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('SET renewed_at = NOW()'),
+    );
+    expect(marked).toBeDefined();
+    // Renewal confirmation email carries the NEW term end and the renewal amount.
+    expect(mockSendFoundingWelcomeEmail).toHaveBeenCalledWith('owner@cafe.com', 'Cafe One',
+      expect.objectContaining({ amountPaid: 2400, locationCount: 2 }));
+  });
+
+  it('is idempotent: a second call (webhook + verify double fire) is a no-op', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 }); // ledger claim lost (already processed)
+
+    const { getPool } = jest.requireMock('../../../shared/db/db.js') as { getPool: () => never };
+    await activateFoundingRenewal(getPool(), RENEWAL_SESSION);
+
+    const extend = mockQuery.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes("INTERVAL '1 year'"),
+    );
+    expect(extend).toBeUndefined();
+    expect(mockSendFoundingWelcomeEmail).not.toHaveBeenCalled();
   });
 });
