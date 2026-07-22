@@ -252,10 +252,12 @@ ${stepsHtml}
 // payment story is spelled out: one charge today, $0 recurring, covers every campaign
 // opening before the term end, no auto-renewal.
 
+// Seat numbers and the founding cap are deliberately NOT mentioned anywhere in the email:
+// how many founding spots exist and which one a business holds is internal only.
 export const sendFoundingWelcomeEmail = async (
   toEmail: string,
   businessName: string,
-  details: { seatNumber: number; cap: number; termEnd: Date },
+  details: { termEnd: Date },
 ): Promise<void> => {
   if (!process.env.SMTP_HOST) {
     console.warn('[Email] SMTP_HOST not configured — skipping founding welcome email');
@@ -270,8 +272,10 @@ export const sendFoundingWelcomeEmail = async (
   const termEndLabel = fmtNyDate(details.termEnd);
   const goldGradient = 'linear-gradient(90deg,#fcd34d,#f59e0b)';
 
+  // 2,500 must match the founding entries_per_location set in activateFoundingMember
+  // (stripe.service.ts, Growth-tier allowance) - the email is prose, not wired to the DB.
   const included: string[] = [
-    `<strong style="color:#0f2747;">1,000 entries</strong> per location in every campaign`,
+    `<strong style="color:#0f2747;">2,500 entries</strong> per location in every campaign`,
     `Every campaign that opens before <strong style="color:#0f2747;">${termEndLabel}</strong>`,
     `<strong style="color:#0f2747;">One-time payment.</strong> $0 charged monthly, no auto-renewal`,
     `Your locations shown on the <strong style="color:#0f2747;">Winnbell map</strong>`,
@@ -360,7 +364,7 @@ export const sendFoundingWelcomeEmail = async (
           <tr>
             <td style="padding:34px 40px 8px;">
 
-              <p style="margin:0;font-size:14.5px;color:#475569;line-height:1.7;">Congratulations, and thank you for backing Winnbell early. You hold founding seat #${details.seatNumber}, and your membership is now active. Below is everything your year includes and exactly how the payment works - keep this email as your confirmation.</p>
+              <p style="margin:0;font-size:14.5px;color:#475569;line-height:1.7;">Congratulations, and thank you for backing Winnbell early. Your Founding Partner membership is now active. Below is everything your year includes and exactly how the payment works - keep this email as your confirmation.</p>
 
               <!-- membership summary -->
               <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:24px;border:1px solid #e7edf4;border-radius:16px;overflow:hidden;">
@@ -374,8 +378,8 @@ export const sendFoundingWelcomeEmail = async (
                 </tr>
                 <tr>
                   <td style="padding:14px 0 16px 22px;vertical-align:bottom;">
-                    <div style="font-size:17px;font-weight:700;color:#0f2747;">Founding Partner &middot; seat #${details.seatNumber}</div>
-                    <div style="font-size:12.5px;color:#94a3b8;font-weight:600;margin-top:3px;">1,000 entries per location, every campaign</div>
+                    <div style="font-size:17px;font-weight:700;color:#0f2747;">Founding Partner</div>
+                    <div style="font-size:12.5px;color:#94a3b8;font-weight:600;margin-top:3px;">2,500 entries per location, every campaign</div>
                   </td>
                   <td align="right" style="padding:14px 22px 16px 0;vertical-align:bottom;">
                     <div style="font-size:22px;font-weight:700;letter-spacing:-0.02em;color:#0f2747;">$1,200<span style="font-size:12.5px;font-weight:600;color:#94a3b8;"> one-time</span></div>

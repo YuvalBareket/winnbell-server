@@ -1244,19 +1244,16 @@ async function activateFoundingMember(
   // Welcome email — non-fatal (activation is already committed)
   try {
     const bizResult = await pool.query(`
-      SELECT b.name, u.email, fm.seat_number, s.current_period_end,
-             (SELECT founding_member_cap FROM platform_settings WHERE id = 1) AS cap
+      SELECT b.name, u.email, s.current_period_end
       FROM business b
       JOIN "user" u ON u.id = b.user_id
-      JOIN founding_member fm ON fm.business_id = b.id
       JOIN subscription s ON s.business_id = b.id
       WHERE b.id = $1
     `, [businessId]);
     const biz = bizResult.rows[0];
     if (biz?.email) {
+      // Seat number / founding cap intentionally not passed: internal data, never shown to partners.
       await sendFoundingWelcomeEmail(biz.email, biz.name, {
-        seatNumber: Number(biz.seat_number),
-        cap: Number(biz.cap ?? 30),
         termEnd: new Date(biz.current_period_end),
       });
     }

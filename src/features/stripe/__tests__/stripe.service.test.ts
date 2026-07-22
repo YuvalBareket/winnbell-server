@@ -774,8 +774,9 @@ describe('verifyAndActivateSession — founding activation guards', () => {
     );
     expect(claim).toBeDefined();
     // And the founding partner gets a REAL welcome email (not just a log line).
+    // Seat number / cap are internal-only and deliberately NOT part of the email contract.
     expect(mockSendFoundingWelcomeEmail).toHaveBeenCalledWith('owner@cafe.com', 'Cafe One',
-      expect.objectContaining({ seatNumber: 3, cap: 30 }));
+      expect.objectContaining({ termEnd: expect.any(Date) }));
   });
 });
 
