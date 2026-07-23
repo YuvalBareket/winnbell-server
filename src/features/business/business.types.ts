@@ -52,6 +52,9 @@ export interface MyBusinessData {
   subscription_status: string | null;
   current_period_end: string | null;
   cancel_at_period_end: boolean | null;
+  // Enrolled in the currently Open campaign - gates the pre-save "campaign is live"
+  // warning while editing the receipt minimum (audit P2-10).
+  is_participating: boolean;
   locations: MyBusinessLocation[];
   website_url?: string | null;
 }

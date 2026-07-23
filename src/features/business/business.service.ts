@@ -214,6 +214,13 @@ export const getMyBusinessData = async (userId: number, managedLocationId?: numb
         s.current_period_end,
         s.cancel_at_period_end,
         s.entries_per_location,
+        -- Enrolled in the currently OPEN campaign (draw_entry = the paid-participation
+        -- record, same rule as the location profile). Gates the pre-save "campaign is
+        -- live, change applies next campaign" warning on CampaignCard (audit P2-10).
+        EXISTS (
+          SELECT 1 FROM draw_entry de JOIN draw d ON d.id = de.draw_id
+          WHERE de.business_id = b.id AND d.status = 'Open'
+        ) AS is_participating,
         (
           SELECT COALESCE(json_agg(json_build_object(
             'id', bl.id,
