@@ -249,10 +249,22 @@ export const getMyBusinessData = async (userId: number, managedLocationId?: numb
     global_entry_cap: platformSettings.global_entry_cap ?? null,
   };
 
-  if (managedLocationId != null && Array.isArray(full.locations)) {
+  if (managedLocationId != null) {
+    // Location managers get CAMPAIGN facts, never the owner's billing (audit P2-9,
+    // same scoping as getSubscriptionDetails). The UI never rendered these for
+    // managers, but the raw values were on the wire:
+    //  - subscription_status is coarsened to Active/null (is_subscribed already says
+    //    that much; Past_Due/Incomplete/Cancelled internals are the owner's business)
+    //  - renew/cancel dates and the plan tier (entries_per_location) are nulled
     return {
       ...full,
-      locations: full.locations.filter((l: { id: number }) => l.id === managedLocationId),
+      subscription_status: full.is_subscribed ? 'Active' : null,
+      current_period_end: null,
+      cancel_at_period_end: null,
+      entries_per_location: null,
+      locations: Array.isArray(full.locations)
+        ? full.locations.filter((l: { id: number }) => l.id === managedLocationId)
+        : full.locations,
     };
   }
 

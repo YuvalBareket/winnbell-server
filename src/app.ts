@@ -63,11 +63,14 @@ const authLimiter = rateLimit({
   keyGenerator: getClientIpKey,
   store: makeRateLimitStore('auth'),
   message: { message: 'Too many requests, please try again later.' },
-  // /auth/refresh has its own, more generous limiter below. Session refreshes are routine
-  // (every access-token expiry, from every signed-in user) and MUST NOT compete with
-  // login/sync attempts for the strict per-IP budget - on shared IPs (offices, mobile
-  // CGNAT) a 429 here used to log users out mid-session.
-  skip: (req) => req.path === '/refresh',
+  // /auth/refresh and /auth/revoke-sessions have their own limiters below. Session
+  // refreshes are routine (every access-token expiry, from every signed-in user) and
+  // MUST NOT compete with login/sync attempts for the strict per-IP budget - on shared
+  // IPs (offices, mobile CGNAT) a 429 here used to log users out mid-session.
+  // revoke-sessions is the security-critical "kill other devices" step of a password
+  // reset (audit P2-8): losing it to a burned shared bucket silently left an attacker's
+  // sessions alive after the victim reset their password.
+  skip: (req) => req.path === '/refresh' || req.path === '/revoke-sessions',
 });
 
 // Refresh-token endpoint limiter. Generous: it only needs to stop hammering, not guessing -
@@ -79,6 +82,19 @@ const refreshLimiter = rateLimit({
   legacyHeaders: false,
   keyGenerator: getClientIpKey,
   store: makeRateLimitStore('refresh'),
+  message: { message: 'Too many requests, please try again later.' },
+});
+
+// /auth/revoke-sessions own bucket (audit P2-8): fired once per password reset, it must
+// never lose to login/sync traffic on a shared IP. Small but roomy for an office NAT;
+// the endpoint requires a valid Supabase token, so hammering it buys an attacker nothing.
+const revokeSessionsLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20 * RATE_LIMIT_MULTIPLIER,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: getClientIpKey,
+  store: makeRateLimitStore('revoke-sessions'),
   message: { message: 'Too many requests, please try again later.' },
 });
 
@@ -185,6 +201,7 @@ app.use(express.json());
 app.use('/auth/register', registrationLimiter);
 app.use('/auth/check-email', checkEmailLimiter); // F15: tighter, dedicated bucket for the email oracle
 app.use('/auth/refresh', refreshLimiter); // authLimiter skips /refresh (see limiter defs)
+app.use('/auth/revoke-sessions', revokeSessionsLimiter); // authLimiter skips it too (P2-8)
 app.use('/auth', authLimiter, authRoutes);
 
 // Public business discovery endpoints — accessible without login (e.g. browsing the map).
