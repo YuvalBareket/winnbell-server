@@ -42,14 +42,19 @@ export const insertRefreshTokenCapped = async (
   tokenHash: string,
   expiresAt: Date,
   role: string,
+  // Token-family lineage (theft detection): rotation passes the consumed token's family
+  // so the chain stays linked; login/register/sync omit it and start a NEW family.
+  familyId: string | null = null,
 ): Promise<void> => {
   await exec.query(
-    `INSERT INTO refresh_token (user_id, token_hash, expires_at) VALUES ($1, $2, $3)`,
-    [userId, tokenHash, expiresAt],
+    `INSERT INTO refresh_token (user_id, token_hash, expires_at, family_id)
+     VALUES ($1, $2, $3, COALESCE($4, gen_random_uuid()))`,
+    [userId, tokenHash, expiresAt, familyId],
   );
   // Keep the N newest LIVE tokens (unconsumed, or consumed within the rotation grace
-  // window - those are still redeemable by a racing tab). Everything else goes: consumed
-  // rows past grace and live-token overflow beyond the cap.
+  // window - those are still redeemable by a racing tab). Live overflow beyond the cap
+  // is evicted. Consumed rows past grace are RETAINED for 24h as theft tripwires (a
+  // reuse of one revokes its whole family - see refreshTokenController), then purged.
   await exec.query(
     `DELETE FROM refresh_token
      WHERE user_id = $1
@@ -58,7 +63,8 @@ export const insertRefreshTokenCapped = async (
          WHERE user_id = $1
            AND (consumed_at IS NULL OR consumed_at > NOW() - interval '60 seconds')
          ORDER BY id DESC LIMIT $2
-       )`,
+       )
+       AND (consumed_at IS NULL OR consumed_at < NOW() - interval '24 hours')`,
     [userId, refreshTokenCapForRole(role)],
   );
 };
@@ -788,7 +794,10 @@ export const cleanupExpiredRefreshTokens = async (): Promise<void> => {
   // single-column index, forcing a full table scan every 6h. Split so each half is index-driven
   // (idx_refresh_token_expires / idx_refresh_token_consumed).
   await pool.query(`DELETE FROM refresh_token WHERE expires_at < NOW()`);
+  // Consumed rows are kept 24h past the 60s acceptance grace as THEFT TRIPWIRES:
+  // replaying one revokes its whole token family (refreshTokenController reuse branch).
+  // Purging them sooner would blind the detection.
   await pool.query(
-    `DELETE FROM refresh_token WHERE consumed_at < NOW() - interval '60 seconds'`,
+    `DELETE FROM refresh_token WHERE consumed_at < NOW() - interval '24 hours'`,
   );
 };

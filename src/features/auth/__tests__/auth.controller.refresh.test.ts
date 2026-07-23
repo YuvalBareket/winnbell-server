@@ -52,16 +52,20 @@ const makeReq = (refreshToken: unknown = 'a-valid-looking-refresh-token') =>
   ({ body: { refreshToken } } as unknown as Parameters<typeof refreshTokenController>[0]);
 
 /** Dispatch client.query by SQL, with a live user + no managed location by default. */
-const defaultClient = (overrides: { user?: unknown; consumeRow?: unknown; preselectRow?: unknown } = {}) => {
+const defaultClient = (overrides: { user?: unknown; consumeRow?: unknown; preselectRow?: unknown; reuseRow?: unknown } = {}) => {
   const user = 'user' in overrides ? overrides.user : { id: 713, role: 'Business', is_active: true, token_epoch: 0 };
-  const consumeRow = 'consumeRow' in overrides ? overrides.consumeRow : { id: 1, user_id: 713 };
+  const consumeRow = 'consumeRow' in overrides ? overrides.consumeRow : { id: 1, user_id: 713, family_id: 'fam-abc' };
   // The advisory-lock pre-select: which user's lock to take. Defaults to found.
   const preselectRow = 'preselectRow' in overrides ? overrides.preselectRow : { user_id: 713 };
+  // Reuse-detection probe (runs only when the consume UPDATE misses): a row here means
+  // the token exists but was consumed beyond the grace window = theft.
+  const reuseRow = 'reuseRow' in overrides ? overrides.reuseRow : null;
   mockClientQuery.mockImplementation((sql: string) => {
     if (/^\s*BEGIN/i.test(sql)) return Promise.resolve({ rows: [] });
     if (/^\s*COMMIT/i.test(sql)) return Promise.resolve({ rows: [] });
     if (/^\s*ROLLBACK/i.test(sql)) return Promise.resolve({ rows: [] });
     if (/pg_advisory_xact_lock/i.test(sql)) return Promise.resolve({ rows: [] });
+    if (/SELECT user_id, family_id FROM refresh_token/i.test(sql)) return Promise.resolve({ rows: reuseRow ? [reuseRow] : [] });
     if (/SELECT user_id FROM refresh_token/i.test(sql)) return Promise.resolve({ rows: preselectRow ? [preselectRow] : [] });
     if (/UPDATE refresh_token/i.test(sql)) return Promise.resolve({ rows: consumeRow ? [consumeRow] : [] });
     if (/FROM "user"/i.test(sql)) return Promise.resolve({ rows: user ? [user] : [] });
@@ -153,6 +157,57 @@ describe('refreshTokenController — transactional rotation (F3)', () => {
     expect(res.statusCode).toBe(401);
     expect(mockInsertCapped).not.toHaveBeenCalled();
     expect(mockRelease).toHaveBeenCalledTimes(1);
+  });
+
+  test('rotation INHERITS the consumed token family (lineage for theft detection)', async () => {
+    defaultClient({ consumeRow: { id: 1, user_id: 713, family_id: 'fam-lineage-7' } });
+    const res = makeRes();
+
+    await refreshTokenController(makeReq(), res as unknown as Parameters<typeof refreshTokenController>[1]);
+
+    expect(committed()).toBe(true);
+    // 6th arg = familyId passed through to the capped insert
+    expect(mockInsertCapped.mock.calls[0][5]).toBe('fam-lineage-7');
+  });
+
+  test('P2-6 REUSE DETECTION: token consumed beyond grace revokes the WHOLE family and COMMITS', async () => {
+    // Consume UPDATE misses (beyond grace), but the tombstone row still exists -> theft.
+    defaultClient({ consumeRow: null, reuseRow: { user_id: 713, family_id: 'fam-stolen' } });
+    const errSpy = jest.spyOn(console, 'error').mockImplementation(() => {});
+    const res = makeRes();
+
+    await refreshTokenController(makeReq(), res as unknown as Parameters<typeof refreshTokenController>[1]);
+
+    // The whole family is deleted and the revocation PERSISTS (COMMIT, not ROLLBACK).
+    const famDelete = mockClientQuery.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && /DELETE FROM refresh_token WHERE family_id/i.test(sql),
+    );
+    expect(famDelete).toBeDefined();
+    expect(famDelete![1]).toEqual(['fam-stolen']);
+    expect(committed()).toBe(true);
+    // Same generic 401 as every other failure - no oracle for the attacker.
+    expect(res.statusCode).toBe(401);
+    expect(res.json.mock.calls[0][0]).toEqual({ message: 'Invalid or expired refresh token' });
+    expect(mockInsertCapped).not.toHaveBeenCalled();
+    expect(errSpy).toHaveBeenCalledWith(expect.stringMatching(/\[SECURITY\] Refresh token REUSE/));
+    errSpy.mockRestore();
+  });
+
+  test('expired-but-unconsumed token is NOT treated as theft (stale client, plain 401 rollback)', async () => {
+    // Consume UPDATE misses (expired), reuse probe finds nothing (consumed_at IS NULL
+    // rows never match the tombstone predicate) -> plain rollback, no family nuke.
+    defaultClient({ consumeRow: null, reuseRow: null });
+    const res = makeRes();
+
+    await refreshTokenController(makeReq(), res as unknown as Parameters<typeof refreshTokenController>[1]);
+
+    expect(rolledBack()).toBe(true);
+    expect(committed()).toBe(false);
+    expect(res.statusCode).toBe(401);
+    const famDelete = mockClientQuery.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && /DELETE FROM refresh_token WHERE family_id/i.test(sql),
+    );
+    expect(famDelete).toBeUndefined();
   });
 
   test('missing refresh token: 400 before opening a transaction', async () => {

@@ -454,8 +454,14 @@ CREATE TABLE refresh_token (
   expires_at   TIMESTAMP NOT NULL,
   -- Rotation grace window: set on first use instead of hard-deleting the row. A consumed
   -- token is accepted again for a short grace period (concurrent tabs / PWA windows race
-  -- to refresh with the same single-use token); cleanup purges rows consumed beyond grace.
+  -- to refresh with the same single-use token). Rows consumed beyond grace are kept for
+  -- 24h as THEFT TRIPWIRES (see family_id), then purged.
   consumed_at  TIMESTAMP,
+  -- Token-family lineage for reuse/theft detection: a login starts a family (random
+  -- default) and every rotation inherits it. Presenting a token consumed beyond the
+  -- grace window is proof of theft - the whole family is revoked (every session
+  -- descended from that login), forcing a clean re-login.
+  family_id    UUID NOT NULL DEFAULT gen_random_uuid(),
   created_at   TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
@@ -683,6 +689,8 @@ CREATE INDEX idx_refresh_token_user ON refresh_token (user_id);
 -- so each is index-driven instead of a full scan).
 CREATE INDEX idx_refresh_token_expires ON refresh_token (expires_at);
 CREATE INDEX idx_refresh_token_consumed ON refresh_token (consumed_at);
+-- Family revocation on reuse detection deletes by family
+CREATE INDEX idx_refresh_token_family ON refresh_token (family_id);
 
 -- ── promotional_entry ─────────────────────────────────────────────────────────
 

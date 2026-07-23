@@ -458,11 +458,34 @@ export const refreshTokenController = async (req: Request, res: Response): Promi
          SET consumed_at = COALESCE(consumed_at, NOW())
          WHERE token_hash = $1 AND expires_at > NOW()
            AND (consumed_at IS NULL OR consumed_at > NOW() - interval '60 seconds')
-         RETURNING id, user_id`,
+         RETURNING id, user_id, family_id`,
         [hash],
       );
       const row = result.rows[0];
       if (!row) {
+        // REUSE / THEFT DETECTION (audit P2-6). Legit racers land inside the 60s grace
+        // and never reach this branch. A token that still EXISTS here but was consumed
+        // beyond grace can only be presented by someone holding an out-of-chain copy -
+        // the client that consumed it walked away with the rotated pair. Revoke the
+        // entire token family (every session descended from that login) and COMMIT so
+        // the revocation persists; the victim re-logs in, the thief holds nothing.
+        // Same 401 body as every other failure - no oracle for the attacker.
+        // (Consumed rows are retained 24h as tripwires; an expired-but-unconsumed token
+        // is just a stale client and is NOT treated as theft.)
+        const reused = await client.query(
+          `SELECT user_id, family_id FROM refresh_token
+           WHERE token_hash = $1 AND consumed_at IS NOT NULL
+             AND consumed_at <= NOW() - interval '60 seconds'`,
+          [hash],
+        );
+        if (reused.rows.length > 0) {
+          const { user_id: victimId, family_id: familyId } = reused.rows[0];
+          await client.query(`DELETE FROM refresh_token WHERE family_id = $1`, [familyId]);
+          await client.query('COMMIT');
+          console.error(`[SECURITY] Refresh token REUSE detected for user ${victimId} - token family ${familyId} revoked`);
+          res.status(401).json({ message: 'Invalid or expired refresh token' });
+          return;
+        }
         await client.query('ROLLBACK');
         res.status(401).json({ message: 'Invalid or expired refresh token' });
         return;
@@ -497,7 +520,9 @@ export const refreshTokenController = async (req: Request, res: Response): Promi
       const newRefreshHash = crypto.createHash('sha256').update(newRefreshToken).digest('hex');
       const newRefreshExpiry = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000);
 
-      await authService.insertRefreshTokenCapped(client, user.id, newRefreshHash, newRefreshExpiry, user.role);
+      // The rotated token INHERITS the consumed token's family - the lineage is what
+      // makes reuse detection able to kill every descendant of a compromised login.
+      await authService.insertRefreshTokenCapped(client, user.id, newRefreshHash, newRefreshExpiry, user.role, row.family_id);
 
       await client.query('COMMIT');
       res.json({ token: newToken, refreshToken: newRefreshToken });
