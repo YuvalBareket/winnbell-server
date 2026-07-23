@@ -211,7 +211,10 @@ CREATE TABLE founding_member (
   -- Stripe one-time payment tracking (no stripe_subscription_id — it's a single charge)
   stripe_payment_intent_id   TEXT UNIQUE,
   stripe_checkout_session_id TEXT UNIQUE,
-  amount_paid                NUMERIC(10, 2) NOT NULL DEFAULT 1200.00,
+  -- No DEFAULT on purpose: the founding price lives in code (shared/founding.ts), and this
+  -- snapshot drives the member's exact-price renewal - every insert must state what was
+  -- actually charged. A default would silently record the wrong price.
+  amount_paid                NUMERIC(10, 2) NOT NULL,
   paid_at                    TIMESTAMP NOT NULL DEFAULT NOW(),
   -- Special Terms Section 6: the second-year renewal is a ONE-TIME option. Set when the
   -- renewal payment lands; a non-null value blocks any further renewal (after the second
@@ -469,6 +472,9 @@ CREATE TABLE platform_settings (
   -- Founding partner program: max seats (default 30) and active toggle
   founding_member_cap   INTEGER NOT NULL DEFAULT 30 CHECK (founding_member_cap >= 1),
   founding_phase_active BOOLEAN NOT NULL DEFAULT TRUE,
+  -- Founding price is NOT stored here: it is a code constant (shared/founding.ts,
+  -- FOUNDING_PRICE_PER_LOCATION). Purchases snapshot the amount actually paid
+  -- (founding_member.amount_paid), so a price change never affects existing members.
   updated_at            TIMESTAMP NOT NULL DEFAULT NOW()
 );
 

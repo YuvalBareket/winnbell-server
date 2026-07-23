@@ -4,6 +4,7 @@ import { getPool } from '../../shared/db/db.js';
 import { sendSubscriptionConfirmationEmail, sendPaymentFailedEmail, sendFoundingWelcomeEmail, sendDisputeAlertEmail } from '../../shared/email/email.service.js';
 import { getPlatformSettings, publicCache, invalidatePublicBusinessData } from '../../shared/cache/cache.js';
 import { nextCampaignOpensNy, lastChargeAtNy, CHARGE_DAY_OF_MONTH } from '../../shared/dates.js';
+import { FOUNDING_TERM_MONTHS, FOUNDING_RENEWAL_TERM_MONTHS, FOUNDING_MONTHLY_PRICE_PER_LOCATION, FOUNDING_PRICE_PER_LOCATION, FOUNDING_ENTRIES_PER_LOCATION } from '../../shared/founding.js';
 
 const stripeSecretKey = process.env.STRIPE_SECRET_KEY;
 if (!stripeSecretKey) throw new Error('STRIPE_SECRET_KEY is not configured — refusing to start the Stripe client.');
@@ -243,9 +244,9 @@ async function refundUpcomingCampaignDelta(subscriptionId: string, amountDollars
 
 // ─── Founding Member: Transition Window ───────────────────────────────────────
 // A founding membership is a one-time payment with no Stripe subscription behind it, so
-// nothing ever flips its status off 'Active' — the year "ends" purely as a date. Founders
-// are in EVERY campaign that OPENS before their year ends, so their final included campaign
-// is the last one to open inside the year. From that month onward (year ends before the
+// nothing ever flips its status off 'Active' — the term "ends" purely as a date. Founders
+// are in EVERY campaign that OPENS before their term ends, so their final included campaign
+// is the last one to open inside the term. From that month onward (term ends before the
 // next campaign opens — and forever after expiry) they may start a regular plan. Subscribing
 // inside this window puts them in that next campaign with no gap: the new subscription bills
 // on the last day of this month, which pays for next month's campaign.
@@ -253,11 +254,14 @@ export function isFoundingTransitionWindow(currentPeriodEnd: Date): boolean {
   return currentPeriodEnd.getTime() < nextCampaignOpensNy().getTime();
 }
 
-// Founding pricing: $1,200 PER LOCATION for the year (no location limit). The location
-// set is FIXED at purchase: founding members can edit their locations but not add or
-// remove them (deliberate simplification - the alternative was prorated mid-year
-// charges/refunds, which is not worth the machinery for a one-year founding plan).
-export const FOUNDING_PRICE_PER_LOCATION_CENTS = 120000;
+// Founding term lengths AND the per-location price live in shared/founding.ts
+// (single source of truth, shared with email.service without a circular import).
+// Re-exported here so existing importers keep working.
+// The location set is FIXED at purchase: founding members can edit their locations but
+// not add or remove them (deliberate simplification over prorated mid-term billing).
+export { FOUNDING_TERM_MONTHS, FOUNDING_RENEWAL_TERM_MONTHS, FOUNDING_MONTHLY_PRICE_PER_LOCATION, FOUNDING_PRICE_PER_LOCATION, FOUNDING_ENTRIES_PER_LOCATION };
+
+export const FOUNDING_PRICE_PER_LOCATION_CENTS = FOUNDING_PRICE_PER_LOCATION * 100;
 
 // ─── Founding Member: Checkout Session ────────────────────────────────────────
 
@@ -281,9 +285,10 @@ export const createFoundingMemberCheckoutSession = async (
   );
   if (existing.rows.length > 0) throw new Error('This business already has an active subscription');
 
-  // Founding is priced PER LOCATION ($1,200 x N for the year, no location limit). The
-  // location count is the same next-campaign count the regular plans bill by; it is
-  // stamped into the session metadata so activation records exactly what was paid for.
+  // Founding is priced PER LOCATION (FOUNDING_PRICE_PER_LOCATION x N for the whole term,
+  // no location limit). The location count is the same next-campaign count the regular
+  // plans bill by; it is stamped into the session metadata so activation records exactly
+  // what was paid for.
   const locCount = await pool.query(
     `SELECT COUNT(*)::int AS cnt FROM business_location
      WHERE business_id = $1
@@ -291,6 +296,9 @@ export const createFoundingMemberCheckoutSession = async (
     [businessId],
   );
   const locationCount = Math.max(1, Number(locCount.rows[0]?.cnt ?? 0));
+
+  const priceCents = FOUNDING_PRICE_PER_LOCATION_CENTS;
+  const priceLabel = `$${FOUNDING_PRICE_PER_LOCATION.toLocaleString('en-US')}`;
 
   const baseUrl = process.env.FRONTEND_URL || 'http://localhost:8081';
 
@@ -303,10 +311,10 @@ export const createFoundingMemberCheckoutSession = async (
       quantity: locationCount,
       price_data: {
         currency: 'usd',
-        unit_amount: FOUNDING_PRICE_PER_LOCATION_CENTS,
+        unit_amount: priceCents,
         product_data: {
           name: 'Founding Partner - Winnbell',
-          description: 'One-time membership. Full year. $1,200 per location. 2,500 entries per location per month.',
+          description: `One-time membership for the full founding term. ${priceLabel} per location. 2,500 entries per location per month.`,
         },
       },
     }],
@@ -322,19 +330,46 @@ export const createFoundingMemberCheckoutSession = async (
 };
 
 // ─── Founding: Second-Year Renewal (Special Terms Section 6) ──────────────────
-// In the FINAL 30 days of the founding year the partner may renew for ONE additional
-// twelve-month term at the EXACT price paid for the initial term (fm.amount_paid).
+// In the FINAL 30 days of the founding term the partner may renew for ONE additional
+// FOUNDING_RENEWAL_TERM_MONTHS term at the ORIGINAL MONTHLY RATE (rate x 12 months).
 // Renewal is a separate explicit checkout (never auto-charged, per the Special Terms)
 // and extends current_period_end by 12 months FROM the existing term end, so renewing
 // early loses no time.
 
 export const FOUNDING_RENEWAL_WINDOW_DAYS = 30;
 
+// Shared by the renewal checkout guard AND getSubscriptionDetails (which serves
+// founding_renewal_open to the client banner) so the banner and the server guard
+// can never disagree - same pattern as founding_transition_available.
+export function foundingRenewalWindowState(periodEnd: Date, now: Date = new Date()): 'not_open' | 'open' | 'expired' {
+  // Millisecond arithmetic on purpose (do NOT "simplify" to setDate/getDate: those
+  // operate in the host timezone and would shift the window across DST boundaries).
+  const windowOpenMs = periodEnd.getTime() - FOUNDING_RENEWAL_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+  if (now.getTime() < windowOpenMs) return 'not_open';
+  if (now.getTime() > periodEnd.getTime()) return 'expired';
+  return 'open';
+}
+
+// Renewal price = the member's ORIGINAL MONTHLY RATE x the renewal term length.
+// The founding offer is a monthly rate ($100/location/month); the initial purchase
+// charges rate x FOUNDING_TERM_MONTHS, the renewal charges rate x
+// FOUNDING_RENEWAL_TERM_MONTHS (e.g. $300/location for 3 months, then $1,200/location
+// for the 12-month renewal). The rate snapshot is subscription.fee_at_entry (set at
+// activation as amount_paid / term months); fall back to deriving it from amount_paid
+// for any row missing fee_at_entry. Shared by the renewal checkout AND
+// getSubscriptionDetails (founding_renewal_price) so display and charge never disagree.
+export function foundingRenewalAmountCents(feeAtEntry: number | string | null, amountPaid: number | string): number {
+  const monthlyCents = feeAtEntry != null && Number(feeAtEntry) > 0
+    ? Math.round(Number(feeAtEntry) * 100)
+    : Math.round((Number(amountPaid) * 100) / FOUNDING_TERM_MONTHS);
+  return monthlyCents * FOUNDING_RENEWAL_TERM_MONTHS;
+}
+
 export const createFoundingRenewalCheckoutSession = async (userId: number): Promise<{ url: string }> => {
   const pool = getPool();
 
   const res = await pool.query(`
-    SELECT b.id AS business_id, u.email, fm.amount_paid, fm.renewed_at, s.current_period_end
+    SELECT b.id AS business_id, u.email, fm.amount_paid, fm.renewed_at, s.current_period_end, s.fee_at_entry
     FROM business b
     JOIN "user" u ON u.id = b.user_id
     JOIN founding_member fm ON fm.business_id = b.id
@@ -345,17 +380,15 @@ export const createFoundingRenewalCheckoutSession = async (userId: number): Prom
   if (!row) throw new Error('No active founding membership found');
 
   // ONE-TIME option: after the single renewal is used, the founding price is gone -
-  // when the second year ends the business subscribes through the regular plans.
+  // when the renewed term ends the business subscribes through the regular plans.
   if (row.renewed_at) throw new Error('RENEWAL_ALREADY_USED');
 
-  const periodEnd = new Date(row.current_period_end);
-  const now = new Date();
-  const windowOpen = new Date(periodEnd);
-  windowOpen.setDate(windowOpen.getDate() - FOUNDING_RENEWAL_WINDOW_DAYS);
-  if (now < windowOpen) throw new Error('RENEWAL_NOT_OPEN');
-  if (now > periodEnd) throw new Error('RENEWAL_EXPIRED');
+  const windowState = foundingRenewalWindowState(new Date(row.current_period_end));
+  if (windowState === 'not_open') throw new Error('RENEWAL_NOT_OPEN');
+  if (windowState === 'expired') throw new Error('RENEWAL_EXPIRED');
 
-  const amountCents = Math.round(Number(row.amount_paid) * 100);
+  // Monthly rate snapshot x the 12-month renewal term (NOT the 3-month initial total).
+  const amountCents = foundingRenewalAmountCents(row.fee_at_entry, row.amount_paid);
   if (amountCents < 50) throw new Error('RENEWAL_AMOUNT_INVALID');
 
   const baseUrl = process.env.FRONTEND_URL || 'http://localhost:8081';
@@ -370,7 +403,7 @@ export const createFoundingRenewalCheckoutSession = async (userId: number): Prom
         unit_amount: amountCents,
         product_data: {
           name: 'Founding Partner Renewal - Winnbell',
-          description: 'One additional twelve-month term at your original Founding Partner price.',
+          description: `One additional ${FOUNDING_RENEWAL_TERM_MONTHS}-month term at your original Founding Partner monthly rate.`,
         },
       },
     }],
@@ -387,38 +420,92 @@ export const createFoundingRenewalCheckoutSession = async (userId: number): Prom
 export const activateFoundingRenewal = async (pool: Pool, session: Stripe.Checkout.Session): Promise<void> => {
   const businessId = Number(session.metadata?.business_id);
   const paymentIntentId = session.payment_intent as string;
-  const amountDollars = (session.amount_total ?? 0) / 100;
   if (!businessId || !paymentIntentId) throw new Error('founding_renewal session missing metadata');
+  // A paid payment-mode session always carries amount_total. Failing loudly (webhook
+  // retries) beats ledgering $0 for money that was actually collected.
+  if (session.amount_total == null || session.amount_total < 50) throw new Error('founding_renewal session has invalid amount_total');
+  const amountDollars = session.amount_total / 100;
 
-  // Idempotency (webhook + verify double call): the ledger's unique payment intent is
-  // the claim - only the first caller proceeds to extend the term.
-  const ledger = await pool.query(
-    `INSERT INTO founding_payment (business_id, stripe_payment_intent_id, stripe_checkout_session_id, amount)
-     VALUES ($1, $2, $3, $4)
-     ON CONFLICT (stripe_payment_intent_id) DO NOTHING`,
-    [businessId, paymentIntentId, session.id, amountDollars],
-  );
-  if ((ledger.rowCount ?? 0) === 0) return;
+  // All three writes commit or roll back TOGETHER. Without the transaction, a crash
+  // after the ledger insert would consume the idempotency slot with the term never
+  // extended - money collected, no retry able to recover it.
+  const client = await pool.connect();
+  let duplicate = false;
+  let newEnd: Date | null = null;
+  try {
+    await client.query('BEGIN');
 
-  const upd = await pool.query(
-    `UPDATE subscription
-     SET current_period_end = current_period_end + INTERVAL '1 year',
-         status = 'Active',
-         cancel_at_period_end = false,
-         updated_at = NOW()
-     WHERE business_id = $1
-     RETURNING current_period_end`,
-    [businessId],
-  );
-  const newEnd: Date | null = upd.rows[0]?.current_period_end ?? null;
+    // Idempotency (webhook + verify double call): the ledger's unique payment intent
+    // is the claim - only the first caller proceeds.
+    const ledger = await client.query(
+      `INSERT INTO founding_payment (business_id, stripe_payment_intent_id, stripe_checkout_session_id, amount)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (stripe_payment_intent_id) DO NOTHING`,
+      [businessId, paymentIntentId, session.id, amountDollars],
+    );
+    if ((ledger.rowCount ?? 0) === 0) {
+      await client.query('ROLLBACK');
+      return;
+    }
 
-  // The renewal is a ONE-TIME option: mark it used so no further renewal is offered.
-  await pool.query(
-    `UPDATE founding_member SET renewed_at = NOW(), updated_at = NOW()
-     WHERE business_id = $1 AND renewed_at IS NULL`,
-    [businessId],
-  );
-  console.log(`[Founding] Business ${businessId} renewed for a second year ($${amountDollars}); term now ends ${newEnd?.toISOString?.() ?? newEnd}`);
+    // ONE-TIME guard at ACTIVATION time, not just session creation: two renewal
+    // checkouts can both be created while renewed_at is still NULL (two tabs, or a
+    // stale Stripe page paid after the first renewal). The WHERE renewed_at IS NULL
+    // claim is atomic - only ONE distinct payment ever extends the term; any other
+    // paid renewal session is ledgered as refunded here and refunded after commit.
+    // Also covers a founding row that vanished (0 rows -> refund, never extend).
+    const claim = await client.query(
+      `UPDATE founding_member SET renewed_at = NOW(), updated_at = NOW()
+       WHERE business_id = $1 AND renewed_at IS NULL
+       RETURNING id`,
+      [businessId],
+    );
+    if ((claim.rowCount ?? 0) === 0) {
+      await client.query(
+        `UPDATE founding_payment SET refunded_amount = amount WHERE stripe_payment_intent_id = $1`,
+        [paymentIntentId],
+      );
+      await client.query('COMMIT');
+      duplicate = true;
+    } else {
+      const upd = await client.query(
+        `UPDATE subscription
+         SET current_period_end = current_period_end + make_interval(months => $2),
+             status = 'Active',
+             cancel_at_period_end = false,
+             updated_at = NOW()
+         WHERE business_id = $1
+         RETURNING current_period_end`,
+        [businessId, FOUNDING_RENEWAL_TERM_MONTHS],
+      );
+      newEnd = upd.rows[0]?.current_period_end ?? null;
+      await client.query('COMMIT');
+    }
+  } catch (err: unknown) {
+    try { await client.query('ROLLBACK'); } catch { /* connection already gone */ }
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  if (duplicate) {
+    // Stripe call stays OUTSIDE the transaction (never hold a DB tx open across a
+    // network call). If the refund fails, the ledger slot is already committed so a
+    // webhook retry cannot reach this branch again - the CRITICAL log is the signal
+    // to refund manually in the Stripe dashboard.
+    try {
+      await stripe.refunds.create({ payment_intent: paymentIntentId });
+      console.warn(`[Founding] Duplicate renewal payment for business ${businessId} (pi ${paymentIntentId}) - refunded in full`);
+    } catch (refundErr: unknown) {
+      const code = (refundErr as { code?: string })?.code;
+      if (code !== 'charge_already_refunded') {
+        console.error(`[Founding] CRITICAL: duplicate renewal refund FAILED for business ${businessId} (pi ${paymentIntentId}) - refund manually:`, refundErr instanceof Error ? refundErr.message : refundErr);
+      }
+    }
+    return;
+  }
+
+  console.log(`[Founding] Business ${businessId} renewed for another term ($${amountDollars}); term now ends ${newEnd?.toISOString?.() ?? newEnd}`);
   invalidatePublicBusinessData();
 
   // Confirmation email with the new term end - non-fatal (renewal is already committed).
@@ -433,6 +520,8 @@ export const activateFoundingRenewal = async (pool: Pool, session: Stripe.Checko
         termEnd: new Date(newEnd),
         amountPaid: amountDollars,
         locationCount: Math.max(1, Number(biz.rows[0].locs ?? 1)),
+        termMonths: FOUNDING_RENEWAL_TERM_MONTHS,
+        isRenewal: true,
       });
     }
   } catch (err: unknown) {
@@ -442,11 +531,15 @@ export const activateFoundingRenewal = async (pool: Pool, session: Stripe.Checko
 
 // ─── Founding Member: Count / Availability ────────────────────────────────────
 
-export const getFoundingMemberCount = async (): Promise<{
-  taken: number; remaining: number; cap: number; price: number; active: boolean;
-}> => {
+interface FoundingAvailability {
+  taken: number; remaining: number; cap: number; active: boolean;
+  price: number; monthlyPrice: number; termMonths: number; renewalTermMonths: number;
+  entriesPerLocation: number;
+}
+
+export const getFoundingMemberCount = async (): Promise<FoundingAvailability> => {
   const CACHE_KEY = 'founding:availability';
-  const cached = publicCache.get<{ taken: number; remaining: number; cap: number; price: number; active: boolean }>(CACHE_KEY);
+  const cached = publicCache.get<FoundingAvailability>(CACHE_KEY);
   if (cached !== undefined) return cached;
 
   const pool = getPool();
@@ -457,7 +550,16 @@ export const getFoundingMemberCount = async (): Promise<{
   const taken = countResult.rows[0]?.taken ?? 0;
   const cap = settings.founding_member_cap ?? 30;
   const active = settings.founding_phase_active ?? true;
-  const value = { taken, remaining: Math.max(0, cap - taken), cap, price: 1200, active };
+  // Price + term lengths ride along so ALL founding copy/math on the client derives
+  // from one source (the shared/founding.ts constants).
+  const value: FoundingAvailability = {
+    taken, remaining: Math.max(0, cap - taken), cap, active,
+    price: FOUNDING_PRICE_PER_LOCATION,
+    monthlyPrice: FOUNDING_MONTHLY_PRICE_PER_LOCATION,
+    termMonths: FOUNDING_TERM_MONTHS,
+    renewalTermMonths: FOUNDING_RENEWAL_TERM_MONTHS,
+    entriesPerLocation: FOUNDING_ENTRIES_PER_LOCATION,
+  };
   publicCache.set(CACHE_KEY, value, 60);
   return value;
 };
@@ -477,7 +579,7 @@ export const createCheckoutSession = async (
 
   const pool = getPool();
   // Block a second subscription — EXCEPT for a founding member inside the transition
-  // window (their prepaid year no longer covers the next campaign, or already ended).
+  // window (their prepaid term no longer covers the next campaign, or already ended).
   // Their row stays 'Active' forever because no Stripe subscription backs it, so a plain
   // status check would lock them out of ever subscribing again.
   const existing = await pool.query(
@@ -560,8 +662,11 @@ export const verifyAndActivateSession = async (
     if (session.payment_status !== 'paid') throw new Error('Payment not completed');
     const paymentIntentId = session.payment_intent as string;
     const customerId = (session.customer as string | null) ?? null;
-    // Per-location pricing: amount + location count come off the session itself.
-    const amountPaidDollars = (session.amount_total ?? FOUNDING_PRICE_PER_LOCATION_CENTS) / 100;
+    // Per-location pricing: amount + location count come off the session itself. A paid
+    // session always has amount_total; failing loudly beats snapshotting a wrong amount
+    // (the snapshot drives the member's renewal price).
+    if (session.amount_total == null || session.amount_total < 50) throw new Error('founding session has invalid amount_total');
+    const amountPaidDollars = session.amount_total / 100;
     const locationCount = Math.max(1, Number(session.metadata?.locations ?? 1));
     await activateFoundingMember(pool, businessId, paymentIntentId, sessionId, customerId, amountPaidDollars, locationCount);
     invalidatePublicBusinessData();
@@ -952,8 +1057,10 @@ async function processStripeEvent(event: Stripe.Event, pool: Pool): Promise<void
         if (session.mode === 'payment' && session.metadata?.founding === 'true') {
           const paymentIntentId = session.payment_intent as string;
           const customerId = (session.customer as string | null) ?? null;
-          // Per-location pricing: amount + location count come off the session itself.
-          const amountPaidDollars = (session.amount_total ?? FOUNDING_PRICE_PER_LOCATION_CENTS) / 100;
+          // Per-location pricing: amount + location count come off the session itself. A paid
+          // session always has amount_total; failing loudly beats snapshotting a wrong amount.
+          if (session.amount_total == null || session.amount_total < 50) throw new Error('founding session has invalid amount_total');
+          const amountPaidDollars = session.amount_total / 100;
           const locationCount = Math.max(1, Number(session.metadata?.locations ?? 1));
           await activateFoundingMember(pool, businessId, paymentIntentId, session.id, customerId, amountPaidDollars, locationCount);
           invalidatePublicBusinessData();
@@ -1221,11 +1328,14 @@ async function activateFoundingMember(
   businessId: number,
   paymentIntentId: string,
   checkoutSessionId: string,
-  customerId: string | null = null,
-  // Per-location pricing: what THIS session actually charged ($1,200 x locations at
-  // purchase) and for how many locations - both read off the checkout session.
-  amountPaidDollars: number = 1200,
-  locationCount: number = 1,
+  customerId: string | null,
+  // Per-location pricing: what THIS session actually charged (price x locations at
+  // purchase) and for how many locations - both read off the checkout session. No
+  // defaults on purpose: every caller must pass the real
+  // charged amount - a silent fallback here would corrupt amount_paid (and with it
+  // the member's exact-price renewal).
+  amountPaidDollars: number,
+  locationCount: number,
 ): Promise<void> {
   // Idempotency + duplicate-purchase guard. One query answers both questions: was THIS
   // session already activated (webhook + verify double call), and does this business
@@ -1337,18 +1447,18 @@ async function activateFoundingMember(
     seatNumber = seatResult.rows[0].seat_number as number;
     console.log(`[Founding] Business ${businessId} claimed seat #${seatNumber}`);
 
-    // One-time payment: no stripe_subscription_id; period ends in 1 year; Growth-tier
-    // entry allowance (2500 per location). Monthly equivalent scales with the paid
-    // location count: ($1,200 x N) / 12 = $100 x N per month.
-    const periodEnd = new Date();
-    periodEnd.setFullYear(periodEnd.getFullYear() + 1);
-    const monthlyEquivalent = Math.round((FOUNDING_PRICE_PER_LOCATION_CENTS * locationCount) / 12) / 100;
+    // One-time payment: no stripe_subscription_id; period runs FOUNDING_TERM_MONTHS
+    // computed in SQL (make_interval handles month-end dates; JS setMonth would roll
+    // Mar 31 + 3 months into Jul 1). Entry allowance = FOUNDING_ENTRIES_PER_LOCATION.
+    // fee_at_entry = the member's MONTHLY RATE snapshot ((amount paid) / term months) -
+    // this is what the one-time renewal multiplies by its own term length.
+    const monthlyEquivalent = Math.round((amountPaidDollars * 100) / FOUNDING_TERM_MONTHS) / 100;
 
     await client.query(`
       INSERT INTO subscription
         (business_id, stripe_customer_id, stripe_subscription_id, stripe_price_id,
          status, current_period_end, cancel_at_period_end, fee_at_entry, entries_per_location, billing_interval)
-      VALUES ($1, $4, NULL, NULL, 'Active', $2, false, $3, 2500, 'yearly')
+      VALUES ($1, $4, NULL, NULL, 'Active', NOW() + make_interval(months => $2), false, $3, $5, 'yearly')
       ON CONFLICT (business_id) DO UPDATE
         SET status               = 'Active',
             stripe_customer_id   = COALESCE(EXCLUDED.stripe_customer_id, subscription.stripe_customer_id),
@@ -1356,10 +1466,10 @@ async function activateFoundingMember(
             current_period_end   = EXCLUDED.current_period_end,
             cancel_at_period_end = false,
             fee_at_entry         = EXCLUDED.fee_at_entry,
-            entries_per_location = 2500,
+            entries_per_location = EXCLUDED.entries_per_location,
             billing_interval     = 'yearly',
             updated_at           = NOW()
-    `, [businessId, periodEnd, monthlyEquivalent, customerId]);
+    `, [businessId, FOUNDING_TERM_MONTHS, monthlyEquivalent, customerId, FOUNDING_ENTRIES_PER_LOCATION]);
 
     // Append to the durable payment ledger. Unlike founding_member (one row per
     // business, deleted on cancel), this is append-only so the plan page can show
@@ -1414,7 +1524,7 @@ async function activateFoundingMember(
   }
 
   // Enrollment happens when the admin opens the next campaign — founding members
-  // are Active and within their prepaid year, so they get enrolled like anyone else.
+  // are Active and within their prepaid term, so they get enrolled like anyone else.
 
   // Welcome email — non-fatal (activation is already committed)
   try {
@@ -1432,6 +1542,7 @@ async function activateFoundingMember(
         termEnd: new Date(biz.current_period_end),
         amountPaid: amountPaidDollars,
         locationCount,
+        termMonths: FOUNDING_TERM_MONTHS,
       });
     }
   } catch (err: unknown) {
@@ -1464,8 +1575,8 @@ async function activateBusinessSubscription(
 
     // ── Founding hand-off ─────────────────────────────────────────────────────
     // If this business is a founding member, this activation is the transition to a
-    // regular plan. The founding seat ends here (row deleted; the $1,200 stays in the
-    // append-only founding_payment ledger). When the founding year still covers the
+    // regular plan. The founding seat ends here (row deleted; the one-time payment stays in the
+    // append-only founding_payment ledger). When the founding term still covers the
     // currently OPEN campaign, the new tier/fee must NOT shrink benefits already paid
     // for — they are staged in pending_* and applied by openDrawInTx when the next
     // campaign opens. When nothing covered remains (expired), the new plan applies now.
@@ -1478,7 +1589,7 @@ async function activateBusinessSubscription(
     if (wasFounding) {
       // The founding benefits cover the currently OPEN campaign iff the business is
       // enrolled in it — enrollment at open is the single source of truth, and a founder
-      // is in every campaign that opened inside their year (even one that draws after
+      // is in every campaign that opened inside their term (even one that draws after
       // the expiry date). An expired founder has no Open-draw entry, so the new plan
       // applies immediately.
       const covered = await client.query(
@@ -1880,7 +1991,7 @@ export const getSubscriptionInvoices = async (userId: number): Promise<Subscript
   const stripeCustomerId: string | null = result.rows[0]?.stripe_customer_id ?? null;
 
   // Founding members pay once via PaymentIntent — Stripe never creates invoices for
-  // one-time payments, and founding_member is wiped on cancel. The founding_payment
+  // one-time payments, and founding_member is removed only at the founding-to-regular hand-off (founding cannot be cancelled). The founding_payment
   // ledger is the source of truth for history.
   // Founding payments are one-time PaymentIntents (no Stripe invoices). A business that later
   // resubscribes to a regular plan keeps its founding_payment ledger rows, so we must show BOTH
@@ -2065,7 +2176,7 @@ export const getSubscriptionDetails = async (userId: number) => {
            ELSE d.prize_pool END AS prize_amount,
       CASE WHEN fm.id IS NOT NULL THEN true ELSE false END AS is_founding,
       fm.seat_number AS founding_seat_number,
-      -- Special Terms Section 6: second-year renewal at the EXACT price of the initial term.
+      -- Special Terms Section 6: one-time renewal at the original monthly rate x renewal term.
       -- ONE-TIME option: founding_renewed = the single renewal was already used.
       fm.amount_paid::float AS founding_amount_paid,
       (fm.renewed_at IS NOT NULL) AS founding_renewed,
@@ -2126,6 +2237,21 @@ export const getSubscriptionDetails = async (userId: number) => {
       !sub.stripe_subscription_id &&
       sub.current_period_end != null &&
       isFoundingTransitionWindow(new Date(sub.current_period_end));
+    // Renewal banner flag - computed with the SAME window helper the renewal checkout
+    // guard uses, so the client never shows a banner the server would reject.
+    sub.founding_renewal_open =
+      sub.is_founding === true &&
+      sub.founding_renewed !== true &&
+      sub.status === 'Active' &&
+      sub.current_period_end != null &&
+      foundingRenewalWindowState(new Date(sub.current_period_end)) === 'open';
+    // What the renewal will actually charge (dollars) - SAME formula as the renewal
+    // checkout (monthly rate snapshot x renewal term), so the banner price and the
+    // Stripe charge can never disagree.
+    sub.founding_renewal_price =
+      sub.is_founding === true && sub.founding_amount_paid != null
+        ? foundingRenewalAmountCents(sub.fee_at_entry, sub.founding_amount_paid) / 100
+        : null;
     // True between the 24th charge and the paid campaign's open — the window where the
     // business may opt out of the paid campaign (no refund) and where changes settle
     // their difference immediately. Same rule the server mutations use.
@@ -2148,6 +2274,11 @@ export const getSubscriptionDetails = async (userId: number) => {
       sub.founding_seat_number = null;
       sub.founding_transition_available = false;
       sub.in_charged_window = false;
+      // Founding billing facts are the owner's too: what they paid and their renewal state.
+      sub.founding_amount_paid = null;
+      sub.founding_renewed = null;
+      sub.founding_renewal_open = false;
+      sub.founding_renewal_price = null;
     }
     delete sub.owner_user_id;
   }
@@ -2229,9 +2360,9 @@ export const cancelSubscription = async (userId: number): Promise<CancelResult> 
   const pool = getPool();
 
   // ── Founding member branch ─────────────────────────────────────────────────
-  // Founding Partner Special Terms: a fixed 12-month term with NO early termination and
+  // Founding Partner Special Terms: a fixed term with NO early termination and
   // NO refund. Cancellation does not exist for founding - the membership runs through
-  // its year, stays enrolled in every campaign it covers, and simply does not renew
+  // its term, stays enrolled in every campaign it covers, and simply does not renew
   // (expiry is automatic: enrollment requires current_period_end >= NOW()).
   const foundingResult = await pool.query(`
     SELECT b.id AS business_id

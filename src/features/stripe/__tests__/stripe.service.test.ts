@@ -77,7 +77,7 @@ process.env.STRIPE_PRICE_ID_1000 = 'price_test_1000';
 process.env.STRIPE_PRICE_ID_2500 = 'price_test_2500';
 process.env.STRIPE_PRICE_ID_5000 = 'price_test_5000';
 
-import { createCheckoutSession, createFoundingMemberCheckoutSession, cancelSubscription, verifyAndActivateSession, resumeSubscription, resolveMonthlyFee, isFoundingTransitionWindow, updateSubscriptionPlan, invoicePaymentIntentId, createFoundingRenewalCheckoutSession, activateFoundingRenewal } from '../stripe.service';
+import { createCheckoutSession, createFoundingMemberCheckoutSession, cancelSubscription, verifyAndActivateSession, resumeSubscription, resolveMonthlyFee, isFoundingTransitionWindow, updateSubscriptionPlan, invoicePaymentIntentId, createFoundingRenewalCheckoutSession, activateFoundingRenewal, FOUNDING_RENEWAL_TERM_MONTHS, FOUNDING_PRICE_PER_LOCATION } from '../stripe.service';
 import { invalidatePlatformSettings } from '../../../shared/cache/cache';
 import { CHARGE_DAY_OF_MONTH } from '../../../shared/dates';
 
@@ -590,7 +590,7 @@ describe('verifyAndActivateSession — founding activation guards', () => {
     payment_status: 'paid',
     payment_intent: pi,
     customer: 'cus_1',
-    amount_total: 120000, // per-location pricing: 1 location x $1,200
+    amount_total: 30000, // per-location pricing: 1 location x the 3-month founding total
     metadata: { business_id: '42', founding: 'true', locations: '1' },
   });
 
@@ -604,7 +604,7 @@ describe('verifyAndActivateSession — founding activation guards', () => {
 
     await verifyAndActivateSession('cs_NEW', 7);
 
-    // Full $1,200 refunded automatically; no seat claim transaction ever starts.
+    // The full charge is refunded automatically; no seat claim transaction ever starts.
     expect(mockRefundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_dup' });
     expect(mockClientQuery).not.toHaveBeenCalled();
     // Recorded on the append-only ledger as fully refunded (amount = what the session
@@ -614,7 +614,7 @@ describe('verifyAndActivateSession — founding activation guards', () => {
     );
     expect(ledger).toBeDefined();
     expect(ledger![0]).toMatch(/\$4,\s*\$4/);
-    expect(ledger![1]).toContain(1200);
+    expect(ledger![1]).toContain(300);
   });
 
   it('is still idempotent for the SAME session (webhook + verify double call)', async () => {
@@ -699,9 +699,9 @@ describe('createFoundingMemberCheckoutSession — per-location pricing', () => {
 
     expect(res.url).toBe('https://checkout.stripe.com/f/1');
     const sessionArgs = mockSessionsCreate.mock.calls[0][0];
-    // quantity = location count, unit price $1,200 → Stripe totals $4,800 for 4 locations
+    // quantity = location count, unit price = the single-source constant
     expect(sessionArgs.line_items[0].quantity).toBe(4);
-    expect(sessionArgs.line_items[0].price_data.unit_amount).toBe(120000);
+    expect(sessionArgs.line_items[0].price_data.unit_amount).toBe(FOUNDING_PRICE_PER_LOCATION * 100);
     // location count stamped into metadata so activation records what was paid for
     expect(sessionArgs.metadata.locations).toBe('4');
   });
@@ -785,7 +785,7 @@ describe('verifyAndActivateSession — founding hand-off', () => {
     expect(sqls.some((s) => s.includes('INSERT INTO subscription'))).toBe(false);
   });
 
-  it('applies the new plan immediately when the founding year covers no open campaign (expired)', async () => {
+  it('applies the new plan immediately when the founding term covers no open campaign (expired)', async () => {
     stripeSetupMocks();
     poolMocks();
     setupHandoffClientQueries(false);
@@ -852,9 +852,11 @@ describe('invoicePaymentIntentId — Basil + legacy PaymentIntent resolution', (
 // ─────────────────────────────────────────────
 // Founding second-year renewal (Special Terms Section 6)
 // ─────────────────────────────────────────────
-describe('createFoundingRenewalCheckoutSession — window + exact-price', () => {
+describe('createFoundingRenewalCheckoutSession — window + monthly-rate pricing', () => {
+  // 2 locations at $100/location/month: initial 3-month purchase was $600 total,
+  // fee_at_entry (monthly rate snapshot) = $200. Renewal = $200 x 12 = $2,400.
   const FOUNDING_SUB_ROW = {
-    business_id: 42, email: 'owner@cafe.com', amount_paid: '2400.00',
+    business_id: 42, email: 'owner@cafe.com', amount_paid: '600.00', fee_at_entry: '200.00',
     current_period_end: new RealDate('2026-08-10T00:00:00.000Z'),
   };
 
@@ -882,7 +884,7 @@ describe('createFoundingRenewalCheckoutSession — window + exact-price', () => 
     expect(mockSessionsCreate).not.toHaveBeenCalled();
   });
 
-  it('creates a checkout at the EXACT original amount inside the window', async () => {
+  it('creates a checkout at the ORIGINAL MONTHLY RATE x the renewal term inside the window', async () => {
     mockDateNow(new RealDate('2026-07-25T00:00:00.000Z')); // within final 30 days
     mockQuery.mockResolvedValueOnce({ rows: [FOUNDING_SUB_ROW] });
     mockSessionsCreate.mockResolvedValue({ url: 'https://checkout.stripe.com/r/1' });
@@ -891,52 +893,116 @@ describe('createFoundingRenewalCheckoutSession — window + exact-price', () => 
 
     expect(res.url).toBe('https://checkout.stripe.com/r/1');
     const args = mockSessionsCreate.mock.calls[0][0];
-    // Section 6: same Founding Partner price paid for the initial term ($2,400 here).
-    expect(args.line_items[0].price_data.unit_amount).toBe(240000);
+    // Section 6: original monthly rate ($200) x FOUNDING_RENEWAL_TERM_MONTHS = $2,400.
+    expect(args.line_items[0].price_data.unit_amount).toBe(200 * 100 * FOUNDING_RENEWAL_TERM_MONTHS);
     expect(args.metadata.founding_renewal).toBe('true');
+  });
+
+  it('derives the rate from amount_paid when fee_at_entry is missing (legacy rows)', async () => {
+    mockDateNow(new RealDate('2026-07-25T00:00:00.000Z'));
+    mockQuery.mockResolvedValueOnce({ rows: [{ ...FOUNDING_SUB_ROW, fee_at_entry: null }] });
+    mockSessionsCreate.mockResolvedValue({ url: 'https://checkout.stripe.com/r/2' });
+
+    await createFoundingRenewalCheckoutSession(7);
+
+    const args = mockSessionsCreate.mock.calls[0][0];
+    // $600 over the 3-month initial term = $200/month; x 12 = $2,400. Same result.
+    expect(args.line_items[0].price_data.unit_amount).toBe(240000);
   });
 });
 
-describe('activateFoundingRenewal — term extension + idempotency', () => {
+describe('activateFoundingRenewal — term extension + idempotency (transactional)', () => {
   const RENEWAL_SESSION = {
     id: 'cs_renew', payment_intent: 'pi_renew', amount_total: 240000,
     metadata: { business_id: '42', founding_renewal: 'true' },
   } as never;
 
-  it('ledgers the payment and extends current_period_end by 1 year FROM the term end', async () => {
-    mockQuery
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 })   // ledger claim (fresh)
-      .mockResolvedValueOnce({ rows: [{ current_period_end: new RealDate('2027-08-10T00:00:00.000Z') }], rowCount: 1 }) // extend
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 })   // mark renewed_at (one-time option used)
-      .mockResolvedValueOnce({ rows: [{ name: 'Cafe One', email: 'owner@cafe.com', locs: 2 }] }); // email lookup
+  it('ledgers the payment and extends current_period_end by the renewal term FROM the term end', async () => {
+    mockClientQuery.mockImplementation((sql: string) => {
+      if (typeof sql === 'string' && sql.includes('INSERT INTO founding_payment')) {
+        return Promise.resolve({ rows: [], rowCount: 1 }); // ledger claim (fresh payment intent)
+      }
+      if (typeof sql === 'string' && sql.includes('UPDATE founding_member')) {
+        return Promise.resolve({ rows: [{ id: 9 }], rowCount: 1 }); // renewed_at claim won
+      }
+      if (typeof sql === 'string' && sql.includes('UPDATE subscription')) {
+        return Promise.resolve({ rows: [{ current_period_end: new RealDate('2027-08-10T00:00:00.000Z') }], rowCount: 1 });
+      }
+      return Promise.resolve({ rows: [], rowCount: 0 }); // BEGIN / COMMIT
+    });
+    mockQuery.mockResolvedValueOnce({ rows: [{ name: 'Cafe One', email: 'owner@cafe.com', locs: 2 }] }); // email lookup
 
     const { getPool } = jest.requireMock('../../../shared/db/db.js') as { getPool: () => never };
     await activateFoundingRenewal(getPool(), RENEWAL_SESSION);
 
-    const extend = mockQuery.mock.calls.find(
-      ([sql]) => typeof sql === 'string' && sql.includes("current_period_end + INTERVAL '1 year'"),
+    const extend = mockClientQuery.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('current_period_end + make_interval(months => $2)'),
     );
     expect(extend).toBeDefined();
-    // The one-time renewal is marked as used.
-    const marked = mockQuery.mock.calls.find(
-      ([sql]) => typeof sql === 'string' && sql.includes('SET renewed_at = NOW()'),
+    // The interval param is the single-source renewal-term constant.
+    expect(extend![1][1]).toBe(FOUNDING_RENEWAL_TERM_MONTHS);
+    // The one-time renewal is claimed at ACTIVATION time (renewed_at IS NULL guard).
+    const marked = mockClientQuery.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('SET renewed_at = NOW()') && sql.includes('renewed_at IS NULL'),
     );
     expect(marked).toBeDefined();
-    // Renewal confirmation email carries the NEW term end and the renewal amount.
+    // Everything commits together — money ledgered AND term extended, or neither.
+    expect(mockClientQuery.mock.calls.some(([sql]) => sql === 'COMMIT')).toBe(true);
+    // Renewal confirmation email carries the amount, locations, and RENEWAL copy flag.
     expect(mockSendFoundingWelcomeEmail).toHaveBeenCalledWith('owner@cafe.com', 'Cafe One',
-      expect.objectContaining({ amountPaid: 2400, locationCount: 2 }));
+      expect.objectContaining({ amountPaid: 2400, locationCount: 2, termMonths: FOUNDING_RENEWAL_TERM_MONTHS, isRenewal: true }));
+    expect(mockRefundsCreate).not.toHaveBeenCalled();
   });
 
-  it('is idempotent: a second call (webhook + verify double fire) is a no-op', async () => {
-    mockQuery.mockResolvedValueOnce({ rows: [], rowCount: 0 }); // ledger claim lost (already processed)
+  it('is idempotent: a second call with the SAME payment intent (webhook + verify double fire) is a no-op', async () => {
+    mockClientQuery.mockImplementation((sql: string) => {
+      if (typeof sql === 'string' && sql.includes('INSERT INTO founding_payment')) {
+        return Promise.resolve({ rows: [], rowCount: 0 }); // ledger claim lost (already processed)
+      }
+      return Promise.resolve({ rows: [], rowCount: 0 });
+    });
 
     const { getPool } = jest.requireMock('../../../shared/db/db.js') as { getPool: () => never };
     await activateFoundingRenewal(getPool(), RENEWAL_SESSION);
 
-    const extend = mockQuery.mock.calls.find(
-      ([sql]) => typeof sql === 'string' && sql.includes("INTERVAL '1 year'"),
+    const extend = mockClientQuery.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('make_interval'),
     );
     expect(extend).toBeUndefined();
+    expect(mockClientQuery.mock.calls.some(([sql]) => sql === 'ROLLBACK')).toBe(true);
+    expect(mockSendFoundingWelcomeEmail).not.toHaveBeenCalled();
+    expect(mockRefundsCreate).not.toHaveBeenCalled();
+  });
+
+  it('refunds a DUPLICATE renewal payment (different intent, renewal already used) and never extends twice', async () => {
+    // Two tabs both created a renewal checkout while renewed_at was NULL; the second
+    // paid session arrives with a DIFFERENT payment intent after the first extended.
+    mockRefundsCreate.mockResolvedValue({ id: 're_dup_renew' });
+    mockClientQuery.mockImplementation((sql: string) => {
+      if (typeof sql === 'string' && sql.includes('INSERT INTO founding_payment')) {
+        return Promise.resolve({ rows: [], rowCount: 1 }); // fresh PI — ledger insert succeeds
+      }
+      if (typeof sql === 'string' && sql.includes('UPDATE founding_member')) {
+        return Promise.resolve({ rows: [], rowCount: 0 }); // renewed_at already set — claim LOST
+      }
+      return Promise.resolve({ rows: [], rowCount: 0 });
+    });
+
+    const { getPool } = jest.requireMock('../../../shared/db/db.js') as { getPool: () => never };
+    await activateFoundingRenewal(getPool(), { ...(RENEWAL_SESSION as object), payment_intent: 'pi_renew_2' } as never);
+
+    // The term is NEVER extended a second time.
+    const extend = mockClientQuery.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('make_interval'),
+    );
+    expect(extend).toBeUndefined();
+    // The duplicate payment is refunded in full and ledgered as refunded.
+    expect(mockRefundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_renew_2' });
+    const refundMark = mockClientQuery.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('SET refunded_amount = amount'),
+    );
+    expect(refundMark).toBeDefined();
+    expect(mockClientQuery.mock.calls.some(([sql]) => sql === 'COMMIT')).toBe(true);
     expect(mockSendFoundingWelcomeEmail).not.toHaveBeenCalled();
   });
 });

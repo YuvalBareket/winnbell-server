@@ -20,7 +20,6 @@ export interface PlatformSettings {
   allowed_states: string[];
   entries_per_location: number;
   founding_member_cap: number;
-  founding_member_price_cents: number;
   founding_phase_active?: boolean;
   [key: string]: unknown;
 }

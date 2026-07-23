@@ -408,7 +408,7 @@ export const addLocation = async (req: AuthRequest, res: Response): Promise<void
   try {
     const pool = getPool();
 
-    // Founding plans pay $1,200 PER LOCATION at purchase and the location set is FIXED
+    // Founding plans pay PER LOCATION at purchase (FOUNDING_PRICE_PER_LOCATION) and the location set is FIXED
     // for the year: no adds, no removals - only edits. (Deliberate simplification over
     // prorated mid-year billing.)
     const foundingCheck = await pool.query(`
@@ -418,7 +418,7 @@ export const addLocation = async (req: AuthRequest, res: Response): Promise<void
     `, [userId]);
 
     if (foundingCheck.rows.length > 0) {
-      res.status(403).json({ message: 'Founding Partner plans cover the locations purchased with them, so locations cannot be added during the founding year. Contact support if you need help.' });
+      res.status(403).json({ message: 'Founding Partner plans cover the locations purchased with them, so locations cannot be added during the founding term. Contact support if you need help.' });
       return;
     }
 
@@ -536,7 +536,7 @@ export const deleteLocation = async (req: AuthRequest, res: Response): Promise<v
       [userId],
     );
     if (founding.rows.length > 0) {
-      res.status(403).json({ message: 'Founding Partner plans cover the locations purchased with them, so locations cannot be removed during the founding year. Contact support if you need help.' });
+      res.status(403).json({ message: 'Founding Partner plans cover the locations purchased with them, so locations cannot be removed during the founding term. Contact support if you need help.' });
       return;
     }
 

@@ -30,7 +30,7 @@ export const getFoundingAvailability = async (_req: Request, res: Response) => {
 };
 
 // POST /business/subscription/checkout
-// Body: { founding: true }  → founding partner one-time $1,200
+// Body: { founding: true }  → founding partner one-time per-location fee (FOUNDING_PRICE_PER_LOCATION, fixed term)
 // Body: { entries_per_location } → regular monthly subscription
 export const createCheckout = async (req: Request, res: Response) => {
   try {
@@ -122,9 +122,9 @@ export const cancelSub = async (req: Request, res: Response) => {
     res.json(result);
   } catch (err: unknown) {
     console.error('[stripe.cancelSub]', err);
-    // Founding Partner Special Terms: fixed 12-month term, no early termination, no refund.
+    // Founding Partner Special Terms: fixed term, no early termination, no refund.
     if (err instanceof Error && err.message === 'FOUNDING_NO_CANCEL') {
-      res.status(400).json({ error: 'Founding Partner plans run for a fixed 12-month term and do not renew, so there is nothing to cancel. Your membership stays active through its full year.' });
+      res.status(400).json({ error: 'Founding Partner plans run for a fixed term and do not renew, so there is nothing to cancel. Your membership stays active through its full term.' });
       return;
     }
     res.status(400).json({ error: 'Cancellation failed. Please try again.' });
@@ -243,8 +243,8 @@ export const updatePaymentMethod = async (req: Request, res: Response) => {
 };
 
 // POST /business/subscription/founding-renewal
-// Special Terms Section 6: renew the founding membership for one additional 12-month
-// term at the exact original price. Only available in the final 30 days of the term.
+// Special Terms Section 6: renew the founding membership for one additional fixed
+// term at the original monthly rate (rate x 12). Only available in the final 30 days of the term.
 export const foundingRenewal = async (req: Request, res: Response) => {
   try {
     const userId = req.user!.id;
@@ -253,15 +253,15 @@ export const foundingRenewal = async (req: Request, res: Response) => {
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : '';
     if (msg === 'RENEWAL_NOT_OPEN') {
-      res.status(409).json({ error: 'Renewal opens in the final 30 days of your founding year.' });
+      res.status(409).json({ error: 'Renewal opens in the final 30 days of your founding term.' });
       return;
     }
     if (msg === 'RENEWAL_EXPIRED') {
-      res.status(409).json({ error: 'Your founding year has ended, so the founding renewal is no longer available. You can start a regular plan instead.' });
+      res.status(409).json({ error: 'Your founding term has ended, so the founding renewal is no longer available. You can start a regular plan instead.' });
       return;
     }
     if (msg === 'RENEWAL_ALREADY_USED') {
-      res.status(409).json({ error: 'The founding renewal can only be used once. When your second year ends, you can continue with a regular plan.' });
+      res.status(409).json({ error: 'The founding renewal can only be used once. When your renewed term ends, you can continue with a regular plan.' });
       return;
     }
     if (msg.includes('No active founding membership')) {
