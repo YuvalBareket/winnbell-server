@@ -413,7 +413,7 @@ describe('openDrawService — enrollment', () => {
       { rows: [] },                               // COMMIT
     );
 
-    await openDrawService(5);
+    await openDrawService(5, 1);
 
     const enroll = mockClientQuery.mock.calls.find(
       ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO draw_entry'),
@@ -448,7 +448,7 @@ describe('openDrawService — enrollment', () => {
       { rows: [{ id: 9 }] },                      // an Open draw already exists
     );
 
-    await expect(openDrawService(5)).rejects.toThrow(/already Open/);
+    await expect(openDrawService(5, 1)).rejects.toThrow(/already Open/);
 
     const enroll = mockClientQuery.mock.calls.find(
       ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO draw_entry'),
@@ -462,7 +462,7 @@ describe('openDrawService — enrollment', () => {
       { rows: [] },                               // pg_advisory_xact_lock
       { rows: [{ id: 5, status: 'Open' }] },      // already Open
     );
-    await expect(openDrawService(5)).rejects.toThrow(/Only Upcoming/);
+    await expect(openDrawService(5, 1)).rejects.toThrow(/Only Upcoming/);
   });
 });
 
@@ -486,7 +486,7 @@ describe('closeDrawService — paid entries are never ejected at close', () => {
       { rows: [] },                            // COMMIT
     );
 
-    await closeDrawService(5);
+    await closeDrawService(5, 1);
 
     // Every business in draw_entry PAID for the campaign (strict open-time enrollment).
     // A charge that fails later in the month is for the NEXT campaign and must never
@@ -519,7 +519,7 @@ describe('openDrawInTx — staged plan changes (founding hand-off)', () => {
       { rows: [] },                               // COMMIT
     );
 
-    await openDrawService(5);
+    await openDrawService(5, 1);
 
     const calls = mockClientQuery.mock.calls;
     const pendingIdx = calls.findIndex(
@@ -571,7 +571,7 @@ describe('confirmWinnerService — eligibility re-check', () => {
       { rows: [] },                    // audit log
       { rows: [] },                    // COMMIT
     );
-    await expect(confirmWinnerService(1)).resolves.toBeDefined();
+    await expect(confirmWinnerService(1, 1)).resolves.toBeDefined();
     const confirmed = mockClientQuery.mock.calls.some(
       ([sql]: [string]) => typeof sql === 'string' && sql.includes('winner_confirmed = TRUE'),
     );
@@ -585,7 +585,7 @@ describe('confirmWinnerService — eligibility re-check', () => {
       { rows: [{ ...eligibleWinner, is_active: false }] },
       { rows: [] },
     );
-    await expect(confirmWinnerService(1)).rejects.toThrow('WINNER_NO_LONGER_ELIGIBLE');
+    await expect(confirmWinnerService(1, 1)).rejects.toThrow('WINNER_NO_LONGER_ELIGIBLE');
     const confirmed = mockClientQuery.mock.calls.some(
       ([sql]: [string]) => typeof sql === 'string' && sql.includes('winner_confirmed = TRUE'),
     );
@@ -599,7 +599,7 @@ describe('confirmWinnerService — eligibility re-check', () => {
       { rows: [{ ...eligibleWinner, is_quarantined: true }] },
       { rows: [] },
     );
-    await expect(confirmWinnerService(1)).rejects.toThrow('WINNER_NO_LONGER_ELIGIBLE');
+    await expect(confirmWinnerService(1, 1)).rejects.toThrow('WINNER_NO_LONGER_ELIGIBLE');
   });
 
   test('rejects a candidate whose risk score climbed to the quarantine threshold', async () => {
@@ -609,7 +609,7 @@ describe('confirmWinnerService — eligibility re-check', () => {
       { rows: [{ ...eligibleWinner, risk_score: 20 }] },
       { rows: [] },
     );
-    await expect(confirmWinnerService(1)).rejects.toThrow('WINNER_NO_LONGER_ELIGIBLE');
+    await expect(confirmWinnerService(1, 1)).rejects.toThrow('WINNER_NO_LONGER_ELIGIBLE');
   });
 });
 
@@ -682,7 +682,7 @@ describe('openDrawService — opening reveals the prize permanently', () => {
       { rows: [] },                                    // no open draw check
       { rows: [] },                                    // everything else
     );
-    await openDrawService(3);
+    await openDrawService(3, 1);
     const openUpdate = mockClientQuery.mock.calls.find(
       ([sql]: [string]) => typeof sql === 'string' && sql.includes("SET status = 'Open'"),
     );

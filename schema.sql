@@ -740,6 +740,10 @@ CREATE TABLE IF NOT EXISTS draw_audit_log (
   id         SERIAL PRIMARY KEY,
   draw_id    INTEGER NOT NULL REFERENCES draw(id) ON DELETE CASCADE,
   action     TEXT NOT NULL,
+  -- Which admin performed this action (NULL = automated/system, or the admin account was
+  -- later hard-deleted). SET NULL so the audit row survives the actor's deletion (legal
+  -- retention: the WHAT/WHEN/WHY must outlive account churn).
+  actor_user_id INTEGER NULL REFERENCES "user"(id) ON DELETE SET NULL,
   metadata   JSONB NULL,
   created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
@@ -752,6 +756,9 @@ CREATE TABLE IF NOT EXISTS draw_rejected_winner (
   ticket_id       BIGINT NOT NULL REFERENCES ticket(id) ON DELETE CASCADE,
   -- Nullable: the audit row must survive even if the user account is hard-deleted (SET NULL).
   user_id         INTEGER NULL REFERENCES "user"(id) ON DELETE SET NULL,
+  -- Which admin performed the rejection (NULL only if that admin account is later deleted).
+  -- Together with reason + rejected_at this is the full who/when/why of every disqualification.
+  rejected_by_user_id INTEGER NULL REFERENCES "user"(id) ON DELETE SET NULL,
   risk_penalty    INTEGER NOT NULL DEFAULT 10,
   -- Mandatory admin justification for disqualifying this winner (legal/regulatory trail).
   reason          TEXT NULL,
