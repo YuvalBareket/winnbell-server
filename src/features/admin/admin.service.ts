@@ -1693,7 +1693,7 @@ export const adminImageDecisionService = async (
       `UPDATE ticket
        SET is_quarantined = FALSE, quarantine_reason = NULL, quarantined_at = NULL
        WHERE anchor_ticket_id = $1
-         AND quarantine_reason IN ('ocr_pending', 'ocr_validation_failed', 'ocr_error_pending_review')`,
+         AND quarantine_reason IN ('ocr_pending', 'ocr_validation_failed', 'ocr_error_pending_review', 'contest_pending', 'contest_not_won')`,
       [ticketId],
     );
     await updateUserRiskScore(userId, userDelta);

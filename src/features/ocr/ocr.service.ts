@@ -1,8 +1,172 @@
+import type { Pool } from 'pg';
 import { getPool } from '../../shared/db/db.js';
 import { updateUserRiskScore, syncUserQuarantineState } from '../risk/risk.service.js';
 import { TesseractProvider } from './providers/tesseract.provider.js';
 import { GoogleVisionProvider } from './providers/google-vision.provider.js';
 import type { OcrProvider, OcrExpected } from './ocr.types.js';
+
+// ─── Anti-squatting: contest resolution ───────────────────────────────────────
+// A 'contest_pending' ticket carries an image proving the real owner holds a receipt that
+// a SQUATTER typed with no image. Its OCR verdict decides the fight. Outcomes:
+//   PROVEN + wins slot → supersede the squatter (shadow-ban) and promote this entry.
+//   PROVEN but loses (raced another winner / a verified claim survived) → benign
+//       'contest_not_won' (truthful 'passed' status, NO penalty - they had valid proof).
+//   passed normal OCR but NOT proven for a contest (business/amount unconfirmed) → benign
+//       'contest_not_won', NO penalty (good-faith attempt, just didn't clear the higher bar).
+//   genuinely failed OCR (not a receipt / identifier absent) → 'ocr_validation_failed' + penalty.
+// Everything (including risk-score writes) runs in ONE transaction under the same per-receipt
+// advisory lock the submission path uses, so nothing races through and a crash can't split it.
+// `proven` is the STRICT contest bar (business name + amount confirmed), not the lenient OCR pass.
+async function resolveReceiptContest(
+  pool: Pool,
+  contestTicketId: number,
+  userId: number,
+  drawId: number,
+  passed: boolean,
+  proven: boolean,
+  riskDelta: number,
+  businessId: number,
+  receiptIdentifier: string,
+): Promise<void> {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // Same key + namespace as the submission path so a concurrent submission of this receipt
+    // cannot slip a new standing claim in between our checks and our commit.
+    await client.query(
+      `SELECT pg_advisory_xact_lock(4, hashtext($1::text || '|' || $2::text))`,
+      [String(businessId), receiptIdentifier],
+    );
+
+    // Idempotency / multi-instance guard: only the run that still sees 'contest_pending' may
+    // resolve. A double fire (recovery re-queue after resolution, two app instances, webhook
+    // + verify) finds a different reason under the row lock and no-ops - so riskDelta is never
+    // double-applied and the slot is never promoted twice.
+    const guard = await client.query(
+      `SELECT quarantine_reason FROM ticket WHERE id = $1 FOR UPDATE`,
+      [contestTicketId],
+    );
+    if (guard.rows[0]?.quarantine_reason !== 'contest_pending') {
+      await client.query('ROLLBACK');
+      return;
+    }
+
+    let won = false;
+    const supersededUserIds: number[] = [];
+
+    if (proven) {
+      // Never displace a claim that already WON a draw.
+      const winnerConflict = await client.query(
+        `SELECT 1 FROM ticket o
+         JOIN draw d ON d.winner_ticket_id = o.id
+         WHERE o.business_id = $1 AND o.receipt_identifier = $2 AND o.activated_by_user_id <> $3
+           AND (o.is_quarantined = FALSE OR o.quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review'))
+         LIMIT 1`,
+        [businessId, receiptIdentifier, userId],
+      );
+
+      if (winnerConflict.rows.length === 0) {
+        // Supersede the squatter's group (typed-only standing claims by OTHER users; never a
+        // draw winner). RETURNING gives us the users whose tickets were ACTUALLY superseded, so
+        // the +2 penalty can never hit a squatter we protected (e.g. a draw winner).
+        const superseded = await client.query(
+          `WITH squatters AS (
+             SELECT id FROM ticket
+             WHERE business_id = $1 AND receipt_identifier = $2 AND activated_by_user_id <> $3
+               AND is_quarantined = FALSE AND image_validation_status = 'not_required'
+               AND id NOT IN (SELECT winner_ticket_id FROM draw WHERE winner_ticket_id IS NOT NULL)
+           )
+           UPDATE ticket t
+           SET is_quarantined = TRUE, quarantine_reason = 'superseded_by_verified_image', quarantined_at = NOW(),
+               -- Record the +3 ON the anchor entry (mirrors the OCR-fail pattern) so admin views
+               -- show a "+3" chip on the superseded entry, not just a bump to the user's total.
+               risk_score_delta = risk_score_delta + CASE WHEN t.id = s.id THEN 3 ELSE 0 END,
+               -- Tag the anchor with a Risk Signal so the admin sees WHY it was penalised
+               -- (the +3 reason), not just the number. Dup-safe.
+               risk_flags = CASE
+                 WHEN t.id = s.id AND NOT (COALESCE(t.risk_flags, '{}') @> ARRAY['superseded_duplicate_receipt'])
+                   THEN array_append(COALESCE(t.risk_flags, '{}'), 'superseded_duplicate_receipt')
+                 ELSE t.risk_flags END
+           FROM squatters s
+           WHERE (t.id = s.id OR t.anchor_ticket_id = s.id)
+             AND t.id NOT IN (SELECT winner_ticket_id FROM draw WHERE winner_ticket_id IS NOT NULL)
+           RETURNING t.activated_by_user_id AS uid`,
+          [businessId, receiptIdentifier, userId],
+        );
+        for (const r of superseded.rows as Array<{ uid: number }>) {
+          if (r.uid && !supersededUserIds.includes(r.uid)) supersededUserIds.push(r.uid);
+        }
+
+        // After clearing the squatters, is any OTHER standing claim still held (e.g. a verified
+        // image that landed during our OCR)? If so we must not override it - the contest loses.
+        const otherStanding = await client.query(
+          `SELECT 1 FROM ticket
+           WHERE business_id = $1 AND receipt_identifier = $2 AND activated_by_user_id <> $3
+             AND (is_quarantined = FALSE OR quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review'))
+           LIMIT 1`,
+          [businessId, receiptIdentifier, userId],
+        );
+        won = otherStanding.rows.length === 0;
+      }
+    }
+
+    if (won) {
+      // Promote this entry into the standing slot (squatters already left the index above).
+      await client.query(
+        `UPDATE ticket SET image_validation_status = 'passed', risk_score_delta = risk_score_delta + $2,
+               is_quarantined = FALSE, quarantine_reason = NULL, quarantined_at = NULL
+         WHERE id = $1`,
+        [contestTicketId, riskDelta],
+      );
+      await client.query(
+        `UPDATE ticket SET is_quarantined = FALSE, quarantine_reason = NULL, quarantined_at = NULL WHERE anchor_ticket_id = $1`,
+        [contestTicketId],
+      );
+      await updateUserRiskScore(userId, riskDelta, client);
+      for (const squatterUserId of supersededUserIds) {
+        // +3: superseding a verified owner is a stronger fraud signal than a normal OCR
+        // fail (+2). The squatter typed a number that turned out to belong to someone who
+        // proved it, so push their score harder toward the image-required / throttle gates.
+        await updateUserRiskScore(squatterUserId, 3, client);
+      }
+    } else if (passed) {
+      // Valid image (passed normal OCR) but did not win the slot - either not proven to the
+      // stricter contest bar, or it lost the race to another verified claim. NOT fraud: keep the
+      // truthful 'passed' status, release from the slot with a distinct reason, apply NO penalty.
+      await client.query(
+        `UPDATE ticket SET image_validation_status = 'passed', is_quarantined = TRUE,
+               quarantine_reason = 'contest_not_won', quarantined_at = NOW()
+         WHERE id = $1 OR anchor_ticket_id = $1`,
+        [contestTicketId],
+      );
+    } else {
+      // Genuinely failed OCR (not a receipt / identifier absent) → real fail + penalty.
+      await client.query(
+        `UPDATE ticket SET image_validation_status = 'failed', risk_score_delta = risk_score_delta + 2 WHERE id = $1`,
+        [contestTicketId],
+      );
+      await client.query(
+        `UPDATE ticket SET is_quarantined = TRUE, quarantine_reason = 'ocr_validation_failed', quarantined_at = NOW()
+         WHERE id = $1 OR anchor_ticket_id = $1`,
+        [contestTicketId],
+      );
+      await updateUserRiskScore(userId, 2, client);
+    }
+
+    // Quarantine sync for the contester + any superseded squatters, inside the same txn.
+    await syncUserQuarantineState(userId, drawId, client);
+    for (const squatterUserId of supersededUserIds) {
+      await syncUserQuarantineState(squatterUserId, drawId, client);
+    }
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
 
 // ─── Provider Factory ─────────────────────────────────────────────────────────
 // Set OCR_PROVIDER=google in .env to use Google Vision (recommended for production).
@@ -123,6 +287,27 @@ export const validateReceiptAsync = (
       const passed      = fullPass || partialPass;
       const riskDelta   = fullPass ? -3 : partialPass ? -1 : 2;
 
+      // Anti-squatting: a 'contest_pending' ticket is a user proving (with this image) that a
+      // receipt a SQUATTER typed with no image is really theirs. Overriding another human's
+      // entry demands a STRICTER bar than a normal OCR pass: the business name AND the amount
+      // must be positively confirmed on the image (not merely "not contradicted"). Without this,
+      // any photo that merely CONTAINS the number string could supersede an honest typed-only
+      // entry (identifierFound is a naive substring; businessNameFound alone is true|null and can
+      // never fail). Requiring both confirmed means the contester must hold a legible receipt
+      // that names the business and shows the amount - effectively the real receipt.
+      const contestProven = passed && result.businessNameFound === true && result.amountMatches === true;
+      const meta = await pool.query(
+        `SELECT quarantine_reason, business_id, receipt_identifier FROM ticket WHERE id = $1`,
+        [ticketId],
+      );
+      if (meta.rows[0]?.quarantine_reason === 'contest_pending') {
+        await resolveReceiptContest(
+          pool, ticketId, userId, drawId, passed, contestProven, riskDelta,
+          meta.rows[0].business_id, meta.rows[0].receipt_identifier,
+        );
+        return;
+      }
+
       if (passed) {
         await pool.query(
           `UPDATE ticket SET image_validation_status = 'passed', risk_score_delta = risk_score_delta + $2 WHERE id = $1`,
@@ -152,7 +337,8 @@ export const validateReceiptAsync = (
                quarantine_reason = 'ocr_validation_failed',
                quarantined_at    = NOW()
            WHERE (id = $1 OR anchor_ticket_id = $1)
-             AND quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review')`,
+             AND (quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review')
+                  OR quarantine_reason IS NULL)`,
           [ticketId],
         );
         await updateUserRiskScore(userId, 2);
@@ -173,7 +359,7 @@ export const validateReceiptAsync = (
                quarantine_reason = 'ocr_error_pending_review',
                quarantined_at    = NOW()
            WHERE (id = $1 OR anchor_ticket_id = $1)
-             AND quarantine_reason = 'ocr_pending'`,
+             AND (quarantine_reason = 'ocr_pending' OR quarantine_reason IS NULL)`,
           [ticketId],
         );
       } catch (dbErr) {

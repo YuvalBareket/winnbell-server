@@ -546,9 +546,12 @@ CREATE INDEX idx_ticket_cap_check
 -- whose claim on the receipt STANDS: active tickets, plus quarantined ones still awaiting
 -- an OCR verdict (ocr_pending / ocr_error_pending_review - provisionally valid, the slot
 -- is held during the wait). REJECTED claims (high_risk_user shadowban, ocr_validation_failed,
--- superseded_by_admin_decision) fall out of the index, releasing the receipt so the person
--- holding the real paper receipt can still enter (anti-poisoning: a scammer's quarantined
--- submission must not burn the number for the legitimate owner).
+-- superseded_by_admin_decision, superseded_by_verified_image) fall out of the index, releasing
+-- the receipt so the person holding the real paper receipt can still enter (anti-poisoning: a
+-- scammer's quarantined submission must not burn the number for the legitimate owner).
+-- 'contest_pending' is also excluded: a contest entry (the real owner attaching a photo to
+-- override a squatter who typed the number with no image) is held OUT of the slot until OCR
+-- resolves it, so it never collides with the squatter's standing row.
 CREATE UNIQUE INDEX idx_ticket_receipt_unique
   ON ticket (business_id, receipt_identifier)
   WHERE receipt_identifier IS NOT NULL

@@ -75,8 +75,11 @@ export const submitReceiptEntry = async (req: AuthRequest, res: Response) => {
       return;
     }
     const sanitizedId = String(receiptIdentifier).trim();
-    if (sanitizedId.length < 4 || sanitizedId.length > 100) {
-      res.status(400).json({ message: 'receiptIdentifier must be between 4 and 100 characters.' });
+    // Min 5 (matches the client). Shorter numeric strings collide with digit runs that appear
+    // incidentally in unrelated receipt images (barcodes, phone numbers), which weakens the
+    // contest OCR proof - so the floor is enforced server-side, not just in the form.
+    if (sanitizedId.length < 5 || sanitizedId.length > 100) {
+      res.status(400).json({ message: 'receiptIdentifier must be between 5 and 100 characters.' });
       return;
     }
 
@@ -123,6 +126,16 @@ export const submitReceiptEntry = async (req: AuthRequest, res: Response) => {
   } catch (error: unknown) {
     if (error instanceof Error && error.message === 'PHONE_NOT_VERIFIED') {
       res.status(403).json({ message: 'PHONE_NOT_VERIFIED' });
+      return;
+    }
+    // Anti-squatting: another user typed this receipt with no image. Ask this user (who may
+    // be the real owner) to attach a photo so OCR can verify it and override the squatter.
+    // A distinct code lets the client show the specific message + reveal the image upload.
+    if (error instanceof Error && error.message === 'RECEIPT_CONTEST_IMAGE_REQUIRED') {
+      res.status(409).json({
+        code: 'RECEIPT_CONTEST_IMAGE_REQUIRED',
+        message: 'It looks like this receipt was already entered. Attach a photo of it and try again to confirm it is yours.',
+      });
       return;
     }
     // Surface the service's curated, user-facing message (threshold, dates, duplicates, etc.).

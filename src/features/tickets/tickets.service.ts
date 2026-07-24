@@ -528,6 +528,34 @@ export const submitReceiptEntryService = async (
       client,
     );
 
+    // ── Contest routing (anti-squatting) ────────────────────────────────────────
+    // Distinguish the two kinds of standing cross-user claim on this receipt:
+    //  - IMAGE-BACKED: another user proved it (OCR passed) or is proving it (OCR in
+    //    flight / errored). Final - cannot be contested.
+    //  - TYPED-ONLY: another user just typed the number with no image (a squatter, who
+    //    can block the real customer with a guessed number). Overridable by proof: the
+    //    real owner may attach a photo, and if OCR verifies it we supersede the squatter.
+    const hasImage = !!input.receiptImageUrl;
+    const claimRes = await client.query(
+      `SELECT
+         BOOL_OR(
+           (is_quarantined = FALSE AND image_validation_status IN ('passed', 'pending'))
+           OR quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review')
+         ) AS image_backed_by_other,
+         BOOL_OR(is_quarantined = FALSE AND image_validation_status = 'not_required') AS typed_only_by_other
+       FROM ticket
+       WHERE business_id = $1 AND receipt_identifier = $2 AND activated_by_user_id <> $3`,
+      [business_id, input.receiptIdentifier, userId],
+    );
+    const imageBackedByOther = claimRes.rows[0]?.image_backed_by_other === true;
+    const typedOnlyByOther = claimRes.rows[0]?.typed_only_by_other === true;
+    // A contestable squatter is NOT a fraud signal against the legitimate owner: the
+    // cross-user duplicate penalty and cap-exemption must not punish someone proving
+    // their own receipt. Treat the collision as "no duplicate" for risk + cap purposes.
+    const contestable = typedOnlyByOther && !imageBackedByOther;
+    const effectiveIsDuplicate = contestable ? false : dupCheck.isDuplicate;
+    const effectiveIsDuplicateQuar = contestable ? false : dupCheck.isDuplicateQuarantined;
+
     // Evaluate risk — pass pre-fetched user score to skip the extra SELECT
     const preFetchedRisk: PreFetchedUserRisk = {
       storedScore: Number(pf.risk_score ?? 0),
@@ -538,8 +566,8 @@ export const submitReceiptEntryService = async (
       businessId: business_id,
       receiptIdentifier: input.receiptIdentifier,
       transactionAmount: input.transactionAmount,
-      isDuplicateCrossUser: dupCheck.isDuplicate,
-      isDuplicateQuarantinedCrossUser: dupCheck.isDuplicateQuarantined,
+      isDuplicateCrossUser: effectiveIsDuplicate,
+      isDuplicateQuarantinedCrossUser: effectiveIsDuplicateQuar,
       typingDurationMs: input.typingDurationMs,
       receiptInputMethod: input.receiptInputMethod,
     }, preFetchedRisk);
@@ -581,30 +609,54 @@ export const submitReceiptEntryService = async (
       throw new Error('Suspicious sequential receipt pattern detected. Please contact support if this is in error.');
     }
 
-    // Block cross-user duplicate only when the existing entry is active (not quarantined).
-    // A quarantined entry is effectively disqualified — the receipt is unclaimed again and
-    // the next person with the real receipt can use it. This prevents scammers from
-    // poisoning a receipt by submitting it into a quarantined state via high risk score.
-    if (dupCheck.isDuplicate) {
-      throw new Error('This receipt has already been used for an entry.');
-    }
+    // High-risk shadowban is decided by stored score, exactly as at insert prep below.
+    const isHighRisk = riskEval.totalScore > RISK_THRESHOLDS.MEDIUM_MAX;
 
-    // Block when the receipt has a STANDING claim: an active ticket, a ticket awaiting its
-    // OCR verdict (provisionally valid - the slot is held during the wait), or any ticket of
-    // the SAME user (no resubmit churn, regardless of state). A REJECTED claim by another
-    // user (high_risk_user shadowban / ocr_validation_failed / superseded_by_admin_decision)
-    // releases the receipt so the person holding the real paper receipt can still enter -
-    // this mirrors the partial unique index idx_ticket_receipt_unique.
-    const existingEntry = await client.query(
-      `SELECT id FROM ticket
-       WHERE business_id = $1 AND receipt_identifier = $2
-         AND (is_quarantined = FALSE
-              OR quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review')
-              OR activated_by_user_id = $3)`,
+    // ── Standing-claim resolution (anti-squatting) ──────────────────────────────
+    // Same user already holds a ticket for this receipt (any state) → no resubmit churn.
+    const ownExisting = await client.query(
+      `SELECT 1 FROM ticket
+       WHERE business_id = $1 AND receipt_identifier = $2 AND activated_by_user_id = $3
+       LIMIT 1`,
       [business_id, input.receiptIdentifier, userId],
     );
-    if (existingEntry.rows.length > 0) {
-      throw new Error('This receipt identifier has already been used.');
+    if (ownExisting.rows.length > 0) {
+      throw new Error('This receipt has already been entered. If you think this is a mistake, please contact us and we will help sort it out.');
+    }
+
+    let isContest = false;
+    if (imageBackedByOther) {
+      // Another user proved (or is proving) this receipt with an image — final. Plain block.
+      throw new Error('This receipt has already been entered. If you think this is a mistake, please contact us and we will help sort it out.');
+    } else if (contestable && !isHighRisk && hasImage) {
+      // One contest at a time per receipt: if another user's contest is already awaiting its OCR
+      // verdict, don't open a second (which would waste OCR calls and leave a race-loser). We
+      // hold the receipt advisory lock here, so this read is consistent.
+      const inFlight = await client.query(
+        `SELECT 1 FROM ticket
+         WHERE business_id = $1 AND receipt_identifier = $2 AND activated_by_user_id <> $3
+           AND quarantine_reason = 'contest_pending'
+         LIMIT 1`,
+        [business_id, input.receiptIdentifier, userId],
+      );
+      if (inFlight.rows.length > 0) {
+        throw new Error('This receipt is already being reviewed. Please try again in a few minutes.');
+      }
+      // Squatter override: this user brought a photo to prove the receipt is theirs. Insert
+      // as a CONTEST held OUT of the standing slot (quarantine_reason 'contest_pending', which
+      // the partial unique index excludes, so it never collides with the squatter's row). OCR
+      // resolves it: on proof we supersede the squatter and promote this entry; otherwise it is
+      // released with no penalty and the squatter is left untouched.
+      isContest = true;
+    } else if (contestable && !isHighRisk) {
+      // Squatter present, but this user typed with no image — invite a photo (special code the
+      // client turns into "someone already entered this receipt, attach a photo and try again").
+      throw new Error('RECEIPT_CONTEST_IMAGE_REQUIRED');
+    } else if (dupCheck.isDuplicate) {
+      // Any other active claim (a high-risk user meeting a squatter, or the rare failed-active
+      // edge) → today's plain block. Quarantined-but-released claims fall through and this user
+      // (with the real paper receipt) may enter.
+      throw new Error('This receipt has already been entered. If you think this is a mistake, please contact us and we will help sort it out.');
     }
 
     // Start batch size from what the amount earns, then narrow by each cap
@@ -613,8 +665,9 @@ export const submitReceiptEntryService = async (
     // Narrow by user draw cap
     batchSize = Math.min(batchSize, remainingDrawEntries);
 
-    // Entry cap enforcement — quarantined tickets do not consume the cap
-    if (entry_cap !== null && countsAgainstCap(riskEval, dupCheck.isDuplicate)) {
+    // Entry cap enforcement — quarantined tickets do not consume the cap. A contest is a
+    // legitimate entrant (effectiveIsDuplicate=false), so it DOES respect the cap.
+    if (entry_cap !== null && countsAgainstCap(riskEval, effectiveIsDuplicate)) {
       const bizCapCheck = await client.query(
         `SELECT COUNT(*) AS count FROM ticket
          WHERE location_id = $1 AND draw_id = $2 AND is_quarantined = FALSE`,
@@ -631,13 +684,16 @@ export const submitReceiptEntryService = async (
     // Always insert at least 1 if we passed all checks
     batchSize = Math.max(batchSize, 1);
 
-    const isHighRisk = riskEval.totalScore > RISK_THRESHOLDS.MEDIUM_MAX;
-    // Medium-risk users' ticket is held quarantined until OCR passes.
+    // isHighRisk + hasImage were computed above (contest routing). Medium-risk users'
+    // ticket is held quarantined until OCR passes.
     const isMediumRisk = riskEval.totalScore > RISK_THRESHOLDS.LOW_MAX && !isHighRisk;
-    const hasImage = !!input.receiptImageUrl;
     const isOcrPending = isMediumRisk && hasImage;
-    const isQuarantined = isHighRisk || isOcrPending;
-    const quarantineReason = isHighRisk ? 'high_risk_user' : isOcrPending ? 'ocr_pending' : null;
+    // A contest is held out of the standing slot as 'contest_pending' (excluded from the
+    // partial unique index) until OCR resolves it; otherwise the normal quarantine rules.
+    const isQuarantined = isContest || isHighRisk || isOcrPending;
+    const quarantineReason = isContest
+      ? 'contest_pending'
+      : isHighRisk ? 'high_risk_user' : isOcrPending ? 'ocr_pending' : null;
     const quarantinedAt = isQuarantined ? new Date() : null;
 
     // Generate all codes at once and check uniqueness in one query (saves batchSize-1 round trips)
@@ -695,7 +751,7 @@ export const submitReceiptEntryService = async (
       } catch (insertErr: unknown) {
         // PostgreSQL unique constraint violation — receipt was already submitted
         if ((insertErr as { code?: string })?.code === '23505') {
-          throw new Error('This receipt has already been submitted.');
+          throw new Error('This receipt has already been entered. If you think this is a mistake, please contact us and we will help sort it out.');
         }
         throw insertErr;
       }
