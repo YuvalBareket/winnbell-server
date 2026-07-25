@@ -432,12 +432,17 @@ describe('openDrawService — enrollment', () => {
     expect(sql).toMatch(/current_period_end >= NOW\(\)/);
     // Businesses that opted out of the paid campaign are skipped (flag consumed after)
     expect(sql).toMatch(/skip_next_campaign = FALSE/);
+    // Founding members who cancelled participation are never enrolled
+    expect(sql).toMatch(/participation_paused = FALSE/);
     expect(enroll![1]).toEqual([5]);
 
     const skipReset = mockClientQuery.mock.calls.find(
       ([s]: [string]) => typeof s === 'string' && s.includes('SET skip_next_campaign = FALSE'),
     );
     expect(skipReset).toBeDefined();
+    // The reset spares cancelling subs: their skip records "skipped the campaign they
+    // already paid for" and must survive the open for the plan page to say so.
+    expect(skipReset![0]).toMatch(/cancel_at_period_end = FALSE/);
   });
 
   test('refuses to open a second draw while one is already Open', async () => {

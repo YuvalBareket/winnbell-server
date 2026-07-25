@@ -186,16 +186,16 @@ describe('createCheckoutSession — setup session', () => {
 // cancelSubscription — recurring path never removes from a draw
 // ─────────────────────────────────────────────
 describe('cancelSubscription — recurring', () => {
-  it('sets cancel_at_period_end, removes NOTHING from draws, issues no refund', async () => {
+  it('default (keep participating): cancel_at_period_end only, nothing removed, no refund', async () => {
     mockSubscriptionsUpdate.mockResolvedValue({});
     mockQuery
       .mockResolvedValueOnce({ rows: [] }) // founding check — not a founding member
-      .mockResolvedValueOnce({ rows: [{ id: 1, stripe_subscription_id: 'sub_1', business_id: 42 }] }) // subResult
+      .mockResolvedValueOnce({ rows: [{ id: 1, stripe_subscription_id: 'sub_1', status: 'Active', business_id: 42 }] }) // subResult
       .mockResolvedValueOnce({ rows: [], rowCount: 1 }); // UPDATE cancel_at_period_end
 
     const res = await cancelSubscription(7);
 
-    // Stripe told to cancel at period end (keeps access + paid draw until then)
+    // Stripe told to cancel at period end (keeps access + every paid campaign until then)
     expect(mockSubscriptionsUpdate).toHaveBeenCalledWith('sub_1', { cancel_at_period_end: true });
 
     // The business is NEVER pulled from a draw on cancel.
@@ -204,7 +204,38 @@ describe('cancelSubscription — recurring', () => {
     );
     expect(deletedDraw).toBeUndefined();
 
-    expect(res).toEqual({ removedFromDraw: false, refundType: 'none', refundAmount: 0 });
+    // Keep-participating choice: participation stays untouched ($2 = false). The OR form
+    // matters - a direct `participation_paused = $2` would wrongly UN-pause on re-cancel.
+    const update = mockQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('SET cancel_at_period_end = true'),
+    );
+    expect(update![0]).toContain('participation_paused = (participation_paused OR $2)');
+    expect(update![1]).toEqual([1, false]);
+
+    expect(res).toEqual({ removedFromDraw: false, refundType: 'none', refundAmount: 0, immediateRemoval: false });
+  });
+
+  it('immediate removal choice: also sets participation_paused (off map, no enrollment), still no refund and no draw teardown', async () => {
+    mockSubscriptionsUpdate.mockResolvedValue({});
+    mockQuery
+      .mockResolvedValueOnce({ rows: [] }) // founding check
+      .mockResolvedValueOnce({ rows: [{ id: 1, stripe_subscription_id: 'sub_1', status: 'Active', business_id: 42 }] })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 }); // UPDATE
+
+    const res = await cancelSubscription(7, true);
+
+    const update = mockQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('SET cancel_at_period_end = true'),
+    );
+    expect(update![0]).toContain('participation_paused');
+    expect(update![1]).toEqual([1, true]);
+    // The pause is the whole effect: no refund, no draw_entry removal.
+    expect(mockRefundsCreate).not.toHaveBeenCalled();
+    const deletedDraw = mockQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('DELETE FROM draw_entry'),
+    );
+    expect(deletedDraw).toBeUndefined();
+    expect(res).toEqual({ removedFromDraw: false, refundType: 'none', refundAmount: 0, immediateRemoval: true });
   });
 });
 
@@ -374,6 +405,12 @@ describe('resumeSubscription', () => {
       ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO draw_entry'),
     );
     expect(enroll).toBeUndefined();
+    // An immediate-removal cancel also paused participation; resuming means the owner
+    // wants back in, so the pause must clear in the same UPDATE.
+    const update = mockQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('SET cancel_at_period_end = false'),
+    );
+    expect(update![0]).toContain('participation_paused = false');
   });
 });
 

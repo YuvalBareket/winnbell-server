@@ -1011,10 +1011,17 @@ export const reconcileSubscriptionsWithStripe = async (): Promise<{ checked: num
         );
 
         // Period fields first, so the recovery enrollment guard below sees the paid period.
+        // When the cancel flips true -> false here (dashboard un-cancel, or a resume whose
+        // DB write was lost), an immediate-removal pause no longer reflects intent - clear
+        // it in the same statement or the business would PAY while stuck off the map.
+        // The CASE reads the OLD row value, so an independently set pause is untouched.
         if (periodEnd !== null) {
           await pool.query(
             `UPDATE subscription
-             SET current_period_end = $2, cancel_at_period_end = $3, updated_at = NOW()
+             SET current_period_end = $2,
+                 participation_paused = CASE WHEN cancel_at_period_end = true AND $3 = false THEN false ELSE participation_paused END,
+                 cancel_at_period_end = $3,
+                 updated_at = NOW()
              WHERE business_id = $1 AND stripe_subscription_id = $4`,
             [row.business_id, periodEnd, cancelAtPeriodEnd, row.stripe_subscription_id],
           );
@@ -1120,9 +1127,17 @@ async function processStripeEvent(event: Stripe.Event, pool: Pool): Promise<void
         //    replaced subscription must never overwrite the business's new one.
         //  - status <> 'Cancelled': a stale "updated" arriving after the "deleted" event
         //    must never resurrect a dead subscription (same guard the invoice handlers use).
+        // participation_paused clears when the cancel flips true -> false (dashboard
+        // un-cancel, or a resume whose DB write was lost): an immediate-removal pause
+        // no longer reflects intent, and leaving it would keep a PAYING business off
+        // the map with no recovery path. The CASE reads the OLD row value, so a pause
+        // set independently of a cancel is untouched.
         await pool.query(`
           UPDATE subscription
-          SET status = $1, current_period_end = $2, cancel_at_period_end = $3, updated_at = NOW()
+          SET status = $1, current_period_end = $2,
+              participation_paused = CASE WHEN cancel_at_period_end = true AND $3 = false THEN false ELSE participation_paused END,
+              cancel_at_period_end = $3,
+              updated_at = NOW()
           WHERE business_id = $4
             AND stripe_subscription_id = $5
             AND status <> 'Cancelled'
@@ -1800,12 +1815,14 @@ export const syncSubscriptionQuantity = async (userId: number, newNextCampaignCo
   }
 
   // Step 3 — stage the new fee (and tier, unchanged here) to go live at the next open.
-  // Actively changing the plan/locations means the business intends to PARTICIPATE - a
-  // previously set skip-campaign opt-out (or founding participation pause) no longer
-  // reflects their intent, so clear both.
+  // Actively changing locations means the business intends to PARTICIPATE - a previously
+  // set skip-campaign opt-out no longer reflects their intent, so clear it.
+  // participation_paused is deliberately NOT touched here: the only businesses that can
+  // be paused on this path are immediate-removal cancels (founding cannot add/remove
+  // locations), and a location edit must never silently undo the owner's cancel choice.
   await pool.query(
     `UPDATE subscription
-     SET pending_entries_per_location = $1, pending_fee_at_entry = $2, skip_next_campaign = false, participation_paused = false, updated_at = NOW()
+     SET pending_entries_per_location = $1, pending_fee_at_entry = $2, skip_next_campaign = false, updated_at = NOW()
      WHERE business_id = $3`,
     [effectiveTier, newTotalFee, sub.business_id],
   );
@@ -2156,7 +2173,9 @@ export const getSubscriptionInvoices = async (userId: number): Promise<Subscript
           // description verbatim instead of synthesizing a per-location monthly breakdown.
           description: [{ description: `Refund: ${reason}`, quantity: 1, amount: -amt, period_start: refund.created, period_end: refund.created }],
           invoice_pdf: null,
-          hosted_invoice_url: null,
+          // Stripe creates no document for a refund; the ORIGINAL charge's receipt page
+          // is updated with the refund (amount + date), so that is the linked proof.
+          hosted_invoice_url: charge.receipt_url ?? null,
         });
       }
     }
@@ -2295,30 +2314,6 @@ export const getSubscriptionDetails = async (userId: number) => {
   return sub;
 };
 
-// ─── Skip the Paid Campaign (opt out, no refund) ──────────────────────────────
-// After the 24th charge a business cannot cancel the upcoming campaign, but it may opt
-// out of participating in it — no refund. The flag is consumed at the next campaign open
-// (enrollment skips the business, then resets it). Only available inside the charged
-// window; once the campaign opens, removal is an admin/support action.
-export const setSkipNextCampaign = async (userId: number, skip: boolean): Promise<void> => {
-  const pool = getPool();
-
-  if (skip && !(await isChargedNotOpenedWindow(pool))) {
-    throw new Error('SKIP_WINDOW_CLOSED');
-  }
-
-  const result = await pool.query(
-    `UPDATE subscription s
-     SET skip_next_campaign = $2, updated_at = NOW()
-     FROM business b
-     WHERE b.id = s.business_id AND b.user_id = $1 AND s.status != 'Cancelled'
-     RETURNING s.id`,
-    [userId, skip],
-  );
-  if (result.rowCount === 0) throw new Error('No active subscription found');
-  invalidatePublicBusinessData();
-};
-
 // ─── Founding Participation Pause (voluntary cancel, no refund) ───────────────
 // Founding Partner cancellation: the Special Terms allow no refund and no early
 // termination of the TERM, but the member may stop PARTICIPATING at any time. Pausing
@@ -2369,11 +2364,17 @@ export const resumeSubscription = async (userId: number): Promise<void> => {
     throw new Error('Founding partner memberships cannot be paused and resumed. Contact support if you need assistance.');
   }
 
+  // participation_paused = true also qualifies (not just cancel_at_period_end): if a
+  // prior resume updated Stripe but the DB write failed, the webhook later syncs
+  // cancel_at_period_end = false while the pause stays - without this clause the row
+  // would never match again and the business would stay off the map while PAYING.
+  // Retrying resume here heals that state (the Stripe update is an idempotent no-op).
   const subResult = await pool.query(`
     SELECT s.id, s.stripe_subscription_id, b.id AS business_id
     FROM subscription s
     JOIN business b ON b.id = s.business_id
-    WHERE b.user_id = $1 AND s.cancel_at_period_end = true AND s.status != 'Cancelled'
+    WHERE b.user_id = $1 AND (s.cancel_at_period_end = true OR s.participation_paused = true)
+      AND s.status != 'Cancelled' AND s.stripe_subscription_id IS NOT NULL
   `, [userId]);
 
   const sub = subResult.rows[0];
@@ -2381,8 +2382,13 @@ export const resumeSubscription = async (userId: number): Promise<void> => {
 
   await stripe.subscriptions.update(sub.stripe_subscription_id, { cancel_at_period_end: false });
 
+  // participation_paused clears too: a cancel with immediate removal took the business
+  // off the map, and resuming means the owner wants back in. Done before the paid
+  // campaign opens this restores that spot; after the open the campaign is gone (the
+  // owner was warned there is no refund) and enrollment resumes from the next one.
+  // skip_next_campaign is cleared defensively (the skip feature was removed; no setters remain).
   await pool.query(
-    `UPDATE subscription SET cancel_at_period_end = false, updated_at = NOW() WHERE id = $1`,
+    `UPDATE subscription SET cancel_at_period_end = false, participation_paused = false, skip_next_campaign = false, updated_at = NOW() WHERE id = $1`,
     [sub.id],
   );
 
@@ -2399,9 +2405,13 @@ export interface CancelResult {
   removedFromDraw: boolean;
   refundType: CancelRefundType;
   refundAmount: number; // actual dollars refunded (0 if none)
+  // Echo of the owner's choice: true = business removed from the map immediately and not
+  // enrolled in the paid upcoming campaign (no refund); false = keeps participating in
+  // everything already paid for, the plan just does not renew.
+  immediateRemoval: boolean;
 }
 
-export const cancelSubscription = async (userId: number): Promise<CancelResult> => {
+export const cancelSubscription = async (userId: number, immediate = false): Promise<CancelResult> => {
   const pool = getPool();
 
   // ── Founding member branch ─────────────────────────────────────────────────
@@ -2422,7 +2432,7 @@ export const cancelSubscription = async (userId: number): Promise<CancelResult> 
 
   // ── Recurring subscription branch ─────────────────────────────────────────
   const subResult = await pool.query(`
-    SELECT s.id, s.stripe_subscription_id, b.id AS business_id
+    SELECT s.id, s.stripe_subscription_id, s.status, b.id AS business_id
     FROM subscription s
     JOIN business b ON b.id = s.business_id
     WHERE b.user_id = $1 AND s.status != 'Cancelled'
@@ -2431,18 +2441,24 @@ export const cancelSubscription = async (userId: number): Promise<CancelResult> 
   const sub = subResult.rows[0];
   if (!sub) throw new Error('No active subscription found');
 
-  // Set cancel at period end on Stripe — the business keeps access AND its current
-  // paid draw until the period ends. We never remove from a draw on cancel; a
-  // Cancelled business simply isn't enrolled when the next campaign opens.
+  // Set cancel at period end on Stripe — the plan never renews and never charges again.
+  // The `immediate` flag is the owner's explicit choice from the confirm dialog:
+  //  - false: keep participating in everything already paid for (the running campaign
+  //    and, after the 24th, the paid upcoming one); the business just isn't renewed.
+  //  - true: participation_paused as well - off the map right away, no new customer
+  //    entries, and NOT enrolled when the paid upcoming campaign opens. No refund
+  //    (the dialog says so explicitly). Customer entries already earned stay valid;
+  //    we never remove a business from a draw (draw_entry is untouched).
+  // Resume clears both flags - done before the open it restores the paid spot.
   await stripe.subscriptions.update(sub.stripe_subscription_id, { cancel_at_period_end: true });
   await pool.query(
-    `UPDATE subscription SET cancel_at_period_end = true, updated_at = NOW() WHERE id = $1`,
-    [sub.id],
+    `UPDATE subscription SET cancel_at_period_end = true, participation_paused = (participation_paused OR $2), updated_at = NOW() WHERE id = $1`,
+    [sub.id, immediate],
   );
 
   invalidatePublicBusinessData();
-  console.log(`[Cancel] Business ${sub.business_id} set to cancel at period end. No draw change, no refund.`);
-  return { removedFromDraw: false, refundType: 'none', refundAmount: 0 };
+  console.log(`[Cancel] Business ${sub.business_id} set to cancel at period end.${immediate ? ' Removed from participation immediately (no refund).' : ''} No draw change, no refund.`);
+  return { removedFromDraw: false, refundType: 'none', refundAmount: 0, immediateRemoval: immediate };
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

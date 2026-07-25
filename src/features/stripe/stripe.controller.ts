@@ -12,7 +12,6 @@ import {
   TIER_PRICE_MAP,
   updateSubscriptionPlan,
   getSubscriptionInvoices,
-  setSkipNextCampaign,
   setParticipationPaused,
   createUpdatePaymentMethodSession,
   createFoundingRenewalCheckoutSession,
@@ -119,7 +118,11 @@ export const getSubscription = async (req: Request, res: Response) => {
 export const cancelSub = async (req: Request, res: Response) => {
   try {
     const userId = req.user!.id;
-    const result = await cancelSubscription(userId);
+    // The owner's explicit dialog choice: true = also remove from participation now
+    // (off the map, not in the paid upcoming campaign, no refund). Default false =
+    // keep everything already paid for; the plan just does not renew.
+    const immediate = req.body?.immediate === true;
+    const result = await cancelSubscription(userId, immediate);
     res.json(result);
   } catch (err: unknown) {
     console.error('[stripe.cancelSub]', err);
@@ -181,30 +184,6 @@ export const updatePlan = async (req: Request, res: Response) => {
     }
     console.error('[stripe.updatePlan]', err);
     res.status(400).json({ error: 'Failed to update plan' });
-  }
-};
-
-// POST /business/subscription/skip-campaign
-// Body: { skip: boolean } — opt out of (or back into) the campaign already paid for.
-// Only available between the charge on the 24th and the campaign open. No refund.
-export const skipCampaign = async (req: Request, res: Response) => {
-  try {
-    const userId = req.user!.id;
-    const skip = req.body?.skip !== false; // default true
-    await setSkipNextCampaign(userId, skip);
-    res.json({ skipped: skip });
-  } catch (err: unknown) {
-    const msg = err instanceof Error ? err.message : '';
-    if (msg === 'SKIP_WINDOW_CLOSED') {
-      res.status(409).json({ error: 'The next campaign has already opened. Contact support to be removed from a running campaign.' });
-      return;
-    }
-    if (msg === 'No active subscription found') {
-      res.status(404).json({ error: 'No active subscription found.' });
-      return;
-    }
-    console.error('[stripe.skipCampaign]', err);
-    res.status(400).json({ error: 'Could not update campaign participation. Please try again.' });
   }
 };
 

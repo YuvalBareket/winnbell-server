@@ -431,9 +431,13 @@ const openDrawInTx = async (client: import('pg').PoolClient, drawId: number, act
     ON CONFLICT (draw_id, business_id) DO NOTHING
   `, [drawId]);
   // Opt-outs are one campaign only: consume the flag so the business is back in next time.
+  // EXCEPT for cancelling subscriptions: their skip came from a charged-window cancel and
+  // must survive the open so the plan page keeps saying "you skipped the campaign you paid
+  // for, no refund" (not "you were never charged"). Enrollment-wise it is moot - their
+  // period ends before the following open - and resume clears both flags together.
   await client.query(`
     UPDATE subscription SET skip_next_campaign = FALSE, updated_at = NOW()
-    WHERE skip_next_campaign = TRUE
+    WHERE skip_next_campaign = TRUE AND cancel_at_period_end = FALSE
   `);
   await logDrawAudit(client, drawId, 'opened', actorUserId);
 };
