@@ -13,6 +13,7 @@ import {
   updateSubscriptionPlan,
   getSubscriptionInvoices,
   setSkipNextCampaign,
+  setParticipationPaused,
   createUpdatePaymentMethodSession,
   createFoundingRenewalCheckoutSession,
 } from './stripe.service.js';
@@ -203,6 +204,35 @@ export const skipCampaign = async (req: Request, res: Response) => {
       return;
     }
     console.error('[stripe.skipCampaign]', err);
+    res.status(400).json({ error: 'Could not update campaign participation. Please try again.' });
+  }
+};
+
+// POST /business/subscription/participation
+// Body: { paused: boolean } — founding only. Voluntary cancel of participation: no
+// refund, off the map immediately, no new customer entries, not enrolled in upcoming
+// campaigns. Reactivation allowed while the founding term still runs.
+export const setParticipation = async (req: Request, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const paused = req.body?.paused !== false; // default true
+    await setParticipationPaused(userId, paused);
+    res.json({ paused });
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : '';
+    if (msg === 'FOUNDING_ONLY') {
+      res.status(409).json({ error: 'This action is only available for Founding Partner plans.' });
+      return;
+    }
+    if (msg === 'FOUNDING_TERM_ENDED') {
+      res.status(409).json({ error: 'Your founding term has ended. Start a new plan to join upcoming campaigns.' });
+      return;
+    }
+    if (msg === 'No active subscription found') {
+      res.status(404).json({ error: 'No active subscription found.' });
+      return;
+    }
+    console.error('[stripe.setParticipation]', err);
     res.status(400).json({ error: 'Could not update campaign participation. Please try again.' });
   }
 };

@@ -77,7 +77,7 @@ process.env.STRIPE_PRICE_ID_1000 = 'price_test_1000';
 process.env.STRIPE_PRICE_ID_2500 = 'price_test_2500';
 process.env.STRIPE_PRICE_ID_5000 = 'price_test_5000';
 
-import { createCheckoutSession, createFoundingMemberCheckoutSession, cancelSubscription, verifyAndActivateSession, resumeSubscription, resolveMonthlyFee, isFoundingTransitionWindow, updateSubscriptionPlan, invoicePaymentIntentId, createFoundingRenewalCheckoutSession, activateFoundingRenewal, FOUNDING_RENEWAL_TERM_MONTHS, FOUNDING_PRICE_PER_LOCATION } from '../stripe.service';
+import { createCheckoutSession, createFoundingMemberCheckoutSession, cancelSubscription, verifyAndActivateSession, resumeSubscription, resolveMonthlyFee, isFoundingTransitionWindow, updateSubscriptionPlan, invoicePaymentIntentId, createFoundingRenewalCheckoutSession, activateFoundingRenewal, setParticipationPaused, FOUNDING_RENEWAL_TERM_MONTHS, FOUNDING_PRICE_PER_LOCATION } from '../stripe.service';
 import { invalidatePlatformSettings } from '../../../shared/cache/cache';
 import { CHARGE_DAY_OF_MONTH } from '../../../shared/dates';
 
@@ -1004,5 +1004,70 @@ describe('activateFoundingRenewal — term extension + idempotency (transactiona
     expect(refundMark).toBeDefined();
     expect(mockClientQuery.mock.calls.some(([sql]) => sql === 'COMMIT')).toBe(true);
     expect(mockSendFoundingWelcomeEmail).not.toHaveBeenCalled();
+  });
+});
+
+// ─────────────────────────────────────────────
+// setParticipationPaused — founding cancel (permanent opt-out, no refund) + reactivate
+// ─────────────────────────────────────────────
+describe('setParticipationPaused — founding cancel and reactivate', () => {
+  const FUTURE = new RealDate(RealDate.now() + 30 * 24 * 3600 * 1000);
+  const PAST = new RealDate(RealDate.now() - 24 * 3600 * 1000);
+
+  it('pauses a founding subscription (no Stripe calls, no draw removal)', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 5, current_period_end: FUTURE, is_founding: true }] })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 }); // UPDATE participation_paused
+
+    await setParticipationPaused(7, true);
+
+    const update = mockQuery.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('SET participation_paused'),
+    );
+    expect(update).toBeDefined();
+    expect(update![1]).toEqual([5, true]);
+    // Voluntary opt-out only: nothing is refunded, nothing leaves a draw.
+    expect(mockRefundsCreate).not.toHaveBeenCalled();
+    expect(mockSubscriptionsUpdate).not.toHaveBeenCalled();
+    const deletedDraw = mockQuery.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('DELETE FROM draw_entry'),
+    );
+    expect(deletedDraw).toBeUndefined();
+  });
+
+  it('reactivates while the founding term still runs', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 5, current_period_end: FUTURE, is_founding: true }] })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 });
+
+    await setParticipationPaused(7, false);
+
+    const update = mockQuery.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('SET participation_paused'),
+    );
+    expect(update![1]).toEqual([5, false]);
+  });
+
+  it('rejects reactivation after the founding term ended', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 5, current_period_end: PAST, is_founding: true }] });
+
+    await expect(setParticipationPaused(7, false)).rejects.toThrow('FOUNDING_TERM_ENDED');
+
+    const update = mockQuery.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('SET participation_paused'),
+    );
+    expect(update).toBeUndefined();
+  });
+
+  it('rejects non-founding subscriptions (monthly plans use the Stripe cancel flow)', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 5, current_period_end: FUTURE, is_founding: false }] });
+
+    await expect(setParticipationPaused(7, true)).rejects.toThrow('FOUNDING_ONLY');
+  });
+
+  it('throws when there is no active subscription', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+
+    await expect(setParticipationPaused(7, true)).rejects.toThrow('No active subscription found');
   });
 });

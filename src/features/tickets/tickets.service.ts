@@ -357,6 +357,12 @@ export const submitReceiptEntryService = async (
               JOIN draw d ON d.id = de.draw_id
               WHERE de.business_id = b.id AND d.status = 'Open'
             )
+            -- Voluntary opt-out (founding cancel): no NEW entries at a paused business,
+            -- even though its draw_entry (and already-earned customer entries) remain.
+            AND NOT EXISTS (
+              SELECT 1 FROM subscription sp
+              WHERE sp.business_id = b.id AND sp.participation_paused = TRUE
+            )
           LIMIT 1
         ),
         od AS (

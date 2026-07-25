@@ -61,11 +61,17 @@ export const getNearbyBusinessesService = async (
     -- Participation = membership in the Open campaign (draw_entry), NOT subscription
     -- status: billing runs on the 24th while campaigns run to month end, so a business
     -- whose subscription ended on the 24th still owns the campaign it paid for.
+    -- Exception: participation_paused is a VOLUNTARY opt-out (founding cancel) - the
+    -- owner asked to leave the map immediately, so it overrides the draw_entry rule.
     WHERE loc.is_active = true
       AND EXISTS (
         SELECT 1 FROM draw_entry de
         JOIN draw d ON d.id = de.draw_id
         WHERE de.business_id = b.id AND d.status = 'Open'
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM subscription sp
+        WHERE sp.business_id = b.id AND sp.participation_paused = TRUE
       )
       AND loc.latitude  BETWEEN $1 AND $2
       AND loc.longitude BETWEEN $3 AND $4
@@ -552,6 +558,9 @@ export const searchParticipatingLocationsService = async (query: string): Promis
         JOIN draw d ON d.id = de.draw_id
         WHERE de.business_id = b.id AND d.status = 'Open'
       )
+      -- Voluntary opt-out (founding cancel): the owner asked to stop participating,
+      -- so search omits the business even though its draw_entry is kept.
+      AND COALESCE(s.participation_paused, FALSE) = FALSE
       -- A location at its campaign capacity cannot accept entries, so search (the
       -- "where can I enter" tool) omits it entirely. NULL cap = uncapped, always shown.
       AND (
@@ -589,7 +598,8 @@ const fetchLocationProfile = async (
 
   const gate = participatingOnly
     ? `AND bl.is_active
-       AND EXISTS (SELECT 1 FROM draw_entry de JOIN draw d ON d.id = de.draw_id WHERE de.business_id = b.id AND d.status = 'Open')`
+       AND EXISTS (SELECT 1 FROM draw_entry de JOIN draw d ON d.id = de.draw_id WHERE de.business_id = b.id AND d.status = 'Open')
+       AND NOT EXISTS (SELECT 1 FROM subscription sp WHERE sp.business_id = b.id AND sp.participation_paused = TRUE)`
     : '';
 
   const pool = getPool();
@@ -633,11 +643,13 @@ const fetchLocationProfile = async (
       (SELECT draw_date FROM open_draw) AS draw_date,
       -- active location + enrolled in the open draw (draw_entry = the paid-participation
       -- record; subscription status is NOT consulted, since a subscription that ended on
-      -- the 24th still owns the campaign it paid for). On the unconditional fetch this
-      -- tells the client whether to show the "Submit a Receipt" action.
+      -- the 24th still owns the campaign it paid for). participation_paused IS consulted:
+      -- it is a voluntary opt-out (founding cancel), not a billing lapse. On the
+      -- unconditional fetch this tells the client whether to show "Submit a Receipt".
       (
         bl.is_active
         AND EXISTS (SELECT 1 FROM draw_entry de JOIN draw d ON d.id = de.draw_id WHERE de.business_id = b.id AND d.status = 'Open')
+        AND NOT EXISTS (SELECT 1 FROM subscription sp WHERE sp.business_id = b.id AND sp.participation_paused = TRUE)
       ) AS is_participating
     FROM business_location bl
     JOIN business b ON bl.business_id = b.id

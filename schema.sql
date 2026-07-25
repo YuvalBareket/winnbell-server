@@ -185,6 +185,11 @@ CREATE TABLE subscription (
   -- Business opted out of the campaign it already paid for (no refund). Consumed at the
   -- next campaign open: enrollment skips the business, then the flag resets to FALSE.
   skip_next_campaign     BOOLEAN NOT NULL DEFAULT FALSE,
+  -- Founding member voluntarily cancelled participation (no refund): the business goes
+  -- off the map immediately, customers cannot start new entries at it, and it is NOT
+  -- enrolled when campaigns open. PERSISTENT (unlike skip_next_campaign) until the owner
+  -- reactivates; the founding term keeps running while paused (no extension).
+  participation_paused   BOOLEAN NOT NULL DEFAULT FALSE,
   billing_interval       billing_interval_enum NOT NULL DEFAULT 'monthly',
   created_at             TIMESTAMP NOT NULL DEFAULT NOW(),
   updated_at             TIMESTAMP NOT NULL DEFAULT NOW()

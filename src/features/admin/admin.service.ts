@@ -427,6 +427,7 @@ const openDrawInTx = async (client: import('pg').PoolClient, drawId: number, act
     WHERE d.id = $1
       AND s.current_period_end >= NOW()
       AND s.skip_next_campaign = FALSE
+      AND s.participation_paused = FALSE
     ON CONFLICT (draw_id, business_id) DO NOTHING
   `, [drawId]);
   // Opt-outs are one campaign only: consume the flag so the business is back in next time.

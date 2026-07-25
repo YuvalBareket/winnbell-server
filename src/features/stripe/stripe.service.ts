@@ -468,11 +468,14 @@ export const activateFoundingRenewal = async (pool: Pool, session: Stripe.Checko
       await client.query('COMMIT');
       duplicate = true;
     } else {
+      // participation_paused resets too: paying for a renewal is an explicit
+      // recommitment to participate - a pre-renewal cancel no longer reflects intent.
       const upd = await client.query(
         `UPDATE subscription
          SET current_period_end = current_period_end + make_interval(months => $2),
              status = 'Active',
              cancel_at_period_end = false,
+             participation_paused = false,
              updated_at = NOW()
          WHERE business_id = $1
          RETURNING current_period_end`,
@@ -749,6 +752,7 @@ async function recoverBusinessAfterPayment(pool: Pool, businessId: number): Prom
     WHERE d.status = 'Open'
       AND s.current_period_end >= NOW()
       AND s.skip_next_campaign = FALSE
+      AND s.participation_paused = FALSE
     ON CONFLICT (draw_id, business_id) DO NOTHING
   `, [businessId]);
   invalidatePublicBusinessData();
@@ -1467,6 +1471,7 @@ async function activateFoundingMember(
             cancel_at_period_end = false,
             fee_at_entry         = EXCLUDED.fee_at_entry,
             entries_per_location = EXCLUDED.entries_per_location,
+            participation_paused = false,
             billing_interval     = 'yearly',
             updated_at           = NOW()
     `, [businessId, FOUNDING_TERM_MONTHS, monthlyEquivalent, customerId, FOUNDING_ENTRIES_PER_LOCATION]);
@@ -1618,6 +1623,7 @@ async function activateBusinessSubscription(
             pending_fee_at_entry         = $6,
             pending_entries_per_location = $7,
             skip_next_campaign           = false,
+            participation_paused         = false,
             billing_interval             = $8,
             updated_at                   = NOW()
         WHERE business_id = $1
@@ -1639,6 +1645,7 @@ async function activateBusinessSubscription(
               pending_fee_at_entry         = NULL,
               pending_entries_per_location = NULL,
               skip_next_campaign     = false,
+              participation_paused   = false,
               billing_interval       = EXCLUDED.billing_interval,
               updated_at             = NOW()
       `, [businessId, customerId, subscriptionId, priceId, currentPeriodEnd, monthlyFee, entriesPerLocation || null, 'monthly', initialStatus]);
@@ -1794,10 +1801,11 @@ export const syncSubscriptionQuantity = async (userId: number, newNextCampaignCo
 
   // Step 3 — stage the new fee (and tier, unchanged here) to go live at the next open.
   // Actively changing the plan/locations means the business intends to PARTICIPATE - a
-  // previously set skip-campaign opt-out no longer reflects their intent, so clear it.
+  // previously set skip-campaign opt-out (or founding participation pause) no longer
+  // reflects their intent, so clear both.
   await pool.query(
     `UPDATE subscription
-     SET pending_entries_per_location = $1, pending_fee_at_entry = $2, skip_next_campaign = false, updated_at = NOW()
+     SET pending_entries_per_location = $1, pending_fee_at_entry = $2, skip_next_campaign = false, participation_paused = false, updated_at = NOW()
      WHERE business_id = $3`,
     [effectiveTier, newTotalFee, sub.business_id],
   );
@@ -1924,10 +1932,11 @@ export const updateSubscriptionPlan = async (userId: number, newEntriesPerLocati
   // Step 3 — stage the plan to go live at the next campaign open. The running campaign
   // keeps its tier; stripe_price_id tracks the live Stripe price (just changed).
   // Actively changing the plan means the business intends to PARTICIPATE - clear any
-  // previously set skip-campaign opt-out (it no longer reflects their intent).
+  // previously set skip-campaign opt-out or founding participation pause (neither
+  // reflects their intent any more).
   await pool.query(
     `UPDATE subscription
-     SET pending_entries_per_location = $1, pending_fee_at_entry = $2, stripe_price_id = $3, skip_next_campaign = false, updated_at = NOW()
+     SET pending_entries_per_location = $1, pending_fee_at_entry = $2, stripe_price_id = $3, skip_next_campaign = false, participation_paused = false, updated_at = NOW()
      WHERE business_id = $4`,
     [newEntriesPerLocation, newTotalFee, priceId, sub.business_id],
   );
@@ -2185,6 +2194,7 @@ export const getSubscriptionDetails = async (userId: number) => {
       s.pending_fee_at_entry,
       s.pending_entries_per_location,
       s.skip_next_campaign,
+      s.participation_paused,
       (SELECT d5.opened_at FROM draw d5 WHERE d5.status = 'Open' ORDER BY d5.opened_at DESC NULLS LAST LIMIT 1) AS open_campaign_opened_at,
       (SELECT COUNT(*)::int FROM business_location WHERE business_id = b.id AND is_active = TRUE) AS active_location_count,
       -- What the NEXT campaign runs with: live locations minus scheduled removals plus
@@ -2307,6 +2317,41 @@ export const setSkipNextCampaign = async (userId: number, skip: boolean): Promis
   );
   if (result.rowCount === 0) throw new Error('No active subscription found');
   invalidatePublicBusinessData();
+};
+
+// ─── Founding Participation Pause (voluntary cancel, no refund) ───────────────
+// Founding Partner cancellation: the Special Terms allow no refund and no early
+// termination of the TERM, but the member may stop PARTICIPATING at any time. Pausing
+// takes the business off the map immediately and blocks new customer entries; customer
+// entries already earned in the running campaign stay valid (draw_entry is kept, same
+// H2 rule as everywhere else). While paused the business is not enrolled when campaigns
+// open. The founding term keeps running (no extension); reactivation is allowed only
+// while current_period_end is still in the future - an expired term needs a new plan.
+export const setParticipationPaused = async (userId: number, paused: boolean): Promise<void> => {
+  const pool = getPool();
+
+  const result = await pool.query(`
+    SELECT s.id, s.current_period_end, (fm.id IS NOT NULL) AS is_founding
+    FROM subscription s
+    JOIN business b ON b.id = s.business_id
+    LEFT JOIN founding_member fm ON fm.business_id = b.id
+    WHERE b.user_id = $1 AND s.status != 'Cancelled'
+  `, [userId]);
+  const sub = result.rows[0];
+  if (!sub) throw new Error('No active subscription found');
+  // Founding-only until the monthly-plan cancellation model is decided: monthly plans
+  // use the Stripe cancel_at_period_end flow instead.
+  if (!sub.is_founding) throw new Error('FOUNDING_ONLY');
+  if (!paused && (!sub.current_period_end || new Date(sub.current_period_end) < new Date())) {
+    throw new Error('FOUNDING_TERM_ENDED');
+  }
+
+  await pool.query(
+    `UPDATE subscription SET participation_paused = $2, updated_at = NOW() WHERE id = $1`,
+    [sub.id, paused],
+  );
+  invalidatePublicBusinessData();
+  console.log(`[Founding] Subscription ${sub.id} participation ${paused ? 'paused (voluntary cancel, no refund)' : 'reactivated'}`);
 };
 
 // ─── Resume Subscription ──────────────────────────────────────────────────────
