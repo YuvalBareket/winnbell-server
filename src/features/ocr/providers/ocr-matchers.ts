@@ -32,12 +32,26 @@ export function matchAmount(text: string, amount: number): boolean | null {
     if (text.includes(v.toUpperCase()) || text.includes(v)) return true;
   }
 
-  // User's amount not found — check if a total line is actually visible.
-  // TOTAL/AMOUNT followed by a number means the receipt shows a total but it doesn't match.
-  // If no total line is visible at all, we can't verify → null (slide).
-  const totalVisible = /\bTOTAL\b[\s:]*[$₪]?\s*[\d,]+[.,]\d{2}/.test(text)
-    || /\bAMOUNT\b[\s:A-Z]*[$₪]?\s*[\d,]+[.,]\d{2}/.test(text);
-  return totalVisible ? false : null;
+  // User's claimed amount not found in any formatting variant. Rather than depend on a
+  // TOTAL/AMOUNT keyword sitting adjacent to the number (OCR frequently reorders layout, so
+  // "TOTAL AMOUNT PAID <id> US$450.00" leaves no keyword next to the money), scan the whole
+  // text for every monetary value printed on the receipt and compare against the claim:
+  //   - claimed value is among the printed amounts         → true  (matches)
+  //   - amounts are printed but the claim is not among them → false (user's amount is wrong)
+  //   - no monetary amount is legible at all               → null  (can't verify, let it slide)
+  // This closes the inflation hole where a wrong/high amount slid through as "unverifiable".
+  const claimedCents = Math.round(amount * 100);
+  let anyMoney = false;
+  // A money value: digits with optional thousands separators, then a . or , and exactly 2 decimals,
+  // not followed by another digit (so we don't clip "1.234" or a longer barcode run).
+  for (const m of text.matchAll(/(\d[\d.,]*)[.,](\d{2})(?!\d)/g)) {
+    const intPart = m[1].replace(/[.,]/g, '');
+    const cents = Math.round(parseFloat(`${intPart}.${m[2]}`) * 100);
+    if (!Number.isFinite(cents)) continue;
+    anyMoney = true;
+    if (cents === claimedCents) return true;
+  }
+  return anyMoney ? false : null;
 }
 
 // Returns true  → date found and matches user's claim

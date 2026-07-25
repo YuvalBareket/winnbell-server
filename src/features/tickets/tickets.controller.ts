@@ -4,6 +4,7 @@ import { getPool } from '../../shared/db/db.js';
 import { AuthRequest } from '../../shared/middleware/auth.middleware.js';
 import { validateLength } from '../../shared/validation.js';
 import { getClientIp } from '../../shared/clientIp.js';
+import { normalizeReceiptIdentifier } from '../ocr/receiptIdentity.js';
 
 export const getMyTickets = async (req: AuthRequest, res: Response) => {
   try {
@@ -82,6 +83,13 @@ export const submitReceiptEntry = async (req: AuthRequest, res: Response) => {
       res.status(400).json({ message: 'receiptIdentifier must be between 5 and 100 characters.' });
       return;
     }
+    // Canonical form (uppercase alnum only) is what we STORE and dedup on, so "#1366-3859"
+    // and "1366-3859" can't both be entered as if they were different receipts.
+    const normalizedId = normalizeReceiptIdentifier(sanitizedId);
+    if (normalizedId.length < 4) {
+      res.status(400).json({ message: 'receiptIdentifier must contain at least 4 letters or numbers.' });
+      return;
+    }
 
     if (transactionDate !== undefined) {
       if (typeof transactionDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(transactionDate)) {
@@ -105,7 +113,7 @@ export const submitReceiptEntry = async (req: AuthRequest, res: Response) => {
 
     const result = await ticketService.submitReceiptEntryService(userId, {
       locationId: Number(locationId),
-      receiptIdentifier: String(receiptIdentifier).trim(),
+      receiptIdentifier: normalizedId,
       // Round to 2 dp (cents) so the stored amount and entry math never carry float noise.
       transactionAmount: Math.round(Number(transactionAmount) * 100) / 100,
       transactionDate: typeof transactionDate === 'string' ? transactionDate : undefined,

@@ -706,16 +706,17 @@ describe('adminImageDecisionService — approval supersedes competing claims (P2
   const TICKET_ROW = { id: 9, activated_by_user_id: 7, draw_id: 42, image_validation_status: 'failed' };
 
   test('approve quarantines the competing group BEFORE un-quarantining the approved ticket', async () => {
-    mockQuery
-      .mockResolvedValueOnce({ rows: [TICKET_ROW] })      // ticket lookup
-      .mockResolvedValueOnce({ rows: [] })                 // winner-conflict pre-check: none
-      .mockResolvedValueOnce({ rows: [], rowCount: 1 })    // supersede competing group
-      .mockResolvedValueOnce({ rows: [] })                 // approve ticket (passed + un-quarantine)
-      .mockResolvedValueOnce({ rows: [] });                // siblings un-quarantine
+    // pool.query serves only the immutable coord read; the whole decision runs on the txn client.
+    mockQuery.mockResolvedValueOnce({ rows: [{ business_id: 3, receipt_identifier: 'RCP1' }] });
+    mockClientQuery.mockImplementation((sql: string) => {
+      if (sql.includes('FOR UPDATE')) return Promise.resolve({ rows: [TICKET_ROW] });        // locked lookup
+      if (sql.includes('JOIN draw d ON d.winner_ticket_id')) return Promise.resolve({ rows: [] }); // no winner conflict
+      return Promise.resolve({ rows: [], rowCount: 1 });
+    });
 
     await adminImageDecisionService(9, 'approve');
 
-    const calls = mockQuery.mock.calls.map(([sql]) => sql as string);
+    const calls = mockClientQuery.mock.calls.map(([sql]) => sql as string);
     const supersedeIdx = calls.findIndex(s => s.includes('superseded_by_admin_decision'));
     const approveIdx = calls.findIndex(s => s.includes("image_validation_status = 'passed'"));
     expect(supersedeIdx).toBeGreaterThan(-1);
@@ -725,17 +726,25 @@ describe('adminImageDecisionService — approval supersedes competing claims (P2
     // The kick displaces the whole competing group (anchor + siblings) but never winners.
     expect(calls[supersedeIdx]).toContain('COALESCE(t.anchor_ticket_id, t.id)');
     expect(calls[supersedeIdx]).toContain('winner_ticket_id');
+    // The decision is wrapped in a transaction that commits.
+    expect(calls).toContain('BEGIN');
+    expect(calls).toContain('COMMIT');
   });
 
   test('approve fails cleanly when the competing claim already won a draw', async () => {
-    mockQuery
-      .mockResolvedValueOnce({ rows: [TICKET_ROW] })          // ticket lookup
-      .mockResolvedValueOnce({ rows: [{ found: 1 }] });        // winner-conflict pre-check: hit
+    mockQuery.mockResolvedValueOnce({ rows: [{ business_id: 3, receipt_identifier: 'RCP1' }] });
+    mockClientQuery.mockImplementation((sql: string) => {
+      if (sql.includes('FOR UPDATE')) return Promise.resolve({ rows: [TICKET_ROW] });          // locked lookup
+      if (sql.includes('JOIN draw d ON d.winner_ticket_id')) return Promise.resolve({ rows: [{ found: 1 }] }); // winner conflict HIT
+      return Promise.resolve({ rows: [] });
+    });
 
     await expect(adminImageDecisionService(9, 'approve')).rejects.toThrow(/already won a draw/);
 
-    // No mutation happened — only the two SELECTs ran.
-    const updates = mockQuery.mock.calls.filter(([sql]) => (sql as string).includes('UPDATE'));
+    // No mutation happened and the transaction rolled back.
+    const calls = mockClientQuery.mock.calls.map(([sql]) => sql as string);
+    const updates = calls.filter(s => s.includes('UPDATE ticket'));
     expect(updates).toHaveLength(0);
+    expect(calls).toContain('ROLLBACK');
   });
 });

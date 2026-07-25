@@ -335,7 +335,13 @@ CREATE TABLE ticket (
   activated_at            TIMESTAMP NULL,
 
   -- Receipt-entry fields (NULL for code/free/promo tickets) ──────────────────
+  -- receipt_identifier is stored in CANONICAL form (uppercase alnum only) so formatting
+  -- variants of the same number ("#1366-3859" vs "1366-3859") dedup as one.
   receipt_identifier      VARCHAR(255) NULL,
+  -- Document fingerprint: identifier-like tokens OCR'd off the image (the anchor only).
+  -- Lets us catch the SAME physical receipt reused under a different number (invoice # vs
+  -- receipt #). Only ever compared TYPED-id <-> tokens, never token-set <-> token-set.
+  receipt_tokens          TEXT[] NULL,
   transaction_amount      NUMERIC(10, 2) NULL CHECK (transaction_amount IS NULL OR transaction_amount > 0),
   transaction_date        DATE NULL,
   receipt_image_url       VARCHAR(500) NULL,
@@ -557,8 +563,12 @@ CREATE INDEX idx_ticket_cap_check
 -- 'contest_pending' is also excluded: a contest entry (the real owner attaching a photo to
 -- override a squatter who typed the number with no image) is held OUT of the slot until OCR
 -- resolves it, so it never collides with the squatter's standing row.
+-- Scoped to (business, draw): a receipt number is unique WITHIN a campaign, not across all time.
+-- A merchant that resets its receipt counter each campaign (carbon pads) can have a genuinely
+-- different receipt #1001 in a later draw without colliding with a prior one, while same-campaign
+-- reuse of one number is still blocked.
 CREATE UNIQUE INDEX idx_ticket_receipt_unique
-  ON ticket (business_id, receipt_identifier)
+  ON ticket (business_id, draw_id, receipt_identifier)
   WHERE receipt_identifier IS NOT NULL
     AND (is_quarantined = FALSE OR quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review'));
 
@@ -566,6 +576,9 @@ CREATE UNIQUE INDEX idx_ticket_receipt_unique
 CREATE INDEX idx_ticket_quarantine
   ON ticket (draw_id, is_quarantined)
   WHERE is_quarantined = TRUE;
+
+-- Document-fingerprint lookups: "does any prior entry's token set contain this identifier"
+CREATE INDEX idx_ticket_receipt_tokens ON ticket USING GIN (receipt_tokens);
 
 -- Velocity & throttle queries: COUNT by user + source + time window
 CREATE INDEX idx_ticket_velocity
@@ -767,7 +780,8 @@ CREATE TABLE IF NOT EXISTS draw_rejected_winner (
   -- Which admin performed the rejection (NULL only if that admin account is later deleted).
   -- Together with reason + rejected_at this is the full who/when/why of every disqualification.
   rejected_by_user_id INTEGER NULL REFERENCES "user"(id) ON DELETE SET NULL,
-  risk_penalty    INTEGER NOT NULL DEFAULT 10,
+  -- Always written explicitly by the rejection path (currently 12); this default is a fallback only.
+  risk_penalty    INTEGER NOT NULL DEFAULT 12,
   -- Mandatory admin justification for disqualifying this winner (legal/regulatory trail).
   reason          TEXT NULL,
   rejected_at     TIMESTAMP NOT NULL DEFAULT NOW(),

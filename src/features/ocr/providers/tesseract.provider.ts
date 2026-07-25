@@ -1,6 +1,7 @@
 import Tesseract from 'tesseract.js';
 import type { OcrProvider, OcrExpected, OcrValidationResult } from '../ocr.types.js';
 import { matchAmount, matchDate, matchBusinessName, isReceiptText, scoreConfidence } from './ocr-matchers.js';
+import { normalizeReceiptIdentifier, alnumOnly, extractDocumentTokens } from '../receiptIdentity.js';
 
 export class TesseractProvider implements OcrProvider {
   async validate(imageUrl: string, expected: OcrExpected): Promise<OcrValidationResult> {
@@ -21,13 +22,16 @@ export class TesseractProvider implements OcrProvider {
 
     const normalizedText = text.toUpperCase().replace(/\s+/g, ' ');
 
-    const identifierFound = normalizedText.includes(expected.identifier.toUpperCase());
+    // Guard the empty case: "".includes("") is true, so an empty normalized id must not "match".
+    const normalizedId = normalizeReceiptIdentifier(expected.identifier);
+    const identifierFound = normalizedId.length > 0 && alnumOnly(text).includes(normalizedId);
     const amountMatches = matchAmount(normalizedText, expected.amount);
     const dateMatches = expected.date ? matchDate(normalizedText, expected.date) : null;
     const isReceipt = isReceiptText(normalizedText);
     const businessNameFound = expected.businessName ? matchBusinessName(normalizedText, expected.businessName) : null;
     const confidence = scoreConfidence(identifierFound, amountMatches, dateMatches);
+    const documentTokens = extractDocumentTokens(text);
 
-    return { isReceipt, identifierFound, amountMatches, dateMatches, businessNameFound, confidence, rawText: text };
+    return { isReceipt, identifierFound, amountMatches, dateMatches, businessNameFound, confidence, rawText: text, documentTokens };
   }
 }

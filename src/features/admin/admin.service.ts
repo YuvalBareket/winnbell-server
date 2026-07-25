@@ -1615,120 +1615,151 @@ export const adminImageDecisionService = async (
   const pool = getPool();
   const { updateUserRiskScore, syncUserQuarantineState } = await import('../risk/risk.service.js');
 
-  const ticketRes = await pool.query(
-    `SELECT id, activated_by_user_id, draw_id, image_validation_status FROM ticket WHERE id = $1`,
+  // Read the immutable receipt coordinates first (business + identifier never change for a ticket)
+  // so the advisory lock can be keyed exactly like the submission and OCR paths.
+  const coord = await pool.query(
+    `SELECT business_id, receipt_identifier FROM ticket WHERE id = $1`,
     [ticketId],
   );
-  if (!ticketRes.rows[0]) throw new Error('Ticket not found');
+  if (!coord.rows[0]) throw new Error('Ticket not found');
+  const coordBusinessId: number = coord.rows[0].business_id;
+  const coordIdentifier: string = coord.rows[0].receipt_identifier ?? '';
 
-  const { activated_by_user_id: userId, draw_id: drawId, image_validation_status: prevStatus } = ticketRes.rows[0];
-  if (!userId) throw new Error('Ticket has no associated user');
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // Advisory lock BEFORE any row lock (same acquisition order as submission + OCR) so an admin
+    // decision can't race a concurrent OCR resolution / submission of the same receipt into a
+    // unique-index violation or a half-applied supersede. Namespace 4, key business|identifier.
+    await client.query(
+      `SELECT pg_advisory_xact_lock(4, hashtext($1::text || '|' || $2::text))`,
+      [String(coordBusinessId), coordIdentifier],
+    );
 
-  const overrideable = ['passed', 'failed', 'ocr_error', 'pending'];
-  if (!overrideable.includes(prevStatus)) throw new Error(`Cannot override image decision for status: ${prevStatus}`);
-
-  // Idempotency: prevent double-approve or double-reject from farming risk score
-  if (decision === 'approve' && prevStatus === 'passed') throw new Error('Image is already approved');
-  if (decision === 'reject' && prevStatus === 'failed') throw new Error('Image is already rejected');
-
-  if (decision === 'approve') {
-    // Reverse the +2 penalty if previously failed, then apply -3 reward
-    const ticketDeltaChange = prevStatus === 'failed' ? -5 : -3;
-    const userDelta = prevStatus === 'failed' ? -5 : -3;
-
-    // Admin approval outranks any competing claim on the same receipt. While this ticket
-    // sat rejected/quarantined its receipt number was released (partial unique index), so
-    // another user may hold an active or OCR-pending ticket for it. Silently quarantine
-    // that competing group (anchor + siblings, shadowban style - its owner sees nothing)
-    // BEFORE un-quarantining the approved ticket, or the index would reject the approval.
-    // Winner tickets are never displaced (mirrors syncUserQuarantineState's protection).
-
-    // If the competing claim already WON a draw it can never be displaced - fail up front
-    // with a clear message instead of erroring mid-way on the unique index.
-    const winnerConflict = await pool.query(
-      `SELECT 1
-       FROM ticket me
-       JOIN ticket o
-         ON o.business_id = me.business_id
-        AND o.receipt_identifier = me.receipt_identifier
-        AND o.id <> me.id
-        AND (o.is_quarantined = FALSE OR o.quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review'))
-       JOIN draw d ON d.winner_ticket_id = o.id
-       WHERE me.id = $1 AND me.receipt_identifier IS NOT NULL
-       LIMIT 1`,
+    const ticketRes = await client.query(
+      `SELECT id, activated_by_user_id, draw_id, image_validation_status FROM ticket WHERE id = $1 FOR UPDATE`,
       [ticketId],
     );
-    if (winnerConflict.rows.length > 0) {
-      throw new Error('Cannot approve: another entry with this receipt already won a draw and cannot be displaced.');
+    if (!ticketRes.rows[0]) throw new Error('Ticket not found');
+
+    const { activated_by_user_id: userId, draw_id: drawId, image_validation_status: prevStatus } = ticketRes.rows[0];
+    if (!userId) throw new Error('Ticket has no associated user');
+
+    const overrideable = ['passed', 'failed', 'ocr_error', 'pending'];
+    if (!overrideable.includes(prevStatus)) throw new Error(`Cannot override image decision for status: ${prevStatus}`);
+
+    // Idempotency: prevent double-approve or double-reject from farming risk score
+    if (decision === 'approve' && prevStatus === 'passed') throw new Error('Image is already approved');
+    if (decision === 'reject' && prevStatus === 'failed') throw new Error('Image is already rejected');
+
+    if (decision === 'approve') {
+      // Reverse the +2 penalty if previously failed, then apply -3 reward
+      const ticketDeltaChange = prevStatus === 'failed' ? -5 : -3;
+      const userDelta = prevStatus === 'failed' ? -5 : -3;
+
+      // Admin approval outranks any competing claim on the same receipt. While this ticket
+      // sat rejected/quarantined its receipt number was released (partial unique index), so
+      // another user may hold an active or OCR-pending ticket for it. Silently quarantine
+      // that competing group (anchor + siblings, shadowban style - its owner sees nothing)
+      // BEFORE un-quarantining the approved ticket, or the index would reject the approval.
+      // Winner tickets are never displaced (mirrors syncUserQuarantineState's protection).
+
+      // If the competing claim already WON a draw it can never be displaced - fail up front
+      // with a clear message instead of erroring mid-way on the unique index.
+      const winnerConflict = await client.query(
+        `SELECT 1
+         FROM ticket me
+         JOIN ticket o
+           ON o.business_id = me.business_id
+          AND o.draw_id = me.draw_id
+          AND o.receipt_identifier = me.receipt_identifier
+          AND o.id <> me.id
+          AND (o.is_quarantined = FALSE OR o.quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review'))
+         JOIN draw d ON d.winner_ticket_id = o.id
+         WHERE me.id = $1 AND me.receipt_identifier IS NOT NULL
+         LIMIT 1`,
+        [ticketId],
+      );
+      if (winnerConflict.rows.length > 0) {
+        throw new Error('Cannot approve: another entry with this receipt already won a draw and cannot be displaced.');
+      }
+
+      await client.query(
+        `WITH approved AS (
+           SELECT business_id, draw_id, receipt_identifier, id
+           FROM ticket
+           WHERE id = $1 AND receipt_identifier IS NOT NULL
+         )
+         UPDATE ticket t
+         SET is_quarantined    = TRUE,
+             quarantine_reason = 'superseded_by_admin_decision',
+             quarantined_at    = NOW()
+         FROM approved a
+         WHERE COALESCE(t.anchor_ticket_id, t.id) IN (
+                 SELECT o.id FROM ticket o
+                 WHERE o.business_id = a.business_id
+                   AND o.draw_id = a.draw_id
+                   AND o.receipt_identifier = a.receipt_identifier
+                   AND o.id <> a.id
+                   AND (o.is_quarantined = FALSE OR o.quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review'))
+               )
+           AND t.id NOT IN (SELECT winner_ticket_id FROM draw WHERE winner_ticket_id IS NOT NULL)`,
+        [ticketId],
+      );
+
+      await client.query(
+        `UPDATE ticket
+         SET image_validation_status = 'passed',
+             risk_score_delta        = risk_score_delta + $2,
+             is_quarantined          = FALSE,
+             quarantine_reason       = NULL,
+             quarantined_at          = NULL
+         WHERE id = $1`,
+        [ticketId, ticketDeltaChange],
+      );
+      await client.query(
+        `UPDATE ticket
+         SET is_quarantined = FALSE, quarantine_reason = NULL, quarantined_at = NULL
+         WHERE anchor_ticket_id = $1
+           AND quarantine_reason IN ('ocr_pending', 'ocr_validation_failed', 'ocr_error_pending_review', 'contest_pending', 'contest_not_won')`,
+        [ticketId],
+      );
+      await updateUserRiskScore(userId, userDelta, client);
+      await syncUserQuarantineState(userId, drawId, client);
+    } else {
+      // Reverse the -3 reward if previously passed, then apply +2 penalty
+      const ticketDeltaChange = prevStatus === 'passed' ? 5 : 2;
+      const userDelta = prevStatus === 'passed' ? 5 : 2;
+
+      await client.query(
+        `UPDATE ticket
+         SET image_validation_status = 'failed',
+             risk_score_delta        = risk_score_delta + $2,
+             is_quarantined          = TRUE,
+             quarantine_reason       = 'ocr_validation_failed',
+             quarantined_at          = NOW()
+         WHERE id = $1`,
+        [ticketId, ticketDeltaChange],
+      );
+      // Siblings may have quarantine_reason=NULL if a prior APPROVE un-quarantined them; a later
+      // reject must still pull them back out of the draw pool, so match on the anchor alone.
+      await client.query(
+        `UPDATE ticket
+         SET is_quarantined = TRUE, quarantine_reason = 'ocr_validation_failed', quarantined_at = NOW()
+         WHERE anchor_ticket_id = $1
+           AND (quarantine_reason = 'ocr_pending' OR is_quarantined = FALSE)`,
+        [ticketId],
+      );
+      await updateUserRiskScore(userId, userDelta, client, []);
+      await syncUserQuarantineState(userId, drawId, client);
     }
 
-    await pool.query(
-      `WITH approved AS (
-         SELECT business_id, receipt_identifier, id
-         FROM ticket
-         WHERE id = $1 AND receipt_identifier IS NOT NULL
-       )
-       UPDATE ticket t
-       SET is_quarantined    = TRUE,
-           quarantine_reason = 'superseded_by_admin_decision',
-           quarantined_at    = NOW()
-       FROM approved a
-       WHERE COALESCE(t.anchor_ticket_id, t.id) IN (
-               SELECT o.id FROM ticket o
-               WHERE o.business_id = a.business_id
-                 AND o.receipt_identifier = a.receipt_identifier
-                 AND o.id <> a.id
-                 AND (o.is_quarantined = FALSE OR o.quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review'))
-             )
-         AND t.id NOT IN (SELECT winner_ticket_id FROM draw WHERE winner_ticket_id IS NOT NULL)`,
-      [ticketId],
-    );
-
-    await pool.query(
-      `UPDATE ticket
-       SET image_validation_status = 'passed',
-           risk_score_delta        = risk_score_delta + $2,
-           is_quarantined          = FALSE,
-           quarantine_reason       = NULL,
-           quarantined_at          = NULL
-       WHERE id = $1`,
-      [ticketId, ticketDeltaChange],
-    );
-    await pool.query(
-      `UPDATE ticket
-       SET is_quarantined = FALSE, quarantine_reason = NULL, quarantined_at = NULL
-       WHERE anchor_ticket_id = $1
-         AND quarantine_reason IN ('ocr_pending', 'ocr_validation_failed', 'ocr_error_pending_review', 'contest_pending', 'contest_not_won')`,
-      [ticketId],
-    );
-    await updateUserRiskScore(userId, userDelta);
-    await syncUserQuarantineState(userId, drawId);
-  } else {
-    // Reverse the -3 reward if previously passed, then apply +2 penalty
-    const ticketDeltaChange = prevStatus === 'passed' ? 5 : 2;
-    const userDelta = prevStatus === 'passed' ? 5 : 2;
-
-    await pool.query(
-      `UPDATE ticket
-       SET image_validation_status = 'failed',
-           risk_score_delta        = risk_score_delta + $2,
-           is_quarantined          = TRUE,
-           quarantine_reason       = 'ocr_validation_failed',
-           quarantined_at          = NOW()
-       WHERE id = $1`,
-      [ticketId, ticketDeltaChange],
-    );
-    // Siblings may have quarantine_reason=NULL if a prior APPROVE un-quarantined them; a later
-    // reject must still pull them back out of the draw pool, so match on the anchor alone.
-    await pool.query(
-      `UPDATE ticket
-       SET is_quarantined = TRUE, quarantine_reason = 'ocr_validation_failed', quarantined_at = NOW()
-       WHERE anchor_ticket_id = $1
-         AND (quarantine_reason = 'ocr_pending' OR is_quarantined = FALSE)`,
-      [ticketId],
-    );
-    await updateUserRiskScore(userId, userDelta, undefined, []);
-    await syncUserQuarantineState(userId, drawId);
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
   }
 };
 

@@ -375,12 +375,15 @@ export const updateUserRiskScore = async (
 };
 
 /**
- * Check if a receipt identifier has already been used by another user for the same business.
+ * Check if a receipt identifier has already been used by another user for the same business
+ * IN THE SAME DRAW. Receipt numbers are unique per campaign, not across all time, so a merchant
+ * that recycles receipt numbers between draws does not false-flag honest customers.
  */
 export const checkDuplicateReceiptIdentifier = async (
   businessId: number,
   receiptIdentifier: string,
   submittingUserId: number,
+  drawId: number,
   client?: PoolClient,
 ): Promise<DuplicateCheckResult> => {
   const db = client ?? getPool();
@@ -390,8 +393,8 @@ export const checkDuplicateReceiptIdentifier = async (
        BOOL_OR(is_quarantined = FALSE)                                      AS has_active,
        BOOL_OR(is_quarantined = TRUE)                                       AS has_quarantined
      FROM ticket
-     WHERE business_id = $1 AND receipt_identifier = $2 AND activated_by_user_id != $3`,
-    [businessId, receiptIdentifier, submittingUserId],
+     WHERE business_id = $1 AND receipt_identifier = $2 AND activated_by_user_id != $3 AND draw_id = $4`,
+    [businessId, receiptIdentifier, submittingUserId, drawId],
   );
   const row = result.rows[0];
   return {
@@ -430,6 +433,7 @@ export const syncUserQuarantineState = async (userId: number, drawId: number, cl
              FROM ticket a
              JOIN ticket o
                ON o.business_id = a.business_id
+              AND o.draw_id = a.draw_id
               AND o.receipt_identifier = a.receipt_identifier
               AND o.id <> a.id
               AND (o.is_quarantined = FALSE OR o.quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review'))
