@@ -571,6 +571,7 @@ export const submitReceiptEntryService = async (
     };
     const riskEval = await evaluateUserRisk(userId, {
       businessId: business_id,
+      drawId,
       receiptIdentifier: input.receiptIdentifier,
       transactionAmount: input.transactionAmount,
       isDuplicateCrossUser: effectiveIsDuplicate,
@@ -604,23 +605,27 @@ export const submitReceiptEntryService = async (
       throw new Error('A receipt image is required to submit an entry.');
     }
 
-    // Past the gates — persist the risk delta, then sync quarantine.
-    // Sync here ensures existing tickets are quarantined immediately if this
-    // submission's delta pushes the user into HIGH risk, even if we throw below.
-    await updateUserRiskScore(userId, riskEval.delta, client, riskEval.flags);
-    await syncUserQuarantineState(userId, drawId, client);
-
-    // Hard block on sequential identifier guessing — elevated from advisory signal to immediate block.
+    // Hard block on sequential identifier guessing — checked BEFORE the transactional risk write
+    // below. This path REJECTS the submission (throws → the whole transaction rolls back), so the
+    // penalty must be persisted OUT OF BAND (pool, not the txn client) to survive the rollback and
+    // actually escalate the guesser toward the image-required / throttle gates; otherwise a
+    // rejected probe costs nothing and an attacker can enumerate receipt numbers indefinitely.
+    // It MUST run before the client-scoped write below: doing the transactional UPDATE "user"
+    // first takes a row lock held until rollback, and this pool UPDATE on the SAME row (a different
+    // connection) would then self-block against it — invisible to Postgres's deadlock detector
+    // (the txn session sits idle) — hanging until the 10s statement_timeout, at which point the
+    // penalty persists ZERO times and the user gets a raw PG error. Ordering it first avoids the lock.
     if (riskEval.flags.includes('sequential_guessing')) {
-      // This submission is rejected, so the transaction rolls back — including the client-scoped
-      // risk write just above. Persist the guesser's penalty OUT OF BAND (pool, not the txn
-      // client) so their score actually escalates toward the image-required / throttle gates.
-      // Otherwise a rejected probe costs nothing and an attacker can enumerate receipt numbers
-      // indefinitely. Applied once: the client write rolls back, this pool write commits.
       await updateUserRiskScore(userId, riskEval.delta, undefined, riskEval.flags);
       await syncUserQuarantineState(userId, drawId);
       throw new Error('Suspicious sequential receipt pattern detected. Please contact support if this is in error.');
     }
+
+    // Past the gates — persist the risk delta, then sync quarantine (transactional; commits with
+    // the submission). Sync here ensures existing tickets are quarantined immediately if this
+    // submission's delta pushes the user into HIGH risk.
+    await updateUserRiskScore(userId, riskEval.delta, client, riskEval.flags);
+    await syncUserQuarantineState(userId, drawId, client);
 
     // High-risk shadowban is decided by stored score, exactly as at insert prep below.
     const isHighRisk = riskEval.totalScore > RISK_THRESHOLDS.MEDIUM_MAX;

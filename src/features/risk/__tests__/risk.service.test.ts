@@ -1376,6 +1376,48 @@ describe('Threshold probing — amount swap on same receipt identifier', () => {
 
     expect(result.flags).not.toContain('threshold_probing');
   });
+
+  // D-2 regression: receipt numbers are unique per (business, draw) since 2026-07-25, so the
+  // probe signal's accepted-ticket count must be scoped to the current draw. Otherwise an honest
+  // customer whose merchant recycled a receipt number across campaigns (different amount) is
+  // wrongly flagged +4. The mock returns a fixed probe_count regardless of SQL, so we pin the
+  // query SHAPE: draw is passed as $5 and the ticket subquery filters on it.
+  test('scopes the probe ticket count to the current draw when drawId is provided (D-2)', async () => {
+    setupQueries([
+      { rows: [{ risk_score: 0, risk_last_flagged_at: null }] },
+      { rows: [cleanCteRow(0, 0, [], 30, { probe_count: 0 })] },
+    ]);
+
+    await evaluateUserRisk(801, {
+      businessId: 70,
+      drawId: 4242,
+      receiptIdentifier: 'PROBE-001',
+      transactionAmount: 50,
+      isDuplicateCrossUser: false,
+    });
+
+    // Merged signal query is the 2nd DB call (no decay at score 0).
+    const [sql, params] = mockQuery.mock.calls[1] as [string, unknown[]];
+    expect(sql).toMatch(/draw_id = \$5/);       // ticket subquery is draw-scoped
+    expect(params[4]).toBe(4242);                // current draw passed as $5
+  });
+
+  test('probe scope param is null when no drawId is supplied (isolated signal callers unaffected)', async () => {
+    setupQueries([
+      { rows: [{ risk_score: 0, risk_last_flagged_at: null }] },
+      { rows: [cleanCteRow(0, 0, [], 30, { probe_count: 0 })] },
+    ]);
+
+    await evaluateUserRisk(802, {
+      businessId: 70,
+      receiptIdentifier: 'PROBE-001',
+      transactionAmount: 50,
+    });
+
+    // $5 = null → the ($5 IS NULL OR draw_id = $5) guard disables the filter (old behavior).
+    const [, params] = mockQuery.mock.calls[1] as [string, unknown[]];
+    expect(params[4]).toBeNull();
+  });
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

@@ -18,6 +18,10 @@ const scoreToLevel = (score: number): RiskLevel => {
 
 export interface RiskContext {
   businessId: number;
+  /** Current draw. When provided, the threshold-probing signal is scoped to this draw so a
+   *  cross-draw resubmission of a recycled receipt number (allowed since per-draw uniqueness,
+   *  2026-07-25) does not falsely flag an honest customer. */
+  drawId?: number;
   receiptIdentifier: string;
   transactionAmount: number;
   /** Active (non-quarantined) cross-user duplicate — triggers scaled penalty. */
@@ -100,7 +104,7 @@ export const evaluateUserRisk = async (
   let delta = 0;
 
   if (context) {
-    const { businessId, receiptIdentifier, transactionAmount, isDuplicateCrossUser } = context;
+    const { businessId, drawId, receiptIdentifier, transactionAmount, isDuplicateCrossUser } = context;
 
     // Signal 1: cross-user duplicate — penalty scaled by submitter's current risk level
     if (isDuplicateCrossUser) {
@@ -177,10 +181,16 @@ export const evaluateUserRisk = async (
         probe AS (
           -- Same receipt submitted with a different amount: counts both accepted tickets
           -- AND below-threshold attempts that were rejected (and left no ticket).
+          -- The accepted-ticket count is scoped to the current draw ($5) when provided: receipt
+          -- numbers are unique per (business, draw) since 2026-07-25, so a legitimate cross-draw
+          -- resubmission of a recycled number with a different amount must NOT read as probing.
+          -- (receipt_threshold_attempt has no draw_id but self-purges after 7 days, so it is
+          -- naturally bounded to the current campaign window.)
           SELECT (
             (SELECT COUNT(*) FROM ticket
               WHERE activated_by_user_id = $1 AND business_id = $2
-                AND receipt_identifier = $3 AND transaction_amount != $4)
+                AND receipt_identifier = $3 AND transaction_amount != $4
+                AND ($5::int IS NULL OR draw_id = $5))
             + (SELECT COUNT(*) FROM receipt_threshold_attempt
               WHERE user_id = $1 AND business_id = $2
                 AND receipt_identifier = $3 AND attempted_amount != $4)
@@ -200,7 +210,7 @@ export const evaluateUserRisk = async (
         (SELECT ids          FROM seq24h)  AS seq24h_ids,
         (SELECT cnt          FROM probe)   AS probe_count,
         (SELECT avg_amount   FROM outlier) AS avg_amount`,
-      [userId, businessId, receiptIdentifier, transactionAmount],
+      [userId, businessId, receiptIdentifier, transactionAmount, drawId ?? null],
     );
 
     const sr = signalRes.rows[0];
