@@ -658,8 +658,6 @@ describe('duplicateDrawService — same-month collision guard', () => {
     expect(inserted).toBe(false);
   });
 });
-<<<<<<< HEAD
-=======
 
 // ─────────────────────────────────────────────
 // Prize reveal — teaser flag for upcoming campaigns
@@ -697,9 +695,6 @@ describe('openDrawService — opening reveals the prize permanently', () => {
     expect(openUpdate![0]).toMatch(/prize_revealed = TRUE/);
   });
 });
-<<<<<<< HEAD
->>>>>>> develop
-=======
 
 // ─────────────────────────────────────────────
 // adminImageDecisionService — admin approval outranks competing claims (audit P2-4)
@@ -753,4 +748,3 @@ describe('adminImageDecisionService — approval supersedes competing claims (P2
     expect(calls).toContain('ROLLBACK');
   });
 });
->>>>>>> develop

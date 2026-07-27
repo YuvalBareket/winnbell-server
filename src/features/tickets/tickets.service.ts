@@ -367,7 +367,7 @@ export const submitReceiptEntryService = async (
           LIMIT 1
         ),
         od AS (
-          SELECT id AS draw_id, COALESCE(opened_at, created_at) AS draw_opened_at
+          SELECT id AS draw_id, start_date AS draw_start_date
           FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1
         )
       SELECT
@@ -380,7 +380,7 @@ export const submitReceiptEntryService = async (
         (SELECT business_name                    FROM biz)                   AS business_name,
         (SELECT min_transaction_amount           FROM biz)                   AS min_transaction_amount,
         (SELECT draw_id                          FROM od)                    AS draw_id,
-        (SELECT draw_opened_at                   FROM od)                    AS draw_opened_at,
+        (SELECT draw_start_date                  FROM od)                    AS draw_start_date,
         (SELECT EXISTS(SELECT 1 FROM platform_settings WHERE id = 1))        AS settings_exists,
         (SELECT global_entry_cap FROM platform_settings WHERE id = 1)        AS global_entry_cap,
         (SELECT s.entries_per_location FROM subscription s WHERE s.business_id = (SELECT business_id FROM biz)) AS entries_per_location,
@@ -434,7 +434,7 @@ export const submitReceiptEntryService = async (
       ? parseFloat(pf.min_transaction_amount)
       : null;
     drawId = pf.draw_id;
-    const draw_opened_at: Date = pf.draw_opened_at;
+    const draw_start_date: Date = pf.draw_start_date;
     // Use subscription's per-location cap; fall back to global cap; fall back to 500 if no settings row
     const entry_cap: number | null = pf.entries_per_location != null
       ? Number(pf.entries_per_location)
@@ -502,7 +502,10 @@ export const submitReceiptEntryService = async (
     // Transaction date validation
     if (input.transactionDate) {
       const txDate = new Date(input.transactionDate);
-      const drawOpenedAt = new Date(draw_opened_at);
+      // The campaign PERIOD is defined by the draw's start_date (admin-selectable, defaults to
+      // the 1st of the draw month) - NOT opened_at, which is just when the admin clicked "open".
+      // Anchoring on opened_at wrongly rejects in-period receipts whenever a draw is opened late.
+      const campaignStart = new Date(draw_start_date);
       const now = new Date();
       const sevenDaysAgo = new Date(now);
       sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
@@ -513,7 +516,7 @@ export const submitReceiptEntryService = async (
       if (txDate < sevenDaysAgo) {
         throw new Error('Receipt is older than 7 days and cannot be accepted.');
       }
-      if (txDate < drawOpenedAt) {
+      if (txDate < campaignStart) {
         throw new Error('Transaction date must fall within the current campaign period.');
       }
     }
