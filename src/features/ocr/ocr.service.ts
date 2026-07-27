@@ -422,7 +422,10 @@ export const recoverStaleOcrJobs = async (): Promise<void> => {
       t.receipt_image_url,
       t.receipt_identifier,
       t.transaction_amount,
-      t.transaction_date,
+      -- Format as text: pg returns a DATE column as a JS Date, but the matcher (and the live
+      -- submit path) expect a 'YYYY-MM-DD' string. to_char also avoids any TZ-shift a JS Date
+      -- conversion could introduce. Without this the boot/6h recovery crashed in matchDate.
+      to_char(t.transaction_date, 'YYYY-MM-DD') AS transaction_date,
       b.name AS business_name
     FROM ticket t
     LEFT JOIN business b ON b.id = t.business_id
