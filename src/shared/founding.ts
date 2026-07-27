@@ -16,9 +16,7 @@ export const FOUNDING_RENEWAL_TERM_MONTHS = 12; // the one-time renewal term
 // and all client copy follow (served via the founding-availability endpoint). Members
 // snapshot what they paid (founding_member.amount_paid + subscription.fee_at_entry as
 // the monthly equivalent), so a change never affects existing members or their renewal.
-// TEMPORARY TEST PRICE: $0.17/month -> $0.51 one-time per location (3-month term).
-// Revert to 100 before launch.
-export const FOUNDING_MONTHLY_PRICE_PER_LOCATION = 0.17;
+export const FOUNDING_MONTHLY_PRICE_PER_LOCATION = 100;
 
 // Derived one-time total per location for the initial term ($300 at 100 x 3).
 export const FOUNDING_PRICE_PER_LOCATION = FOUNDING_MONTHLY_PRICE_PER_LOCATION * FOUNDING_TERM_MONTHS;
