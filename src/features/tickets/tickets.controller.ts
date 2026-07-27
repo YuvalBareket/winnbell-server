@@ -189,9 +189,9 @@ export const activatePromotional = async (req: AuthRequest, res: Response) => {
   }
 };
 
-// STAGING DEMO ONLY (temporary). Lets the demo account wipe its own activity between
-// demos. The service double-gates on isDemoUser, so this is a no-op 403 for anyone else
-// and whenever DEMO_USER_ENABLED is unset (production). Remove with the demo scaffolding.
+// STAGING DEMO ONLY (temporary). Lets any staging account wipe its own activity between
+// demos. The service gates on DEMO_USER_ENABLED, so this is a no-op 403 whenever that flag
+// is unset (production, dev). Remove with the demo scaffolding.
 export const resetDemo = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;

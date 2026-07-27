@@ -23,7 +23,7 @@ import {
 } from '../risk/risk.service.js';
 import { RISK_THRESHOLDS } from '../risk/risk.types.js';
 import { validateReceiptAsync } from '../ocr/ocr.service.js';
-import { isDemoUser } from '../../shared/demo.js'; // TEMPORARY: staging demo reset only
+import { isDemoResetEnabled } from '../../shared/demo.js'; // TEMPORARY: staging demo reset only
 
 export const getUserTicketsService = async (userId: number, drawId: number) => {
   const pool = getPool();
@@ -1024,15 +1024,14 @@ const seedDemoEntries = async (client: PoolClient, userId: number): Promise<numb
 // Wipes the demo account's activity so it can present a fresh flow to the next business:
 // deletes its entries, its weekly free-entry record and any threshold-probe rows, and zeroes
 // its fraud-risk state, then seeds a few fresh sample entries. Identity, email/phone verification
-// and profile are all preserved, so the account never has to re-verify. Double-gated by isDemoUser
-// (DEMO_USER_ENABLED env + exact demo email) so it is completely inert in production and for every
-// other account. Remove together with the rest of the demo scaffolding after the demo (see demo.ts).
+// and profile are all preserved, so the account never has to re-verify. Gated by isDemoResetEnabled
+// (DEMO_USER_ENABLED env, staging-only) so ANY staging account may reset its OWN activity, while it
+// stays completely inert in production. Remove together with the rest of the demo scaffolding (demo.ts).
 export const resetDemoUserService = async (
   userId: number,
 ): Promise<{ ticketsDeleted: number; entriesSeeded: number }> => {
   const pool = getPool();
-  const emailRes = await pool.query('SELECT email FROM "user" WHERE id = $1', [userId]);
-  if (!isDemoUser(emailRes.rows[0]?.email)) {
+  if (!isDemoResetEnabled()) {
     throw new Error('DEMO_RESET_NOT_PERMITTED');
   }
 

@@ -1,13 +1,8 @@
-// ─── Staging-only demo user ───────────────────────────────────────────────────
-// A single account used to show potential businesses the flow in STAGING without
-// hitting the anti-fraud limits. It is double-gated so it can NEVER affect production:
-//   1) the DEMO_USER_ENABLED env var must be 'true' (set ONLY on the staging service), and
-//   2) the email must match this exact demo alias.
-// Every consumer applies it as `if (!isDemoUser(email)) <normal limit>`, so when the flag is
-// off (production, dev) the behaviour is byte-for-byte identical to today for every user.
-export const DEMO_USER_EMAIL = 'idobareker41+400@gmail.com';
-
-export const isDemoUser = (email?: string | null): boolean =>
-  process.env.DEMO_USER_ENABLED === 'true'
-  && !!email
-  && email.trim().toLowerCase() === DEMO_USER_EMAIL;
+// ─── Staging-only demo reset ──────────────────────────────────────────────────
+// Staging-wide gate for the self-service "Reset demo data" control: ANY account on staging
+// may wipe and reseed its OWN activity (mirrors the client, which shows the button whenever
+// VITE_APP_ENV !== 'production'). Single-gated by DEMO_USER_ENABLED, which is only ever set on
+// the staging service, so this is byte-for-byte inert in production and dev. Remove together
+// with the rest of the demo scaffolding after the demo.
+export const isDemoResetEnabled = (): boolean =>
+  process.env.DEMO_USER_ENABLED === 'true';
