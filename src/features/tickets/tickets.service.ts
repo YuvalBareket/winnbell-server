@@ -690,6 +690,14 @@ export const submitReceiptEntryService = async (
     // Entry cap enforcement — quarantined tickets do not consume the cap. A contest is a
     // legitimate entrant (effectiveIsDuplicate=false), so it DOES respect the cap.
     if (entry_cap !== null && countsAgainstCap(riskEval, effectiveIsDuplicate)) {
+      // Serialize the count->insert for THIS (location, draw) so two DIFFERENT users submitting
+      // at once can't both read the same under-cap count and both insert past the paid cap. The
+      // per-user locks (3/10/4) above don't help across different users. Lock family 7 is unused
+      // elsewhere; acquired after 3/10/4 (consistent order everywhere => no deadlock), held to COMMIT.
+      await client.query(
+        `SELECT pg_advisory_xact_lock(7, hashtext('loccap:' || $1::text || ':' || $2::text))`,
+        [input.locationId, drawId],
+      );
       const bizCapCheck = await client.query(
         `SELECT COUNT(*) AS count FROM ticket
          WHERE location_id = $1 AND draw_id = $2 AND is_quarantined = FALSE`,

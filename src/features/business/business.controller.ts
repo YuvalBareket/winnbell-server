@@ -24,7 +24,7 @@ import {
 } from './business.service.js';
 import { getPresignedUploadUrl } from '../../shared/s3.js';
 import { getPool } from '../../shared/db/db.js';
-import { syncSubscriptionQuantity } from '../stripe/stripe.service.js';
+import { syncSubscriptionQuantity, withBusinessBillingLock } from '../stripe/stripe.service.js';
 import { validateLengths } from '../../shared/validation.js';
 
 // Mirrors the business.sector CHECK constraint in schema.sql. 'Free' is excluded from
@@ -405,6 +405,9 @@ export const addLocation = async (req: AuthRequest, res: Response): Promise<void
   if (coordErr) { res.status(400).json({ message: coordErr }); return; }
 
   let locationId: number | null = null;
+  // Serialize all billing mutations for this business so a concurrent add/remove/plan-change
+  // cannot race the count-read -> Stripe-sync -> DB-insert and leave Stripe and the DB mismatched.
+  await withBusinessBillingLock(userId, async () => {
   try {
     const pool = getPool();
 
@@ -486,12 +489,16 @@ export const addLocation = async (req: AuthRequest, res: Response): Promise<void
     }
     res.status(500).json({ message: 'Failed to add location' });
   }
+  });
 };
 
 export const deleteLocation = async (req: AuthRequest, res: Response): Promise<void> => {
   const userId = req.user!.id;
   const locId = Number(req.params.locationId);
 
+  // Serialize all billing mutations for this business (see addLocation) - concurrent
+  // add/remove/plan-change must not race the count-read -> Stripe-sync -> DB-write.
+  await withBusinessBillingLock(userId, async () => {
   try {
     // Verify ownership; also fetch staging state — a location can be live, staged to
     // activate at the next open, or already scheduled for deactivation.
@@ -606,6 +613,7 @@ export const deleteLocation = async (req: AuthRequest, res: Response): Promise<v
     }
     res.status(500).json({ message: 'Failed to delete location' });
   }
+  });
 };
 
 export const removeManager = async (req: AuthRequest, res: Response): Promise<void> => {

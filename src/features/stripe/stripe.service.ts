@@ -228,7 +228,14 @@ async function refundUpcomingCampaignDelta(subscriptionId: string, amountDollars
     const available = charge.amount - charge.amount_refunded;
     if (available <= 0) continue;
     const refundCents = Math.min(available, remainingCents);
-    await stripe.refunds.create({ payment_intent: paymentIntentId, amount: refundCents, metadata: { reason } });
+    // Deterministic idempotency key: a retry / double-submit of the same location-removal or
+    // plan-downgrade refunds the same amount against the same PaymentIntent, so Stripe dedupes
+    // it instead of issuing a second refund (real money loss). Keyed on (PI, amount) so distinct
+    // legitimate refunds still go through.
+    await stripe.refunds.create(
+      { payment_intent: paymentIntentId, amount: refundCents, metadata: { reason } },
+      { idempotencyKey: `winnbell_refund_${paymentIntentId}_${refundCents}` },
+    );
     remainingCents -= refundCents;
   }
   if (remainingCents > 0 && !inaccessiblePaidInvoice) {
@@ -1717,6 +1724,28 @@ async function activateBusinessSubscription(
 // in draws they hadn't paid for.
 
 // ─── Sync Subscription Quantity ───────────────────────────────────────────────
+// ─── Per-business billing lock ────────────────────────────────────────────────
+// Serializes ALL subscription-billing mutations for one business (userId is 1:1 with a
+// business) so concurrent location adds/removes and plan changes cannot race the
+// read-baseline -> Stripe-update -> DB-write sequence and leave Stripe and the DB (or two
+// Stripe fields) mismatched. SESSION-level advisory lock on a dedicated connection, held
+// across the external Stripe calls (which cannot sit inside a DB transaction). Lock family 8
+// is unused elsewhere (2/3/4/10 are the per-user/receipt xact locks). MUST NOT nest: only the
+// outermost mutators (addLocation, deleteLocation, updateSubscriptionPlan) take it;
+// syncSubscriptionQuantity is always called from within one of those and never re-locks.
+export const withBusinessBillingLock = async <T>(userId: number, fn: () => Promise<T>): Promise<T> => {
+  const client = await getPool().connect();
+  try {
+    await client.query('SELECT pg_advisory_lock(8, hashtext($1))', [`bizbill:${userId}`]);
+    return await fn();
+  } finally {
+    try {
+      await client.query('SELECT pg_advisory_unlock(8, hashtext($1))', [`bizbill:${userId}`]);
+    } catch { /* connection dead; the advisory lock is freed automatically on release */ }
+    client.release();
+  }
+};
+
 // Called after scheduling a location add/remove. `newNextCampaignCount` is the location
 // count the NEXT campaign will run with (active minus scheduled removals plus scheduled
 // adds). Money model: no prorations ever. Stripe items update immediately so the next
@@ -1846,7 +1875,8 @@ export const syncSubscriptionQuantity = async (userId: number, newNextCampaignCo
 
 // ─── Update Subscription Plan ─────────────────────────────────────────────────
 
-export const updateSubscriptionPlan = async (userId: number, newEntriesPerLocation: number): Promise<void> => {
+export const updateSubscriptionPlan = async (userId: number, newEntriesPerLocation: number): Promise<void> =>
+  withBusinessBillingLock(userId, async () => {
   const pool = getPool();
 
   // Validate tier exists
@@ -1970,7 +2000,7 @@ export const updateSubscriptionPlan = async (userId: number, newEntriesPerLocati
       console.error('[Stripe] change-log write failed (non-fatal):', err instanceof Error ? err.message : err);
     }
   }
-};
+  });
 
 // ─── Get Subscription Invoices ────────────────────────────────────────────────
 
