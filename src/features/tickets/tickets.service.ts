@@ -966,13 +966,67 @@ export const activatePromotionalEntry = async (
 };
 
 // ─── Staging demo reset (TEMPORARY) ───────────────────────────────────────────
+// How many fresh sample entries to seed on each reset so the demo starts with visible activity.
+const DEMO_SEED_ENTRIES = 3;
+
+// Seed a few REAL receipt entries for the demo account at random participating locations of the
+// open campaign, so a freshly-reset account already shows entries. Same clean row shape the normal
+// receipt flow produces (Activated, unquarantined, no OCR pending), just inserted directly without
+// the anti-fraud gates. Runs inside the reset transaction. Returns how many were created.
+const seedDemoEntries = async (client: PoolClient, userId: number): Promise<number> => {
+  const drawRes = await client.query(
+    `SELECT id FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1`,
+  );
+  const drawId: number | undefined = drawRes.rows[0]?.id;
+  if (!drawId) return 0; // no open campaign — nothing to enter
+
+  // Up to N distinct participating businesses (one random active location each), so the seeded
+  // entries look like they came from different places. Mirrors the participation rules the real
+  // receipt preflight uses (active location, business is in the open draw, not participation-paused).
+  const locRes = await client.query(
+    `SELECT location_id, business_id FROM (
+       SELECT DISTINCT ON (b.id) bl.id AS location_id, b.id AS business_id
+       FROM business_location bl
+       JOIN business b ON bl.business_id = b.id
+       WHERE bl.is_active = true
+         AND EXISTS (SELECT 1 FROM draw_entry de WHERE de.business_id = b.id AND de.draw_id = $1)
+         AND NOT EXISTS (SELECT 1 FROM subscription sp WHERE sp.business_id = b.id AND sp.participation_paused = TRUE)
+       ORDER BY b.id, random()
+     ) one_per_business
+     ORDER BY random()
+     LIMIT $2`,
+    [drawId, DEMO_SEED_ENTRIES],
+  );
+
+  let seeded = 0;
+  for (const loc of locRes.rows) {
+    const code = await generateGlobalUniqueCode(client);
+    // Random distinct receipt id (canonical uppercase alnum) so the per-draw dedup index never trips.
+    const identifier = `DEMO${crypto.randomInt(100000, 1000000)}`;
+    const amount = crypto.randomInt(1500, 9900) / 100; // $15.00 - $99.00
+    await client.query(
+      `INSERT INTO ticket
+         (code, status, entry_source, business_id, location_id, draw_id,
+          activated_by_user_id, activated_at, receipt_identifier, transaction_amount,
+          transaction_date, risk_score, risk_score_delta, is_quarantined, image_validation_status)
+       VALUES ($1, 'Activated', 'receipt', $2, $3, $4, $5, NOW(), $6, $7,
+               CURRENT_DATE - (floor(random() * 6))::int, 0, 0, FALSE, 'not_required')`,
+      [code, loc.business_id, loc.location_id, drawId, userId, identifier, amount],
+    );
+    seeded++;
+  }
+  return seeded;
+};
+
 // Wipes the demo account's activity so it can present a fresh flow to the next business:
 // deletes its entries, its weekly free-entry record and any threshold-probe rows, and zeroes
-// its fraud-risk state. Identity, email/phone verification and profile are all preserved, so
-// the account never has to re-verify. Double-gated by isDemoUser (DEMO_USER_ENABLED env +
-// exact demo email) so it is completely inert in production and for every other account.
-// Remove together with the rest of the demo scaffolding after the demo (see demo.ts).
-export const resetDemoUserService = async (userId: number): Promise<{ ticketsDeleted: number }> => {
+// its fraud-risk state, then seeds a few fresh sample entries. Identity, email/phone verification
+// and profile are all preserved, so the account never has to re-verify. Double-gated by isDemoUser
+// (DEMO_USER_ENABLED env + exact demo email) so it is completely inert in production and for every
+// other account. Remove together with the rest of the demo scaffolding after the demo (see demo.ts).
+export const resetDemoUserService = async (
+  userId: number,
+): Promise<{ ticketsDeleted: number; entriesSeeded: number }> => {
   const pool = getPool();
   const emailRes = await pool.query('SELECT email FROM "user" WHERE id = $1', [userId]);
   if (!isDemoUser(emailRes.rows[0]?.email)) {
@@ -997,8 +1051,9 @@ export const resetDemoUserService = async (userId: number): Promise<{ ticketsDel
        WHERE id = $1`,
       [userId],
     );
+    const entriesSeeded = await seedDemoEntries(client, userId);
     await client.query('COMMIT');
-    return { ticketsDeleted: del.rowCount ?? 0 };
+    return { ticketsDeleted: del.rowCount ?? 0, entriesSeeded };
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
