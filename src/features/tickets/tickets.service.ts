@@ -23,6 +23,7 @@ import {
 } from '../risk/risk.service.js';
 import { RISK_THRESHOLDS } from '../risk/risk.types.js';
 import { validateReceiptAsync } from '../ocr/ocr.service.js';
+import { isDemoUser } from '../../shared/demo.js'; // TEMPORARY: staging demo reset only
 
 export const getUserTicketsService = async (userId: number, drawId: number) => {
   const pool = getPool();
@@ -956,6 +957,48 @@ export const activatePromotionalEntry = async (
     await client.query('COMMIT');
     // Promo entries have no business/location — they affect no public cache.
     return { entryId: result.rows[0].id, drawName: draw.name, ticketId: ticketResult.rows[0].id, code: ticketCode };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+};
+
+// ─── Staging demo reset (TEMPORARY) ───────────────────────────────────────────
+// Wipes the demo account's activity so it can present a fresh flow to the next business:
+// deletes its entries, its weekly free-entry record and any threshold-probe rows, and zeroes
+// its fraud-risk state. Identity, email/phone verification and profile are all preserved, so
+// the account never has to re-verify. Double-gated by isDemoUser (DEMO_USER_ENABLED env +
+// exact demo email) so it is completely inert in production and for every other account.
+// Remove together with the rest of the demo scaffolding after the demo (see demo.ts).
+export const resetDemoUserService = async (userId: number): Promise<{ ticketsDeleted: number }> => {
+  const pool = getPool();
+  const emailRes = await pool.query('SELECT email FROM "user" WHERE id = $1', [userId]);
+  if (!isDemoUser(emailRes.rows[0]?.email)) {
+    throw new Error('DEMO_RESET_NOT_PERMITTED');
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // Entries (anchor + siblings all carry activated_by_user_id); FKs to ticket.id are SET NULL /
+    // CASCADE, so this also clears any winner pointer or audit rows referencing them.
+    const del = await client.query('DELETE FROM ticket WHERE activated_by_user_id = $1', [userId]);
+    await client.query('DELETE FROM free_ticket_usage WHERE user_id = $1', [userId]);
+    await client.query('DELETE FROM receipt_threshold_attempt WHERE user_id = $1', [userId]);
+    await client.query(
+      `UPDATE "user"
+         SET risk_score = 0,
+             risk_clean_entries = 0,
+             risk_last_flagged_at = NULL,
+             risk_last_decayed_at = NULL,
+             risk_flags = NULL
+       WHERE id = $1`,
+      [userId],
+    );
+    await client.query('COMMIT');
+    return { ticketsDeleted: del.rowCount ?? 0 };
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;
