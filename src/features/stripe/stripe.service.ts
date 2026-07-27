@@ -2091,17 +2091,11 @@ export const getSubscriptionInvoices = async (userId: number): Promise<Subscript
     hosted_invoice_url: null,
   }));
 
-  // One charges.list serves two purposes: receipt links for the history rows here, and
-  // the refund entries below. Charges carry receipt_url directly, so no per-invoice calls.
+  // charges.list drives the refund entries below (each charge carries its refunds directly).
   let customerCharges: Stripe.Charge[] = [];
   if (stripeCustomerId) {
     const chargeList = await stripe.charges.list({ customer: stripeCustomerId, limit: 24, expand: ['data.refunds'] });
     customerCharges = chargeList.data;
-  }
-  const receiptUrlByPaymentIntent = new Map<string, string>();
-  for (const charge of customerCharges) {
-    const chargePi = typeof charge.payment_intent === 'string' ? charge.payment_intent : charge.payment_intent?.id;
-    if (chargePi && charge.receipt_url) receiptUrlByPaymentIntent.set(chargePi, charge.receipt_url);
   }
 
   let stripeInvoices: SubscriptionInvoice[] = [];
@@ -2109,8 +2103,6 @@ export const getSubscriptionInvoices = async (userId: number): Promise<Subscript
     const invoiceList = await stripe.invoices.list({
       customer: stripeCustomerId,
       limit: 24,
-      // payments expanded so invoicePaymentIntentId can resolve the PI under the Basil API
-      // shape - needed to link each paid invoice to its charge's receipt page.
       expand: ['data.lines', 'data.payments'],
     });
     stripeInvoices = invoiceList.data
@@ -2120,11 +2112,6 @@ export const getSubscriptionInvoices = async (userId: number): Promise<Subscript
       // business. Zero-total invoices WITH a description (change notes) are kept.
       .filter((invoice) => !(invoice.amount_due === 0 && invoice.amount_paid === 0 && !invoice.description))
       .map((invoice): SubscriptionInvoice => {
-        // Link the charge's receipt page (same clean look as the founding receipt) so every
-        // history row opens the same document style; the hosted invoice page is the fallback
-        // for rows whose charge is not in the recent charge list (or unpaid invoices).
-        const invoicePi = invoicePaymentIntentId(invoice);
-        const receiptUrl = invoicePi ? receiptUrlByPaymentIntent.get(invoicePi) : undefined;
         return {
           id: invoice.id,
           date: invoice.created,
@@ -2140,7 +2127,10 @@ export const getSubscriptionInvoices = async (userId: number): Promise<Subscript
             period_end: line.period?.end,
           })),
           invoice_pdf: invoice.invoice_pdf ?? null,
-          hosted_invoice_url: receiptUrl ?? invoice.hosted_invoice_url ?? null,
+          // The clean hosted invoice page (invoice.stripe.com/i/...) - a single "Paid" invoice view.
+          // NOT the charge receipt_url: for a subscription (invoice-backed) charge that opens the
+          // /receipts/invoices/ page with a combined invoice + receipt ("two block") layout.
+          hosted_invoice_url: invoice.hosted_invoice_url ?? null,
         };
       });
   }
@@ -2173,8 +2163,10 @@ export const getSubscriptionInvoices = async (userId: number): Promise<Subscript
           // description verbatim instead of synthesizing a per-location monthly breakdown.
           description: [{ description: `Refund: ${reason}`, quantity: 1, amount: -amt, period_start: refund.created, period_end: refund.created }],
           invoice_pdf: null,
-          // Stripe creates no document for a refund; the ORIGINAL charge's receipt page
-          // is updated with the refund (amount + date), so that is the linked proof.
+          // A refund is a reversal on a charge, not an invoice of its own. The charge's receipt page
+          // is the one Stripe document that actually shows the refund (amount refunded + date); an
+          // invoice's hosted page shows the ORIGINAL pre-refund total (misleading for a partial
+          // refund). So link the charge receipt here.
           hosted_invoice_url: charge.receipt_url ?? null,
         });
       }
