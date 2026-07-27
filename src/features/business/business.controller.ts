@@ -545,30 +545,47 @@ export const deleteLocation = async (req: AuthRequest, res: Response): Promise<v
     // the charged window the not-yet-started campaign's difference is refunded in full.
     await syncSubscriptionQuantity(userId, newCount, 'location_removed');
 
-    if (loc.activate_at_open) {
-      // Staged add that never went live — just discard it.
-      await pool.query(`DELETE FROM business_location WHERE id = $1`, [locId]);
-      res.status(200).json({ success: true, scheduledForNextCampaign: false });
-      return;
-    }
+    // Billing is now reduced in Stripe. Mirror addLocation's saga: if any DB write below fails,
+    // the location would remain active in the DB while Stripe bills for one fewer (under-billing),
+    // so compensate by restoring billing to the previous count before surfacing the error.
+    try {
+      if (loc.activate_at_open) {
+        // Staged add that never went live — just discard it.
+        await pool.query(`DELETE FROM business_location WHERE id = $1`, [locId]);
+        res.status(200).json({ success: true, scheduledForNextCampaign: false });
+        return;
+      }
 
-    // Live location: while the business participates in the Open campaign it keeps
-    // serving until the campaign ends (it was paid for), then stops at the boundary.
-    // Outside a campaign, removal is immediate.
-    const participating = await pool.query(`
-      SELECT 1 FROM draw_entry de
-      JOIN draw d ON d.id = de.draw_id
-      JOIN business b ON b.id = de.business_id
-      WHERE b.user_id = $1 AND d.status = 'Open'
-      LIMIT 1
-    `, [userId]);
+      // Live location: while the business participates in the Open campaign it keeps
+      // serving until the campaign ends (it was paid for), then stops at the boundary.
+      // Outside a campaign, removal is immediate.
+      const participating = await pool.query(`
+        SELECT 1 FROM draw_entry de
+        JOIN draw d ON d.id = de.draw_id
+        JOIN business b ON b.id = de.business_id
+        WHERE b.user_id = $1 AND d.status = 'Open'
+        LIMIT 1
+      `, [userId]);
 
-    if (participating.rows.length > 0) {
-      await scheduleLocationDeactivation(locId, userId);
-      res.status(200).json({ success: true, scheduledForNextCampaign: true });
-    } else {
-      await deleteBusinessLocation(locId, userId);
-      res.status(200).json({ success: true, scheduledForNextCampaign: false });
+      if (participating.rows.length > 0) {
+        await scheduleLocationDeactivation(locId, userId);
+        res.status(200).json({ success: true, scheduledForNextCampaign: true });
+      } else {
+        await deleteBusinessLocation(locId, userId);
+        res.status(200).json({ success: true, scheduledForNextCampaign: false });
+      }
+    } catch (dbErr: unknown) {
+      // Compensate: restore billing to the previous count (re-charges the refunded difference).
+      try {
+        await syncSubscriptionQuantity(userId, currentCount, 'location_added');
+      } catch (revertErr: unknown) {
+        console.error(
+          `[Business] CRITICAL: location removal DB write failed AND the billing revert failed for user ${userId} - ` +
+          `Stripe may bill ${newCount} locations while the DB still has ${currentCount} active. Reconcile manually.`,
+          revertErr instanceof Error ? revertErr.message : revertErr,
+        );
+      }
+      throw dbErr;
     }
   } catch (error: unknown) {
     if (error instanceof Error && error.message === 'UNAUTHORIZED_OR_INVALID_LOCATION') {
