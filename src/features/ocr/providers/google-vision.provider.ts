@@ -1,5 +1,6 @@
 import type { OcrProvider, OcrExpected, OcrValidationResult } from '../ocr.types.js';
 import { matchAmount, matchDate, matchBusinessName, isReceiptText, scoreConfidence } from './ocr-matchers.js';
+import { normalizeReceiptIdentifier, alnumOnly, extractDocumentTokens } from '../receiptIdentity.js';
 
 export class GoogleVisionProvider implements OcrProvider {
   async validate(imageUrl: string, expected: OcrExpected): Promise<OcrValidationResult> {
@@ -65,19 +66,24 @@ export class GoogleVisionProvider implements OcrProvider {
     const rawText: string = annotation?.fullTextAnnotation?.text ?? '';
     const normalizedText = rawText.toUpperCase().replace(/\s+/g, ' ');
 
-    const identifierFound = normalizedText.includes(expected.identifier.toUpperCase());
+    // Match the identifier on the fully alnum-only projection so a normalized id ("13663859")
+    // is found even when the receipt printed it as "1366-3859" / "1366 3859". Guard the empty
+    // case: "".includes("") is true, so an empty normalized id must never count as found.
+    const normalizedId = normalizeReceiptIdentifier(expected.identifier);
+    const identifierFound = normalizedId.length > 0 && alnumOnly(rawText).includes(normalizedId);
     const amountMatches = matchAmount(normalizedText, expected.amount);
     const dateMatches = expected.date ? matchDate(normalizedText, expected.date) : null;
     const isReceipt = isReceiptText(normalizedText);
     const businessNameFound = expected.businessName ? matchBusinessName(normalizedText, expected.businessName) : null;
     const confidence = scoreConfidence(identifierFound, amountMatches, dateMatches);
+    const documentTokens = extractDocumentTokens(rawText);
 
     // Raw receipt text contains PII (names, card last-4, addresses) — never log it in production.
     if (process.env.NODE_ENV !== 'production') {
       console.log('[OCR] Google Vision raw text:', JSON.stringify(rawText));
     }
-    console.log('[OCR] Result:', JSON.stringify({ isReceipt, identifierFound, amountMatches, dateMatches, businessNameFound, confidence }));
+    console.log('[OCR] Result:', JSON.stringify({ isReceipt, identifierFound, amountMatches, dateMatches, businessNameFound, confidence, tokenCount: documentTokens.length }));
 
-    return { isReceipt, identifierFound, amountMatches, dateMatches, businessNameFound, confidence, rawText };
+    return { isReceipt, identifierFound, amountMatches, dateMatches, businessNameFound, confidence, rawText, documentTokens };
   }
 }

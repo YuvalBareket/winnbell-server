@@ -219,7 +219,7 @@ export const openDraw = async (req: Request, res: Response) => {
     return;
   }
   try {
-    await openDrawService(drawId);
+    await openDrawService(drawId, req.user!.id);
     res.status(200).json({ message: 'Campaign opened successfully' });
   } catch (error) {
     // Surface the actionable service errors instead of a blind 500 - the admin needs to
@@ -238,7 +238,7 @@ export const openDraw = async (req: Request, res: Response) => {
 export const closeDraw = async (req: Request, res: Response) => {
   const drawId = parseInt(req.params.drawId as string, 10);
   try {
-    await closeDrawService(drawId);
+    await closeDrawService(drawId, req.user!.id);
     res.status(200).json({ message: 'Campaign closed successfully' });
   } catch (error) {
     if (error instanceof Error && error.message === 'NO_UPCOMING_DRAW') {
@@ -383,7 +383,7 @@ export const pickWinner = async (req: Request, res: Response) => {
   const applyPenalty = req.body?.applyPenalty === true;
   const reason = typeof req.body?.reason === 'string' ? req.body.reason : undefined;
   try {
-    const winner = await pickDrawWinnerService(drawId, applyPenalty, reason);
+    const winner = await pickDrawWinnerService(drawId, applyPenalty, reason, req.user!.id);
     res.status(200).json(winner);
   } catch (error) {
     const message = error instanceof Error && error.message ? error.message : 'Failed to pick winner';
@@ -398,7 +398,7 @@ export const confirmWinner = async (req: Request, res: Response): Promise<void> 
     return;
   }
   try {
-    const winner = await confirmWinnerService(drawId);
+    const winner = await confirmWinnerService(drawId, req.user!.id);
     res.status(200).json(winner);
   } catch (error: unknown) {
     console.error('[admin.confirmWinner]', error);
@@ -417,7 +417,7 @@ export const reopenDraw = async (req: Request, res: Response) => {
     return;
   }
   try {
-    await reopenDrawService(drawId);
+    await reopenDrawService(drawId, req.user!.id);
     res.status(200).json({ message: 'Campaign reopened successfully' });
   } catch (error) {
     if (error instanceof Error && error.message === 'NEXT_DRAW_HAS_ACTIVITY') {

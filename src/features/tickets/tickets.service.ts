@@ -23,6 +23,7 @@ import {
 } from '../risk/risk.service.js';
 import { RISK_THRESHOLDS } from '../risk/risk.types.js';
 import { validateReceiptAsync } from '../ocr/ocr.service.js';
+import { isDemoUser } from '../../shared/demo.js'; // TEMPORARY: staging demo reset only
 
 export const getUserTicketsService = async (userId: number, drawId: number) => {
   const pool = getPool();
@@ -357,6 +358,12 @@ export const submitReceiptEntryService = async (
               JOIN draw d ON d.id = de.draw_id
               WHERE de.business_id = b.id AND d.status = 'Open'
             )
+            -- Voluntary opt-out (founding cancel): no NEW entries at a paused business,
+            -- even though its draw_entry (and already-earned customer entries) remain.
+            AND NOT EXISTS (
+              SELECT 1 FROM subscription sp
+              WHERE sp.business_id = b.id AND sp.participation_paused = TRUE
+            )
           LIMIT 1
         ),
         od AS (
@@ -453,8 +460,8 @@ export const submitReceiptEntryService = async (
       const probeCheck = await pool.query(
         `SELECT COUNT(*) AS count FROM ticket
          WHERE business_id = $1 AND receipt_identifier = $2
-           AND transaction_amount != $3`,
-        [business_id, input.receiptIdentifier, input.transactionAmount],
+           AND transaction_amount != $3 AND draw_id = $4`,
+        [business_id, input.receiptIdentifier, input.transactionAmount, drawId],
       );
       if (parseInt(probeCheck.rows[0].count, 10) > 0) {
         await updateUserRiskScore(userId, 3); // +3 more = +4 total for confirmed probe
@@ -525,8 +532,37 @@ export const submitReceiptEntryService = async (
       business_id,
       input.receiptIdentifier,
       userId,
+      drawId,
       client,
     );
+
+    // ── Contest routing (anti-squatting) ────────────────────────────────────────
+    // Distinguish the two kinds of standing cross-user claim on this receipt:
+    //  - IMAGE-BACKED: another user proved it (OCR passed) or is proving it (OCR in
+    //    flight / errored). Final - cannot be contested.
+    //  - TYPED-ONLY: another user just typed the number with no image (a squatter, who
+    //    can block the real customer with a guessed number). Overridable by proof: the
+    //    real owner may attach a photo, and if OCR verifies it we supersede the squatter.
+    const hasImage = !!input.receiptImageUrl;
+    const claimRes = await client.query(
+      `SELECT
+         BOOL_OR(
+           (is_quarantined = FALSE AND image_validation_status IN ('passed', 'pending'))
+           OR quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review')
+         ) AS image_backed_by_other,
+         BOOL_OR(is_quarantined = FALSE AND image_validation_status = 'not_required') AS typed_only_by_other
+       FROM ticket
+       WHERE business_id = $1 AND receipt_identifier = $2 AND activated_by_user_id <> $3 AND draw_id = $4`,
+      [business_id, input.receiptIdentifier, userId, drawId],
+    );
+    const imageBackedByOther = claimRes.rows[0]?.image_backed_by_other === true;
+    const typedOnlyByOther = claimRes.rows[0]?.typed_only_by_other === true;
+    // A contestable squatter is NOT a fraud signal against the legitimate owner: the
+    // cross-user duplicate penalty and cap-exemption must not punish someone proving
+    // their own receipt. Treat the collision as "no duplicate" for risk + cap purposes.
+    const contestable = typedOnlyByOther && !imageBackedByOther;
+    const effectiveIsDuplicate = contestable ? false : dupCheck.isDuplicate;
+    const effectiveIsDuplicateQuar = contestable ? false : dupCheck.isDuplicateQuarantined;
 
     // Evaluate risk — pass pre-fetched user score to skip the extra SELECT
     const preFetchedRisk: PreFetchedUserRisk = {
@@ -536,10 +572,11 @@ export const submitReceiptEntryService = async (
     };
     const riskEval = await evaluateUserRisk(userId, {
       businessId: business_id,
+      drawId,
       receiptIdentifier: input.receiptIdentifier,
       transactionAmount: input.transactionAmount,
-      isDuplicateCrossUser: dupCheck.isDuplicate,
-      isDuplicateQuarantinedCrossUser: dupCheck.isDuplicateQuarantined,
+      isDuplicateCrossUser: effectiveIsDuplicate,
+      isDuplicateQuarantinedCrossUser: effectiveIsDuplicateQuar,
       typingDurationMs: input.typingDurationMs,
       receiptInputMethod: input.receiptInputMethod,
     }, preFetchedRisk);
@@ -549,7 +586,7 @@ export const submitReceiptEntryService = async (
     // Updating the score before these checks would punish the user for retrying.
     const storedScore = riskEval.totalScore - riskEval.delta;
 
-    // High risk (stored >=15): throttle to 1 submission per 24 hours (distinct receipts)
+    // High risk (stored > MEDIUM_MAX, i.e. >=20): throttle to 1 submission per 24 hours (distinct receipts)
     if (storedScore >= RISK_THRESHOLDS.MEDIUM_MAX + 1) {
       const throttleCheck = await client.query(
         `SELECT COUNT(DISTINCT receipt_identifier) AS count FROM ticket
@@ -569,34 +606,76 @@ export const submitReceiptEntryService = async (
       throw new Error('A receipt image is required to submit an entry.');
     }
 
-    // Past the gates — persist the risk delta, then sync quarantine.
-    // Sync here ensures existing tickets are quarantined immediately if this
-    // submission's delta pushes the user into HIGH risk, even if we throw below.
-    await updateUserRiskScore(userId, riskEval.delta, client, riskEval.flags);
-    await syncUserQuarantineState(userId, drawId, client);
-
-    // Hard block on sequential identifier guessing — elevated from advisory signal to immediate block.
-    // Risk delta is already persisted above so the score increase survives this throw.
+    // Hard block on sequential identifier guessing — checked BEFORE the transactional risk write
+    // below. This path REJECTS the submission (throws → the whole transaction rolls back), so the
+    // penalty must be persisted OUT OF BAND (pool, not the txn client) to survive the rollback and
+    // actually escalate the guesser toward the image-required / throttle gates; otherwise a
+    // rejected probe costs nothing and an attacker can enumerate receipt numbers indefinitely.
+    // It MUST run before the client-scoped write below: doing the transactional UPDATE "user"
+    // first takes a row lock held until rollback, and this pool UPDATE on the SAME row (a different
+    // connection) would then self-block against it — invisible to Postgres's deadlock detector
+    // (the txn session sits idle) — hanging until the 10s statement_timeout, at which point the
+    // penalty persists ZERO times and the user gets a raw PG error. Ordering it first avoids the lock.
     if (riskEval.flags.includes('sequential_guessing')) {
+      await updateUserRiskScore(userId, riskEval.delta, undefined, riskEval.flags);
+      await syncUserQuarantineState(userId, drawId);
       throw new Error('Suspicious sequential receipt pattern detected. Please contact support if this is in error.');
     }
 
-    // Block cross-user duplicate only when the existing entry is active (not quarantined).
-    // A quarantined entry is effectively disqualified — the receipt is unclaimed again and
-    // the next person with the real receipt can use it. This prevents scammers from
-    // poisoning a receipt by submitting it into a quarantined state via high risk score.
-    if (dupCheck.isDuplicate) {
-      throw new Error('This receipt has already been used for an entry.');
+    // Past the gates — persist the risk delta, then sync quarantine (transactional; commits with
+    // the submission). Sync here ensures existing tickets are quarantined immediately if this
+    // submission's delta pushes the user into HIGH risk.
+    await updateUserRiskScore(userId, riskEval.delta, client, riskEval.flags);
+    await syncUserQuarantineState(userId, drawId, client);
+
+    // High-risk shadowban is decided by stored score, exactly as at insert prep below.
+    const isHighRisk = riskEval.totalScore > RISK_THRESHOLDS.MEDIUM_MAX;
+
+    // ── Standing-claim resolution (anti-squatting) ──────────────────────────────
+    // Same user already holds a ticket for this receipt (any state) → no resubmit churn.
+    const ownExisting = await client.query(
+      `SELECT 1 FROM ticket
+       WHERE business_id = $1 AND receipt_identifier = $2 AND activated_by_user_id = $3 AND draw_id = $4
+       LIMIT 1`,
+      [business_id, input.receiptIdentifier, userId, drawId],
+    );
+    if (ownExisting.rows.length > 0) {
+      throw new Error('This receipt has already been entered. If you think this is a mistake, please contact us and we will help sort it out.');
     }
 
-    // Block same-user re-submit — no penalty (honest mistake).
-    // The probe signal in evaluateUserRisk already penalizes same-receipt-different-amount attempts.
-    const existingEntry = await client.query(
-      `SELECT id FROM ticket WHERE business_id = $1 AND receipt_identifier = $2`,
-      [business_id, input.receiptIdentifier],
-    );
-    if (existingEntry.rows.length > 0) {
-      throw new Error('This receipt identifier has already been used.');
+    let isContest = false;
+    if (imageBackedByOther) {
+      // Another user proved (or is proving) this receipt with an image — final. Plain block.
+      throw new Error('This receipt has already been entered. If you think this is a mistake, please contact us and we will help sort it out.');
+    } else if (contestable && !isHighRisk && hasImage) {
+      // One contest at a time per receipt: if another user's contest is already awaiting its OCR
+      // verdict, don't open a second (which would waste OCR calls and leave a race-loser). We
+      // hold the receipt advisory lock here, so this read is consistent.
+      const inFlight = await client.query(
+        `SELECT 1 FROM ticket
+         WHERE business_id = $1 AND receipt_identifier = $2 AND activated_by_user_id <> $3 AND draw_id = $4
+           AND quarantine_reason = 'contest_pending'
+         LIMIT 1`,
+        [business_id, input.receiptIdentifier, userId, drawId],
+      );
+      if (inFlight.rows.length > 0) {
+        throw new Error('This receipt is already being reviewed. Please try again in a few minutes.');
+      }
+      // Squatter override: this user brought a photo to prove the receipt is theirs. Insert
+      // as a CONTEST held OUT of the standing slot (quarantine_reason 'contest_pending', which
+      // the partial unique index excludes, so it never collides with the squatter's row). OCR
+      // resolves it: on proof we supersede the squatter and promote this entry; otherwise it is
+      // released with no penalty and the squatter is left untouched.
+      isContest = true;
+    } else if (contestable && !isHighRisk) {
+      // Squatter present, but this user typed with no image — invite a photo (special code the
+      // client turns into "someone already entered this receipt, attach a photo and try again").
+      throw new Error('RECEIPT_CONTEST_IMAGE_REQUIRED');
+    } else if (dupCheck.isDuplicate) {
+      // Any other active claim (a high-risk user meeting a squatter, or the rare failed-active
+      // edge) → today's plain block. Quarantined-but-released claims fall through and this user
+      // (with the real paper receipt) may enter.
+      throw new Error('This receipt has already been entered. If you think this is a mistake, please contact us and we will help sort it out.');
     }
 
     // Start batch size from what the amount earns, then narrow by each cap
@@ -605,8 +684,9 @@ export const submitReceiptEntryService = async (
     // Narrow by user draw cap
     batchSize = Math.min(batchSize, remainingDrawEntries);
 
-    // Entry cap enforcement — quarantined tickets do not consume the cap
-    if (entry_cap !== null && countsAgainstCap(riskEval, dupCheck.isDuplicate)) {
+    // Entry cap enforcement — quarantined tickets do not consume the cap. A contest is a
+    // legitimate entrant (effectiveIsDuplicate=false), so it DOES respect the cap.
+    if (entry_cap !== null && countsAgainstCap(riskEval, effectiveIsDuplicate)) {
       const bizCapCheck = await client.query(
         `SELECT COUNT(*) AS count FROM ticket
          WHERE location_id = $1 AND draw_id = $2 AND is_quarantined = FALSE`,
@@ -623,13 +703,52 @@ export const submitReceiptEntryService = async (
     // Always insert at least 1 if we passed all checks
     batchSize = Math.max(batchSize, 1);
 
-    const isHighRisk = riskEval.totalScore > RISK_THRESHOLDS.MEDIUM_MAX;
-    // Medium-risk users' ticket is held quarantined until OCR passes.
+    // ── Document-reuse check for TYPED-ONLY entries (no image = no async OCR check) ──
+    // A prior IMAGED entry fingerprinted every number on its receipt. If this typed number is in
+    // one of those fingerprints, it's the same physical document reused under a second number -
+    // catch it now (one indexed GIN lookup), since without an image the OCR-time check never runs.
+    // (Two typed-only entries with NO image anywhere are undetectable - no fingerprint exists.)
+    // IS DISTINCT FROM excludes same-number claims (dedup handles those). Two confidence levels:
+    //  - the matched entry's OCR PASSED (image-verified): high confidence this is a reuse of a
+    //    proven receipt → HARD bounce at submit, exactly like reusing the same number. Clear
+    //    feedback for an honest re-submitter, and the exact-token-of-a-verified-receipt match is
+    //    confident enough that a false block is very unlikely.
+    //  - the matched entry's OCR is still PENDING (not yet proven): fuzzier → keep the silent
+    //    shadowban (+3 risk, admin-reversible) so a coincidence never hard-blocks anyone.
+    // We only hard-bounce on the NO-IMAGE path: an image submission is about to have its OWN photo
+    // OCR'd, so the async document check works from the real image rather than the typed string
+    // alone, which avoids false-blocking a genuinely different receipt that merely shares a token.
+    let isDuplicateDocument = false;
+    if (!hasImage && !isContest) {
+      const fp = await client.query(
+        `SELECT COALESCE(BOOL_OR(image_validation_status = 'passed'), FALSE) AS has_verified,
+                COUNT(*)::int AS n
+         FROM ticket
+         WHERE business_id = $1 AND draw_id = $3 AND receipt_tokens @> ARRAY[$2::text]
+           AND receipt_identifier IS DISTINCT FROM $2
+           AND (is_quarantined = FALSE OR quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review'))`,
+        [business_id, input.receiptIdentifier, drawId],
+      );
+      if (Number(fp.rows[0]?.n ?? 0) > 0) {
+        if (fp.rows[0].has_verified) {
+          throw new Error('This receipt has already been entered. If you think this is a mistake, please contact us and we will help sort it out.');
+        }
+        isDuplicateDocument = true;
+      }
+    }
+
+    // isHighRisk + hasImage were computed above (contest routing). Medium-risk users'
+    // ticket is held quarantined until OCR passes.
     const isMediumRisk = riskEval.totalScore > RISK_THRESHOLDS.LOW_MAX && !isHighRisk;
-    const hasImage = !!input.receiptImageUrl;
     const isOcrPending = isMediumRisk && hasImage;
-    const isQuarantined = isHighRisk || isOcrPending;
-    const quarantineReason = isHighRisk ? 'high_risk_user' : isOcrPending ? 'ocr_pending' : null;
+    // A contest is held out of the standing slot as 'contest_pending' (excluded from the
+    // partial unique index) until OCR resolves it; otherwise the normal quarantine rules.
+    // A detected duplicate document is silently shadow-banned at insert (never active).
+    const isQuarantined = isContest || isHighRisk || isOcrPending || isDuplicateDocument;
+    const quarantineReason = isContest
+      ? 'contest_pending'
+      : isDuplicateDocument ? 'duplicate_document'
+      : isHighRisk ? 'high_risk_user' : isOcrPending ? 'ocr_pending' : null;
     const quarantinedAt = isQuarantined ? new Date() : null;
 
     // Generate all codes at once and check uniqueness in one query (saves batchSize-1 round trips)
@@ -670,24 +789,26 @@ export const submitReceiptEntryService = async (
             drawId,
             userId,
             i === 0 ? input.receiptIdentifier : null,
-            input.transactionAmount,
-            input.transactionDate ?? null,
+            i === 0 ? input.transactionAmount : null, // amount lives only on the anchor, or revenue SUMs count it once per sibling
+            i === 0 ? (input.transactionDate ?? null) : null,
             i === 0 ? (input.receiptImageUrl ?? null) : null,
             riskEval.totalScore,
-            i === 0 ? riskEval.delta : 0,
+            // Anchor records the +3 duplicate-document penalty on the entry itself (admin chip).
+            i === 0 ? riskEval.delta + (isDuplicateDocument ? 3 : 0) : 0,
             isQuarantined,
             quarantineReason,
             quarantinedAt,
             i === 0 && hasImage ? 'pending' : 'not_required',
             input.submitterIp ?? null,
-            i === 0 ? riskEval.flags : [],
+            // Tag the anchor so admins see WHY it was quarantined (the Risk Signal).
+            i === 0 ? (isDuplicateDocument ? [...riskEval.flags, 'duplicate_document'] : riskEval.flags) : [],
             i === 0 ? null : insertedTickets[0].ticketId, // siblings link back to anchor
           ],
         );
       } catch (insertErr: unknown) {
         // PostgreSQL unique constraint violation — receipt was already submitted
         if ((insertErr as { code?: string })?.code === '23505') {
-          throw new Error('This receipt has already been submitted.');
+          throw new Error('This receipt has already been entered. If you think this is a mistake, please contact us and we will help sort it out.');
         }
         throw insertErr;
       }
@@ -696,6 +817,13 @@ export const submitReceiptEntryService = async (
 
     await client.query('COMMIT');
     invalidatePublicLocation(input.locationId);
+
+    // Duplicate document caught synchronously (typed-only reuse): apply the +3 to the user's
+    // running score (the entry's own delta was baked into the insert above) and sync quarantine.
+    if (isDuplicateDocument) {
+      await updateUserRiskScore(userId, 3);
+      await syncUserQuarantineState(userId, drawId);
+    }
 
     // Trigger async OCR validation — runs after commit, never blocks the response
     if (input.receiptImageUrl) {
@@ -829,6 +957,103 @@ export const activatePromotionalEntry = async (
     await client.query('COMMIT');
     // Promo entries have no business/location — they affect no public cache.
     return { entryId: result.rows[0].id, drawName: draw.name, ticketId: ticketResult.rows[0].id, code: ticketCode };
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+};
+
+// ─── Staging demo reset (TEMPORARY) ───────────────────────────────────────────
+// How many fresh sample entries to seed on each reset so the demo starts with visible activity.
+const DEMO_SEED_ENTRIES = 3;
+
+// Seed a few REAL receipt entries for the demo account at random participating locations of the
+// open campaign, so a freshly-reset account already shows entries. Same clean row shape the normal
+// receipt flow produces (Activated, unquarantined, no OCR pending), just inserted directly without
+// the anti-fraud gates. Runs inside the reset transaction. Returns how many were created.
+const seedDemoEntries = async (client: PoolClient, userId: number): Promise<number> => {
+  const drawRes = await client.query(
+    `SELECT id FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1`,
+  );
+  const drawId: number | undefined = drawRes.rows[0]?.id;
+  if (!drawId) return 0; // no open campaign — nothing to enter
+
+  // Up to N distinct participating businesses (one random active location each), so the seeded
+  // entries look like they came from different places. Mirrors the participation rules the real
+  // receipt preflight uses (active location, business is in the open draw, not participation-paused).
+  const locRes = await client.query(
+    `SELECT location_id, business_id FROM (
+       SELECT DISTINCT ON (b.id) bl.id AS location_id, b.id AS business_id
+       FROM business_location bl
+       JOIN business b ON bl.business_id = b.id
+       WHERE bl.is_active = true
+         AND EXISTS (SELECT 1 FROM draw_entry de WHERE de.business_id = b.id AND de.draw_id = $1)
+         AND NOT EXISTS (SELECT 1 FROM subscription sp WHERE sp.business_id = b.id AND sp.participation_paused = TRUE)
+       ORDER BY b.id, random()
+     ) one_per_business
+     ORDER BY random()
+     LIMIT $2`,
+    [drawId, DEMO_SEED_ENTRIES],
+  );
+
+  let seeded = 0;
+  for (const loc of locRes.rows) {
+    const code = await generateGlobalUniqueCode(client);
+    // Random distinct receipt id (canonical uppercase alnum) so the per-draw dedup index never trips.
+    const identifier = `DEMO${crypto.randomInt(100000, 1000000)}`;
+    const amount = crypto.randomInt(1500, 9900) / 100; // $15.00 - $99.00
+    await client.query(
+      `INSERT INTO ticket
+         (code, status, entry_source, business_id, location_id, draw_id,
+          activated_by_user_id, activated_at, receipt_identifier, transaction_amount,
+          transaction_date, risk_score, risk_score_delta, is_quarantined, image_validation_status)
+       VALUES ($1, 'Activated', 'receipt', $2, $3, $4, $5, NOW(), $6, $7,
+               CURRENT_DATE - (floor(random() * 6))::int, 0, 0, FALSE, 'not_required')`,
+      [code, loc.business_id, loc.location_id, drawId, userId, identifier, amount],
+    );
+    seeded++;
+  }
+  return seeded;
+};
+
+// Wipes the demo account's activity so it can present a fresh flow to the next business:
+// deletes its entries, its weekly free-entry record and any threshold-probe rows, and zeroes
+// its fraud-risk state, then seeds a few fresh sample entries. Identity, email/phone verification
+// and profile are all preserved, so the account never has to re-verify. Double-gated by isDemoUser
+// (DEMO_USER_ENABLED env + exact demo email) so it is completely inert in production and for every
+// other account. Remove together with the rest of the demo scaffolding after the demo (see demo.ts).
+export const resetDemoUserService = async (
+  userId: number,
+): Promise<{ ticketsDeleted: number; entriesSeeded: number }> => {
+  const pool = getPool();
+  const emailRes = await pool.query('SELECT email FROM "user" WHERE id = $1', [userId]);
+  if (!isDemoUser(emailRes.rows[0]?.email)) {
+    throw new Error('DEMO_RESET_NOT_PERMITTED');
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // Entries (anchor + siblings all carry activated_by_user_id); FKs to ticket.id are SET NULL /
+    // CASCADE, so this also clears any winner pointer or audit rows referencing them.
+    const del = await client.query('DELETE FROM ticket WHERE activated_by_user_id = $1', [userId]);
+    await client.query('DELETE FROM free_ticket_usage WHERE user_id = $1', [userId]);
+    await client.query('DELETE FROM receipt_threshold_attempt WHERE user_id = $1', [userId]);
+    await client.query(
+      `UPDATE "user"
+         SET risk_score = 0,
+             risk_clean_entries = 0,
+             risk_last_flagged_at = NULL,
+             risk_last_decayed_at = NULL,
+             risk_flags = NULL
+       WHERE id = $1`,
+      [userId],
+    );
+    const entriesSeeded = await seedDemoEntries(client, userId);
+    await client.query('COMMIT');
+    return { ticketsDeleted: del.rowCount ?? 0, entriesSeeded };
   } catch (err) {
     await client.query('ROLLBACK');
     throw err;

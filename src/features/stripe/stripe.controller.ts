@@ -12,8 +12,9 @@ import {
   TIER_PRICE_MAP,
   updateSubscriptionPlan,
   getSubscriptionInvoices,
-  setSkipNextCampaign,
+  setParticipationPaused,
   createUpdatePaymentMethodSession,
+  createFoundingRenewalCheckoutSession,
 } from './stripe.service.js';
 
 // GET /business/subscription/founding-availability  (public — no auth)
@@ -29,7 +30,7 @@ export const getFoundingAvailability = async (_req: Request, res: Response) => {
 };
 
 // POST /business/subscription/checkout
-// Body: { founding: true }  → founding partner one-time $1,200
+// Body: { founding: true }  → founding partner one-time per-location fee (FOUNDING_PRICE_PER_LOCATION, fixed term)
 // Body: { entries_per_location } → regular monthly subscription
 export const createCheckout = async (req: Request, res: Response) => {
   try {
@@ -69,10 +70,6 @@ export const createCheckout = async (req: Request, res: Response) => {
       res.status(409).json({ error: 'All founding partner spots have been claimed.' });
       return;
     }
-    if (msg === 'FOUNDING_LOCATION_LIMIT') {
-      res.status(403).json({ error: 'The founding partner plan covers up to 3 locations. Please choose a regular plan for more locations.' });
-      return;
-    }
     console.error('[stripe.createCheckout]', err);
     res.status(500).json({ error: 'Subscription setup failed. Please try again.' });
   }
@@ -87,8 +84,11 @@ export const verifySession = async (req: Request, res: Response) => {
       res.status(400).json({ error: 'Invalid or missing sessionId.' });
       return;
     }
-    await verifyAndActivateSession(sessionId, userId);
-    res.json({ activated: true });
+    const { subscriptionStatus } = await verifyAndActivateSession(sessionId, userId);
+    // subscriptionStatus 'Incomplete' = the in-window signup charge was DECLINED: the
+    // subscription exists but the business is NOT enrolled until the card is fixed. The
+    // success page must not celebrate in that case.
+    res.json({ activated: true, subscriptionStatus });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : '';
     // Sold-out founding payment was already auto-refunded — the client must tell the
@@ -118,12 +118,17 @@ export const getSubscription = async (req: Request, res: Response) => {
 export const cancelSub = async (req: Request, res: Response) => {
   try {
     const userId = req.user!.id;
-    const result = await cancelSubscription(userId);
+    // The owner's explicit dialog choice: true = also remove from participation now
+    // (off the map, not in the paid upcoming campaign, no refund). Default false =
+    // keep everything already paid for; the plan just does not renew.
+    const immediate = req.body?.immediate === true;
+    const result = await cancelSubscription(userId, immediate);
     res.json(result);
   } catch (err: unknown) {
     console.error('[stripe.cancelSub]', err);
-    if (err instanceof Error && err.message === 'REFUND_FAILED') {
-      res.status(502).json({ error: 'Your refund could not be processed, so the membership was NOT cancelled. Please try again or contact support.' });
+    // Founding Partner Special Terms: fixed term, no early termination, no refund.
+    if (err instanceof Error && err.message === 'FOUNDING_NO_CANCEL') {
+      res.status(400).json({ error: 'Founding Partner plans run for a fixed term and do not renew, so there is nothing to cancel. Your membership stays active through its full term.' });
       return;
     }
     res.status(400).json({ error: 'Cancellation failed. Please try again.' });
@@ -182,26 +187,31 @@ export const updatePlan = async (req: Request, res: Response) => {
   }
 };
 
-// POST /business/subscription/skip-campaign
-// Body: { skip: boolean } — opt out of (or back into) the campaign already paid for.
-// Only available between the charge on the 24th and the campaign open. No refund.
-export const skipCampaign = async (req: Request, res: Response) => {
+// POST /business/subscription/participation
+// Body: { paused: boolean } — founding only. Voluntary cancel of participation: no
+// refund, off the map immediately, no new customer entries, not enrolled in upcoming
+// campaigns. Reactivation allowed while the founding term still runs.
+export const setParticipation = async (req: Request, res: Response) => {
   try {
     const userId = req.user!.id;
-    const skip = req.body?.skip !== false; // default true
-    await setSkipNextCampaign(userId, skip);
-    res.json({ skipped: skip });
+    const paused = req.body?.paused !== false; // default true
+    await setParticipationPaused(userId, paused);
+    res.json({ paused });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : '';
-    if (msg === 'SKIP_WINDOW_CLOSED') {
-      res.status(409).json({ error: 'The next campaign has already opened. Contact support to be removed from a running campaign.' });
+    if (msg === 'FOUNDING_ONLY') {
+      res.status(409).json({ error: 'This action is only available for Founding Partner plans.' });
+      return;
+    }
+    if (msg === 'FOUNDING_TERM_ENDED') {
+      res.status(409).json({ error: 'Your founding term has ended. Start a new plan to join upcoming campaigns.' });
       return;
     }
     if (msg === 'No active subscription found') {
       res.status(404).json({ error: 'No active subscription found.' });
       return;
     }
-    console.error('[stripe.skipCampaign]', err);
+    console.error('[stripe.setParticipation]', err);
     res.status(400).json({ error: 'Could not update campaign participation. Please try again.' });
   }
 };
@@ -238,6 +248,37 @@ export const updatePaymentMethod = async (req: Request, res: Response) => {
     }
     console.error('[stripe.updatePaymentMethod]', err);
     res.status(500).json({ error: 'Could not open the payment update page. Please try again.' });
+  }
+};
+
+// POST /business/subscription/founding-renewal
+// Special Terms Section 6: renew the founding membership for one additional fixed
+// term at the original monthly rate (rate x 12). Only available in the final 30 days of the term.
+export const foundingRenewal = async (req: Request, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const result = await createFoundingRenewalCheckoutSession(userId);
+    res.json(result);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : '';
+    if (msg === 'RENEWAL_NOT_OPEN') {
+      res.status(409).json({ error: 'Renewal opens in the final 30 days of your founding term.' });
+      return;
+    }
+    if (msg === 'RENEWAL_EXPIRED') {
+      res.status(409).json({ error: 'Your founding term has ended, so the founding renewal is no longer available. You can start a regular plan instead.' });
+      return;
+    }
+    if (msg === 'RENEWAL_ALREADY_USED') {
+      res.status(409).json({ error: 'The founding renewal can only be used once. When your renewed term ends, you can continue with a regular plan.' });
+      return;
+    }
+    if (msg.includes('No active founding membership')) {
+      res.status(404).json({ error: 'No active founding membership found.' });
+      return;
+    }
+    console.error('[stripe.foundingRenewal]', err);
+    res.status(500).json({ error: 'Could not start the renewal. Please try again.' });
   }
 };
 

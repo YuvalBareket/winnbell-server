@@ -28,5 +28,8 @@ router.post('/activate-free', requireRole('User'), requirePhoneVerified, require
 router.post('/receipt-entry', requireRole('User'), requirePhoneVerified, requireProfileComplete, entryLimiter, ticketController.submitReceiptEntry);
 router.get('/receipt-upload-url', requireRole('User'), requirePhoneVerified, entryLimiter, ticketController.getReceiptUploadUrl);
 router.get('/my-risk-level', ticketController.getMyRiskLevel);
+// STAGING DEMO ONLY (temporary). Self-service reset for the demo account; the service
+// double-gates on isDemoUser so it is inert in production and for every other user.
+router.post('/reset-demo', requireRole('User'), ticketController.resetDemo);
 router.post('/activate-promotional', requireRole('User'), requirePhoneVerified, requireProfileComplete, entryLimiter, ticketController.activatePromotional);
 export default router;

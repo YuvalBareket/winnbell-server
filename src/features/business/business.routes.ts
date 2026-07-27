@@ -21,7 +21,7 @@ import {
 } from './business.controller.js';
 import { getBusinessAnalytics } from './businessAnalytics.controller.js';
 import { getCampaignHeaderController, getCampaignKpisController, getCampaignEntriesController, getCampaignsController } from './activity.controller.js';
-import { createCheckout, verifySession, getSubscription, cancelSub, resumeSub, getFoundingAvailability, updatePlan, getInvoices, skipCampaign, updatePaymentMethod } from '../stripe/stripe.controller.js';
+import { createCheckout, verifySession, getSubscription, cancelSub, resumeSub, getFoundingAvailability, updatePlan, getInvoices, setParticipation, updatePaymentMethod, foundingRenewal } from '../stripe/stripe.controller.js';
 
 const router = Router();
 
@@ -58,7 +58,8 @@ router.post('/subscription/cancel', requireRole('Business'), cancelSub);
 router.post('/subscription/resume', requireRole('Business'), resumeSub);
 router.put('/subscription/plan', requireRole('Business'), updatePlan);
 router.get('/subscription/invoices', requireRole('Business'), getInvoices);
-router.post('/subscription/skip-campaign', requireRole('Business'), skipCampaign);
+router.post('/subscription/participation', requireRole('Business'), setParticipation);
 router.post('/subscription/update-payment-method', requireRole('Business'), updatePaymentMethod);
+router.post('/subscription/founding-renewal', requireRole('Business'), foundingRenewal);
 
 export default router;

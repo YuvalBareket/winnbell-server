@@ -1,9 +1,10 @@
-import Stripe from 'stripe';
+﻿import Stripe from 'stripe';
 import { Pool } from 'pg';
 import { getPool } from '../../shared/db/db.js';
 import { sendSubscriptionConfirmationEmail, sendPaymentFailedEmail, sendFoundingWelcomeEmail, sendDisputeAlertEmail } from '../../shared/email/email.service.js';
 import { getPlatformSettings, publicCache, invalidatePublicBusinessData } from '../../shared/cache/cache.js';
 import { nextCampaignOpensNy, lastChargeAtNy, CHARGE_DAY_OF_MONTH } from '../../shared/dates.js';
+import { FOUNDING_TERM_MONTHS, FOUNDING_RENEWAL_TERM_MONTHS, FOUNDING_MONTHLY_PRICE_PER_LOCATION, FOUNDING_PRICE_PER_LOCATION, FOUNDING_ENTRIES_PER_LOCATION } from '../../shared/founding.js';
 
 const stripeSecretKey = process.env.STRIPE_SECRET_KEY;
 if (!stripeSecretKey) throw new Error('STRIPE_SECRET_KEY is not configured — refusing to start the Stripe client.');
@@ -243,15 +244,24 @@ async function refundUpcomingCampaignDelta(subscriptionId: string, amountDollars
 
 // ─── Founding Member: Transition Window ───────────────────────────────────────
 // A founding membership is a one-time payment with no Stripe subscription behind it, so
-// nothing ever flips its status off 'Active' — the year "ends" purely as a date. Founders
-// are in EVERY campaign that OPENS before their year ends, so their final included campaign
-// is the last one to open inside the year. From that month onward (year ends before the
+// nothing ever flips its status off 'Active' — the term "ends" purely as a date. Founders
+// are in EVERY campaign that OPENS before their term ends, so their final included campaign
+// is the last one to open inside the term. From that month onward (term ends before the
 // next campaign opens — and forever after expiry) they may start a regular plan. Subscribing
 // inside this window puts them in that next campaign with no gap: the new subscription bills
 // on the last day of this month, which pays for next month's campaign.
 export function isFoundingTransitionWindow(currentPeriodEnd: Date): boolean {
   return currentPeriodEnd.getTime() < nextCampaignOpensNy().getTime();
 }
+
+// Founding term lengths AND the per-location price live in shared/founding.ts
+// (single source of truth, shared with email.service without a circular import).
+// Re-exported here so existing importers keep working.
+// The location set is FIXED at purchase: founding members can edit their locations but
+// not add or remove them (deliberate simplification over prorated mid-term billing).
+export { FOUNDING_TERM_MONTHS, FOUNDING_RENEWAL_TERM_MONTHS, FOUNDING_MONTHLY_PRICE_PER_LOCATION, FOUNDING_PRICE_PER_LOCATION, FOUNDING_ENTRIES_PER_LOCATION };
+
+export const FOUNDING_PRICE_PER_LOCATION_CENTS = FOUNDING_PRICE_PER_LOCATION * 100;
 
 // ─── Founding Member: Checkout Session ────────────────────────────────────────
 
@@ -275,16 +285,20 @@ export const createFoundingMemberCheckoutSession = async (
   );
   if (existing.rows.length > 0) throw new Error('This business already has an active subscription');
 
-  // Founding covers up to 3 locations for the flat price. The client hides the offer for
-  // larger businesses, but money rules live on the SERVER: same next-campaign count the
-  // add-location limit uses, checked at purchase time.
+  // Founding is priced PER LOCATION (FOUNDING_PRICE_PER_LOCATION x N for the whole term,
+  // no location limit). The location count is the same next-campaign count the regular
+  // plans bill by; it is stamped into the session metadata so activation records exactly
+  // what was paid for.
   const locCount = await pool.query(
     `SELECT COUNT(*)::int AS cnt FROM business_location
      WHERE business_id = $1
        AND ((is_active = TRUE AND deactivate_at_open = FALSE) OR activate_at_open = TRUE)`,
     [businessId],
   );
-  if (Number(locCount.rows[0]?.cnt ?? 0) > 3) throw new Error('FOUNDING_LOCATION_LIMIT');
+  const locationCount = Math.max(1, Number(locCount.rows[0]?.cnt ?? 0));
+
+  const priceCents = FOUNDING_PRICE_PER_LOCATION_CENTS;
+  const priceLabel = `$${FOUNDING_PRICE_PER_LOCATION.toLocaleString('en-US')}`;
 
   const baseUrl = process.env.FRONTEND_URL || 'http://localhost:8081';
 
@@ -294,17 +308,17 @@ export const createFoundingMemberCheckoutSession = async (
     customer_email: userEmail,
     customer_creation: 'always',
     line_items: [{
-      quantity: 1,
+      quantity: locationCount,
       price_data: {
         currency: 'usd',
-        unit_amount: 120000, // $1,200.00
+        unit_amount: priceCents,
         product_data: {
           name: 'Founding Partner - Winnbell',
-          description: 'One-time membership. Full year. 2,500 entries per location per month.',
+          description: `One-time membership for the full founding term. ${priceLabel} per location. 2,500 entries per location per month.`,
         },
       },
     }],
-    metadata: { business_id: String(businessId), founding: 'true' },
+    metadata: { business_id: String(businessId), founding: 'true', locations: String(locationCount) },
     // Stamp the PaymentIntent too so the one-time charge is findable in the Stripe
     // dashboard by business_id (Checkout metadata does not propagate to the PI).
     payment_intent_data: { metadata: { business_id: String(businessId), founding: 'true' } },
@@ -315,13 +329,220 @@ export const createFoundingMemberCheckoutSession = async (
   return { url: session.url as string };
 };
 
+// ─── Founding: Second-Year Renewal (Special Terms Section 6) ──────────────────
+// In the FINAL 30 days of the founding term the partner may renew for ONE additional
+// FOUNDING_RENEWAL_TERM_MONTHS term at the ORIGINAL MONTHLY RATE (rate x 12 months).
+// Renewal is a separate explicit checkout (never auto-charged, per the Special Terms)
+// and extends current_period_end by 12 months FROM the existing term end, so renewing
+// early loses no time.
+
+export const FOUNDING_RENEWAL_WINDOW_DAYS = 30;
+
+// Shared by the renewal checkout guard AND getSubscriptionDetails (which serves
+// founding_renewal_open to the client banner) so the banner and the server guard
+// can never disagree - same pattern as founding_transition_available.
+export function foundingRenewalWindowState(periodEnd: Date, now: Date = new Date()): 'not_open' | 'open' | 'expired' {
+  // Millisecond arithmetic on purpose (do NOT "simplify" to setDate/getDate: those
+  // operate in the host timezone and would shift the window across DST boundaries).
+  const windowOpenMs = periodEnd.getTime() - FOUNDING_RENEWAL_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+  if (now.getTime() < windowOpenMs) return 'not_open';
+  if (now.getTime() > periodEnd.getTime()) return 'expired';
+  return 'open';
+}
+
+// Renewal price = the member's ORIGINAL MONTHLY RATE x the renewal term length.
+// The founding offer is a monthly rate ($100/location/month); the initial purchase
+// charges rate x FOUNDING_TERM_MONTHS, the renewal charges rate x
+// FOUNDING_RENEWAL_TERM_MONTHS (e.g. $300/location for 3 months, then $1,200/location
+// for the 12-month renewal). The rate snapshot is subscription.fee_at_entry (set at
+// activation as amount_paid / term months); fall back to deriving it from amount_paid
+// for any row missing fee_at_entry. Shared by the renewal checkout AND
+// getSubscriptionDetails (founding_renewal_price) so display and charge never disagree.
+export function foundingRenewalAmountCents(feeAtEntry: number | string | null, amountPaid: number | string): number {
+  const monthlyCents = feeAtEntry != null && Number(feeAtEntry) > 0
+    ? Math.round(Number(feeAtEntry) * 100)
+    : Math.round((Number(amountPaid) * 100) / FOUNDING_TERM_MONTHS);
+  return monthlyCents * FOUNDING_RENEWAL_TERM_MONTHS;
+}
+
+export const createFoundingRenewalCheckoutSession = async (userId: number): Promise<{ url: string }> => {
+  const pool = getPool();
+
+  const res = await pool.query(`
+    SELECT b.id AS business_id, u.email, fm.amount_paid, fm.renewed_at, s.current_period_end, s.fee_at_entry
+    FROM business b
+    JOIN "user" u ON u.id = b.user_id
+    JOIN founding_member fm ON fm.business_id = b.id
+    JOIN subscription s ON s.business_id = b.id
+    WHERE b.user_id = $1 AND s.status = 'Active'
+  `, [userId]);
+  const row = res.rows[0];
+  if (!row) throw new Error('No active founding membership found');
+
+  // ONE-TIME option: after the single renewal is used, the founding price is gone -
+  // when the renewed term ends the business subscribes through the regular plans.
+  if (row.renewed_at) throw new Error('RENEWAL_ALREADY_USED');
+
+  const windowState = foundingRenewalWindowState(new Date(row.current_period_end));
+  if (windowState === 'not_open') throw new Error('RENEWAL_NOT_OPEN');
+  if (windowState === 'expired') throw new Error('RENEWAL_EXPIRED');
+
+  // Monthly rate snapshot x the 12-month renewal term (NOT the 3-month initial total).
+  const amountCents = foundingRenewalAmountCents(row.fee_at_entry, row.amount_paid);
+  if (amountCents < 50) throw new Error('RENEWAL_AMOUNT_INVALID');
+
+  const baseUrl = process.env.FRONTEND_URL || 'http://localhost:8081';
+  const session = await stripe.checkout.sessions.create({
+    mode: 'payment',
+    payment_method_types: ['card'],
+    customer_email: row.email,
+    line_items: [{
+      quantity: 1,
+      price_data: {
+        currency: 'usd',
+        unit_amount: amountCents,
+        product_data: {
+          name: 'Founding Partner Renewal - Winnbell',
+          description: `One additional ${FOUNDING_RENEWAL_TERM_MONTHS}-month term at your original Founding Partner monthly rate.`,
+        },
+      },
+    }],
+    metadata: { business_id: String(row.business_id), founding_renewal: 'true' },
+    payment_intent_data: { metadata: { business_id: String(row.business_id), founding_renewal: 'true' } },
+    success_url: `${baseUrl}/subscription/success?session_id={CHECKOUT_SESSION_ID}&purpose=frenew`,
+    cancel_url: `${baseUrl}/subscription/manage`,
+  });
+
+  return { url: session.url as string };
+};
+
+// Payment landed (verify or webhook): ledger the renewal and extend the term.
+export const activateFoundingRenewal = async (pool: Pool, session: Stripe.Checkout.Session): Promise<void> => {
+  const businessId = Number(session.metadata?.business_id);
+  const paymentIntentId = session.payment_intent as string;
+  if (!businessId || !paymentIntentId) throw new Error('founding_renewal session missing metadata');
+  // A paid payment-mode session always carries amount_total. Failing loudly (webhook
+  // retries) beats ledgering $0 for money that was actually collected.
+  if (session.amount_total == null || session.amount_total < 50) throw new Error('founding_renewal session has invalid amount_total');
+  const amountDollars = session.amount_total / 100;
+
+  // All three writes commit or roll back TOGETHER. Without the transaction, a crash
+  // after the ledger insert would consume the idempotency slot with the term never
+  // extended - money collected, no retry able to recover it.
+  const client = await pool.connect();
+  let duplicate = false;
+  let newEnd: Date | null = null;
+  try {
+    await client.query('BEGIN');
+
+    // Idempotency (webhook + verify double call): the ledger's unique payment intent
+    // is the claim - only the first caller proceeds.
+    const ledger = await client.query(
+      `INSERT INTO founding_payment (business_id, stripe_payment_intent_id, stripe_checkout_session_id, amount)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (stripe_payment_intent_id) DO NOTHING`,
+      [businessId, paymentIntentId, session.id, amountDollars],
+    );
+    if ((ledger.rowCount ?? 0) === 0) {
+      await client.query('ROLLBACK');
+      return;
+    }
+
+    // ONE-TIME guard at ACTIVATION time, not just session creation: two renewal
+    // checkouts can both be created while renewed_at is still NULL (two tabs, or a
+    // stale Stripe page paid after the first renewal). The WHERE renewed_at IS NULL
+    // claim is atomic - only ONE distinct payment ever extends the term; any other
+    // paid renewal session is ledgered as refunded here and refunded after commit.
+    // Also covers a founding row that vanished (0 rows -> refund, never extend).
+    const claim = await client.query(
+      `UPDATE founding_member SET renewed_at = NOW(), updated_at = NOW()
+       WHERE business_id = $1 AND renewed_at IS NULL
+       RETURNING id`,
+      [businessId],
+    );
+    if ((claim.rowCount ?? 0) === 0) {
+      await client.query(
+        `UPDATE founding_payment SET refunded_amount = amount WHERE stripe_payment_intent_id = $1`,
+        [paymentIntentId],
+      );
+      await client.query('COMMIT');
+      duplicate = true;
+    } else {
+      // participation_paused resets too: paying for a renewal is an explicit
+      // recommitment to participate - a pre-renewal cancel no longer reflects intent.
+      const upd = await client.query(
+        `UPDATE subscription
+         SET current_period_end = current_period_end + make_interval(months => $2),
+             status = 'Active',
+             cancel_at_period_end = false,
+             participation_paused = false,
+             updated_at = NOW()
+         WHERE business_id = $1
+         RETURNING current_period_end`,
+        [businessId, FOUNDING_RENEWAL_TERM_MONTHS],
+      );
+      newEnd = upd.rows[0]?.current_period_end ?? null;
+      await client.query('COMMIT');
+    }
+  } catch (err: unknown) {
+    try { await client.query('ROLLBACK'); } catch { /* connection already gone */ }
+    throw err;
+  } finally {
+    client.release();
+  }
+
+  if (duplicate) {
+    // Stripe call stays OUTSIDE the transaction (never hold a DB tx open across a
+    // network call). If the refund fails, the ledger slot is already committed so a
+    // webhook retry cannot reach this branch again - the CRITICAL log is the signal
+    // to refund manually in the Stripe dashboard.
+    try {
+      await stripe.refunds.create({ payment_intent: paymentIntentId });
+      console.warn(`[Founding] Duplicate renewal payment for business ${businessId} (pi ${paymentIntentId}) - refunded in full`);
+    } catch (refundErr: unknown) {
+      const code = (refundErr as { code?: string })?.code;
+      if (code !== 'charge_already_refunded') {
+        console.error(`[Founding] CRITICAL: duplicate renewal refund FAILED for business ${businessId} (pi ${paymentIntentId}) - refund manually:`, refundErr instanceof Error ? refundErr.message : refundErr);
+      }
+    }
+    return;
+  }
+
+  console.log(`[Founding] Business ${businessId} renewed for another term ($${amountDollars}); term now ends ${newEnd?.toISOString?.() ?? newEnd}`);
+  invalidatePublicBusinessData();
+
+  // Confirmation email with the new term end - non-fatal (renewal is already committed).
+  try {
+    const biz = await pool.query(`
+      SELECT b.name, u.email,
+             (SELECT COUNT(*)::int FROM business_location bl WHERE bl.business_id = b.id AND bl.is_active = TRUE) AS locs
+      FROM business b JOIN "user" u ON u.id = b.user_id WHERE b.id = $1
+    `, [businessId]);
+    if (biz.rows[0]?.email && newEnd) {
+      await sendFoundingWelcomeEmail(biz.rows[0].email, biz.rows[0].name, {
+        termEnd: new Date(newEnd),
+        amountPaid: amountDollars,
+        locationCount: Math.max(1, Number(biz.rows[0].locs ?? 1)),
+        termMonths: FOUNDING_RENEWAL_TERM_MONTHS,
+        isRenewal: true,
+      });
+    }
+  } catch (err: unknown) {
+    console.error(`[Founding] Renewal email failed for business ${businessId} (non-fatal):`, err instanceof Error ? err.message : err);
+  }
+};
+
 // ─── Founding Member: Count / Availability ────────────────────────────────────
 
-export const getFoundingMemberCount = async (): Promise<{
-  taken: number; remaining: number; cap: number; price: number; active: boolean;
-}> => {
+interface FoundingAvailability {
+  taken: number; remaining: number; cap: number; active: boolean;
+  price: number; monthlyPrice: number; termMonths: number; renewalTermMonths: number;
+  entriesPerLocation: number;
+}
+
+export const getFoundingMemberCount = async (): Promise<FoundingAvailability> => {
   const CACHE_KEY = 'founding:availability';
-  const cached = publicCache.get<{ taken: number; remaining: number; cap: number; price: number; active: boolean }>(CACHE_KEY);
+  const cached = publicCache.get<FoundingAvailability>(CACHE_KEY);
   if (cached !== undefined) return cached;
 
   const pool = getPool();
@@ -332,7 +553,16 @@ export const getFoundingMemberCount = async (): Promise<{
   const taken = countResult.rows[0]?.taken ?? 0;
   const cap = settings.founding_member_cap ?? 30;
   const active = settings.founding_phase_active ?? true;
-  const value = { taken, remaining: Math.max(0, cap - taken), cap, price: 1200, active };
+  // Price + term lengths ride along so ALL founding copy/math on the client derives
+  // from one source (the shared/founding.ts constants).
+  const value: FoundingAvailability = {
+    taken, remaining: Math.max(0, cap - taken), cap, active,
+    price: FOUNDING_PRICE_PER_LOCATION,
+    monthlyPrice: FOUNDING_MONTHLY_PRICE_PER_LOCATION,
+    termMonths: FOUNDING_TERM_MONTHS,
+    renewalTermMonths: FOUNDING_RENEWAL_TERM_MONTHS,
+    entriesPerLocation: FOUNDING_ENTRIES_PER_LOCATION,
+  };
   publicCache.set(CACHE_KEY, value, 60);
   return value;
 };
@@ -352,7 +582,7 @@ export const createCheckoutSession = async (
 
   const pool = getPool();
   // Block a second subscription — EXCEPT for a founding member inside the transition
-  // window (their prepaid year no longer covers the next campaign, or already ended).
+  // window (their prepaid term no longer covers the next campaign, or already ended).
   // Their row stays 'Active' forever because no Stripe subscription backs it, so a plain
   // status check would lock them out of ever subscribing again.
   const existing = await pool.query(
@@ -414,7 +644,13 @@ export const createCheckoutSession = async (
 
 // ─── Verify Session ───────────────────────────────────────────────────────────
 
-export const verifyAndActivateSession = async (sessionId: string, userId: number): Promise<void> => {
+// Returns the resulting subscription status so the success page can tell the truth when the
+// in-window signup charge was DECLINED (business stored Incomplete, NOT enrolled at open).
+// null = branches with no recurring subscription involved (founding payment, card update).
+export const verifyAndActivateSession = async (
+  sessionId: string,
+  userId: number,
+): Promise<{ subscriptionStatus: 'Active' | 'Incomplete' | null }> => {
   const pool = getPool();
 
   const bizResult = await pool.query(`SELECT id FROM business WHERE user_id = $1`, [userId]);
@@ -429,23 +665,36 @@ export const verifyAndActivateSession = async (sessionId: string, userId: number
     if (session.payment_status !== 'paid') throw new Error('Payment not completed');
     const paymentIntentId = session.payment_intent as string;
     const customerId = (session.customer as string | null) ?? null;
-    await activateFoundingMember(pool, businessId, paymentIntentId, sessionId, customerId);
+    // Per-location pricing: amount + location count come off the session itself. A paid
+    // session always has amount_total; failing loudly beats snapshotting a wrong amount
+    // (the snapshot drives the member's renewal price).
+    if (session.amount_total == null || session.amount_total < 50) throw new Error('founding session has invalid amount_total');
+    const amountPaidDollars = session.amount_total / 100;
+    const locationCount = Math.max(1, Number(session.metadata?.locations ?? 1));
+    await activateFoundingMember(pool, businessId, paymentIntentId, sessionId, customerId, amountPaidDollars, locationCount);
     invalidatePublicBusinessData();
-    return;
+    return { subscriptionStatus: null };
+  }
+
+  // ── Founding second-year renewal branch ─────────────────────────────────────
+  if (session.mode === 'payment' && session.metadata?.founding_renewal === 'true') {
+    if (session.payment_status !== 'paid') throw new Error('Payment not completed');
+    await activateFoundingRenewal(pool, session);
+    return { subscriptionStatus: null };
   }
 
   // ── Update payment method branch (setup mode with an existing customer) ─────
   if (session.mode === 'setup' && session.metadata?.purpose === 'update_payment_method') {
     if (session.status !== 'complete') throw new Error('Setup not completed');
     await handleUpdatePaymentMethodSession(pool, session);
-    return;
+    return { subscriptionStatus: null };
   }
 
   // ── Recurring subscription branch (setup mode → server-created sub) ─────────
   if (session.mode === 'setup') {
     if (session.status !== 'complete') throw new Error('Setup not completed');
-    await createSubscriptionForSetupSession(pool, session);
-    return;
+    const subscriptionStatus = await createSubscriptionForSetupSession(pool, session);
+    return { subscriptionStatus };
   }
 
   throw new Error('Unrecognized checkout session');
@@ -503,6 +752,7 @@ async function recoverBusinessAfterPayment(pool: Pool, businessId: number): Prom
     WHERE d.status = 'Open'
       AND s.current_period_end >= NOW()
       AND s.skip_next_campaign = FALSE
+      AND s.participation_paused = FALSE
     ON CONFLICT (draw_id, business_id) DO NOTHING
   `, [businessId]);
   invalidatePublicBusinessData();
@@ -559,7 +809,9 @@ async function handleUpdatePaymentMethodSession(pool: Pool, session: Stripe.Chec
 // After a setup-mode Checkout completes (card saved, no charge), create the
 // recurring subscription billed on the LAST DAY of each month. Called by BOTH
 // the webhook and the success-page verify; idempotent so it can never create two.
-async function createSubscriptionForSetupSession(pool: Pool, session: Stripe.Checkout.Session): Promise<void> {
+// Returns the status the subscription ends up in ('Incomplete' = in-window signup charge
+// declined, business NOT enrolled at open) so the verify path can surface it to the client.
+async function createSubscriptionForSetupSession(pool: Pool, session: Stripe.Checkout.Session): Promise<'Active' | 'Incomplete'> {
   const businessId = Number(session.metadata?.business_id);
   if (!businessId) throw new Error('Setup session missing business_id');
 
@@ -570,14 +822,18 @@ async function createSubscriptionForSetupSession(pool: Pool, session: Stripe.Che
   // replacement the row has a stripe_subscription_id, so a duplicate webhook/verify
   // call still returns here.
   const existing = await pool.query(
-    `SELECT s.stripe_subscription_id,
+    `SELECT s.stripe_subscription_id, s.status,
             EXISTS(SELECT 1 FROM founding_member fm WHERE fm.business_id = s.business_id) AS is_founding
      FROM subscription s
      WHERE s.business_id = $1 AND s.status != 'Cancelled'`,
     [businessId],
   );
   const existingSub = existing.rows[0];
-  if (existingSub && !(existingSub.is_founding && !existingSub.stripe_subscription_id)) return;
+  if (existingSub && !(existingSub.is_founding && !existingSub.stripe_subscription_id)) {
+    // Duplicate webhook/verify call: report the already-stored outcome (the other caller
+    // may have created it as Incomplete when the signup charge was declined).
+    return existingSub.status === 'Incomplete' ? 'Incomplete' : 'Active';
+  }
 
   const customerId = session.customer as string;
   const priceId = session.metadata?.price_id ?? '';
@@ -642,6 +898,7 @@ async function createSubscriptionForSetupSession(pool: Pool, session: Stripe.Che
 
   await activateBusinessSubscription(pool, businessId, subscription.id, customerId, priceId, currentPeriodEnd, monthlyFee, entriesPerLocation, initialStatus, chargedToday);
   invalidatePublicBusinessData();
+  return initialStatus;
 }
 
 // ─── Handle Webhook ───────────────────────────────────────────────────────────
@@ -754,10 +1011,17 @@ export const reconcileSubscriptionsWithStripe = async (): Promise<{ checked: num
         );
 
         // Period fields first, so the recovery enrollment guard below sees the paid period.
+        // When the cancel flips true -> false here (dashboard un-cancel, or a resume whose
+        // DB write was lost), an immediate-removal pause no longer reflects intent - clear
+        // it in the same statement or the business would PAY while stuck off the map.
+        // The CASE reads the OLD row value, so an independently set pause is untouched.
         if (periodEnd !== null) {
           await pool.query(
             `UPDATE subscription
-             SET current_period_end = $2, cancel_at_period_end = $3, updated_at = NOW()
+             SET current_period_end = $2,
+                 participation_paused = CASE WHEN cancel_at_period_end = true AND $3 = false THEN false ELSE participation_paused END,
+                 cancel_at_period_end = $3,
+                 updated_at = NOW()
              WHERE business_id = $1 AND stripe_subscription_id = $4`,
             [row.business_id, periodEnd, cancelAtPeriodEnd, row.stripe_subscription_id],
           );
@@ -804,9 +1068,20 @@ async function processStripeEvent(event: Stripe.Event, pool: Pool): Promise<void
         if (session.mode === 'payment' && session.metadata?.founding === 'true') {
           const paymentIntentId = session.payment_intent as string;
           const customerId = (session.customer as string | null) ?? null;
-          await activateFoundingMember(pool, businessId, paymentIntentId, session.id, customerId);
+          // Per-location pricing: amount + location count come off the session itself. A paid
+          // session always has amount_total; failing loudly beats snapshotting a wrong amount.
+          if (session.amount_total == null || session.amount_total < 50) throw new Error('founding session has invalid amount_total');
+          const amountPaidDollars = session.amount_total / 100;
+          const locationCount = Math.max(1, Number(session.metadata?.locations ?? 1));
+          await activateFoundingMember(pool, businessId, paymentIntentId, session.id, customerId, amountPaidDollars, locationCount);
           invalidatePublicBusinessData();
           console.log(`[Stripe] Webhook activated founding member for business ${businessId}`);
+          break;
+        }
+
+        // ── Founding second-year renewal ─────────────────────────────────────
+        if (session.mode === 'payment' && session.metadata?.founding_renewal === 'true') {
+          await activateFoundingRenewal(pool, session);
           break;
         }
 
@@ -852,9 +1127,17 @@ async function processStripeEvent(event: Stripe.Event, pool: Pool): Promise<void
         //    replaced subscription must never overwrite the business's new one.
         //  - status <> 'Cancelled': a stale "updated" arriving after the "deleted" event
         //    must never resurrect a dead subscription (same guard the invoice handlers use).
+        // participation_paused clears when the cancel flips true -> false (dashboard
+        // un-cancel, or a resume whose DB write was lost): an immediate-removal pause
+        // no longer reflects intent, and leaving it would keep a PAYING business off
+        // the map with no recovery path. The CASE reads the OLD row value, so a pause
+        // set independently of a cancel is untouched.
         await pool.query(`
           UPDATE subscription
-          SET status = $1, current_period_end = $2, cancel_at_period_end = $3, updated_at = NOW()
+          SET status = $1, current_period_end = $2,
+              participation_paused = CASE WHEN cancel_at_period_end = true AND $3 = false THEN false ELSE participation_paused END,
+              cancel_at_period_end = $3,
+              updated_at = NOW()
           WHERE business_id = $4
             AND stripe_subscription_id = $5
             AND status <> 'Cancelled'
@@ -1064,7 +1347,14 @@ async function activateFoundingMember(
   businessId: number,
   paymentIntentId: string,
   checkoutSessionId: string,
-  customerId: string | null = null,
+  customerId: string | null,
+  // Per-location pricing: what THIS session actually charged (price x locations at
+  // purchase) and for how many locations - both read off the checkout session. No
+  // defaults on purpose: every caller must pass the real
+  // charged amount - a silent fallback here would corrupt amount_paid (and with it
+  // the member's exact-price renewal).
+  amountPaidDollars: number,
+  locationCount: number,
 ): Promise<void> {
   // Idempotency + duplicate-purchase guard. One query answers both questions: was THIS
   // session already activated (webhook + verify double call), and does this business
@@ -1080,7 +1370,7 @@ async function activateFoundingMember(
   }
   if (existing.rows.length > 0) {
     // Duplicate purchase: the business already has a founding seat paid through another
-    // session. Auto-refund this second $1,200 in full and record it on the ledger as
+    // session. Auto-refund this second payment in full and record it on the ledger as
     // refunded. Returning (not throwing) keeps the webhook claim so Stripe stops
     // redelivering; if the refund itself fails we DO throw so the retry re-attempts it.
     console.error(`[Founding] Business ${businessId} paid founding twice (session ${checkoutSessionId}) — auto-refunding the duplicate`);
@@ -1095,9 +1385,9 @@ async function activateFoundingMember(
     }
     await pool.query(`
       INSERT INTO founding_payment (business_id, stripe_payment_intent_id, stripe_checkout_session_id, amount, refunded_amount)
-      VALUES ($1, $2, $3, 1200.00, 1200.00)
-      ON CONFLICT (stripe_payment_intent_id) DO NOTHING
-    `, [businessId, paymentIntentId, checkoutSessionId]);
+      VALUES ($1, $2, $3, $4, $4)
+      ON CONFLICT (stripe_payment_intent_id) DO UPDATE SET refunded_amount = EXCLUDED.refunded_amount
+    `, [businessId, paymentIntentId, checkoutSessionId, amountPaidDollars]);
     return;
   }
 
@@ -1148,10 +1438,10 @@ async function activateFoundingMember(
         LIMIT 1
       )
       INSERT INTO founding_member (business_id, seat_number, stripe_payment_intent_id, stripe_checkout_session_id, amount_paid)
-      SELECT $1, seat_number, $2, $3, 1200.00
+      SELECT $1, seat_number, $2, $3, $4
       FROM available_seat
       RETURNING seat_number
-    `, [businessId, paymentIntentId, checkoutSessionId]);
+    `, [businessId, paymentIntentId, checkoutSessionId, amountPaidDollars]);
 
     if ((seatResult.rowCount ?? 0) === 0) {
       await client.query('ROLLBACK');
@@ -1161,9 +1451,9 @@ async function activateFoundingMember(
       // double-record; Stripe itself rejects refunding an already-refunded payment.
       await pool.query(
         `INSERT INTO founding_payment (business_id, stripe_payment_intent_id, stripe_checkout_session_id, amount, refunded_amount)
-         VALUES ($1, $2, $3, 1200.00, 1200.00)
-         ON CONFLICT (stripe_payment_intent_id) DO UPDATE SET refunded_amount = 1200.00`,
-        [businessId, paymentIntentId, checkoutSessionId],
+         VALUES ($1, $2, $3, $4, $4)
+         ON CONFLICT (stripe_payment_intent_id) DO UPDATE SET refunded_amount = EXCLUDED.amount`,
+        [businessId, paymentIntentId, checkoutSessionId, amountPaidDollars],
       );
       try {
         await stripe.refunds.create({ payment_intent: paymentIntentId });
@@ -1176,17 +1466,18 @@ async function activateFoundingMember(
     seatNumber = seatResult.rows[0].seat_number as number;
     console.log(`[Founding] Business ${businessId} claimed seat #${seatNumber}`);
 
-    // One-time payment: no stripe_subscription_id; period ends in 1 year; Growth-tier
-    // entry allowance (2500 per location).
-    const periodEnd = new Date();
-    periodEnd.setFullYear(periodEnd.getFullYear() + 1);
-    const monthlyEquivalent = Math.round(120000 / 12) / 100; // $100.00 ($1,200 / 12)
+    // One-time payment: no stripe_subscription_id; period runs FOUNDING_TERM_MONTHS
+    // computed in SQL (make_interval handles month-end dates; JS setMonth would roll
+    // Mar 31 + 3 months into Jul 1). Entry allowance = FOUNDING_ENTRIES_PER_LOCATION.
+    // fee_at_entry = the member's MONTHLY RATE snapshot ((amount paid) / term months) -
+    // this is what the one-time renewal multiplies by its own term length.
+    const monthlyEquivalent = Math.round((amountPaidDollars * 100) / FOUNDING_TERM_MONTHS) / 100;
 
     await client.query(`
       INSERT INTO subscription
         (business_id, stripe_customer_id, stripe_subscription_id, stripe_price_id,
          status, current_period_end, cancel_at_period_end, fee_at_entry, entries_per_location, billing_interval)
-      VALUES ($1, $4, NULL, NULL, 'Active', $2, false, $3, 2500, 'yearly')
+      VALUES ($1, $4, NULL, NULL, 'Active', NOW() + make_interval(months => $2), false, $3, $5, 'yearly')
       ON CONFLICT (business_id) DO UPDATE
         SET status               = 'Active',
             stripe_customer_id   = COALESCE(EXCLUDED.stripe_customer_id, subscription.stripe_customer_id),
@@ -1194,29 +1485,56 @@ async function activateFoundingMember(
             current_period_end   = EXCLUDED.current_period_end,
             cancel_at_period_end = false,
             fee_at_entry         = EXCLUDED.fee_at_entry,
-            entries_per_location = 2500,
+            entries_per_location = EXCLUDED.entries_per_location,
+            participation_paused = false,
             billing_interval     = 'yearly',
             updated_at           = NOW()
-    `, [businessId, periodEnd, monthlyEquivalent, customerId]);
+    `, [businessId, FOUNDING_TERM_MONTHS, monthlyEquivalent, customerId, FOUNDING_ENTRIES_PER_LOCATION]);
 
     // Append to the durable payment ledger. Unlike founding_member (one row per
     // business, deleted on cancel), this is append-only so the plan page can show
     // full history across cancel→repurchase cycles. ON CONFLICT keeps it idempotent.
     await client.query(`
       INSERT INTO founding_payment (business_id, stripe_payment_intent_id, stripe_checkout_session_id, amount)
-      VALUES ($1, $2, $3, 1200.00)
+      VALUES ($1, $2, $3, $4)
       ON CONFLICT (stripe_payment_intent_id) DO NOTHING
-    `, [businessId, paymentIntentId, checkoutSessionId]);
+    `, [businessId, paymentIntentId, checkoutSessionId, amountPaidDollars]);
 
     await client.query('COMMIT');
     console.log(`[Founding] subscription row upserted for business ${businessId} (seat #${seatNumber})`);
   } catch (err) {
     await client.query('ROLLBACK');
-    // Two concurrent activations (verify-session double-click / webhook + verify racing)
-    // both pass the pre-check; the loser hits the UNIQUE(business_id) seat constraint.
-    // That means the winner already fully activated - treat as the idempotent no-op the
-    // pre-check would have produced (no error, no second welcome email).
+    // Two concurrent activations both pass the pre-check; the loser hits the
+    // UNIQUE(business_id) seat constraint. Two distinct cases (audit P2-5):
+    //  - SAME PaymentIntent (webhook + verify double call of one session): the winner
+    //    already fully activated this exact payment - idempotent no-op.
+    //  - DIFFERENT PaymentIntent (two checkout tabs both PAID): the loser is a real,
+    //    separate charge that would otherwise be silently swallowed - refund it in
+    //    full and ledger it, exactly like the sequential duplicate-purchase path.
     if ((err as { code?: string })?.code === '23505') {
+      const winner = await pool.query(
+        `SELECT stripe_payment_intent_id FROM founding_member WHERE business_id = $1`,
+        [businessId],
+      );
+      const winnerPi: string | null = winner.rows[0]?.stripe_payment_intent_id ?? null;
+      if (winnerPi && winnerPi !== paymentIntentId) {
+        console.error(`[Founding] Business ${businessId} raced two PAID founding sessions - auto-refunding the loser (${paymentIntentId})`);
+        try {
+          await stripe.refunds.create({ payment_intent: paymentIntentId });
+        } catch (refundErr: unknown) {
+          const code = (refundErr as { code?: string })?.code;
+          if (code !== 'charge_already_refunded') {
+            console.error(`[Founding] CRITICAL: race-loser refund failed for business ${businessId}:`, refundErr instanceof Error ? refundErr.message : refundErr);
+            throw refundErr; // webhook retry re-attempts the refund
+          }
+        }
+        await pool.query(`
+          INSERT INTO founding_payment (business_id, stripe_payment_intent_id, stripe_checkout_session_id, amount, refunded_amount)
+          VALUES ($1, $2, $3, $4, $4)
+          ON CONFLICT (stripe_payment_intent_id) DO UPDATE SET refunded_amount = EXCLUDED.refunded_amount
+        `, [businessId, paymentIntentId, checkoutSessionId, amountPaidDollars]);
+        return;
+      }
       console.log(`[Founding] Concurrent activation for business ${businessId} - already claimed, skipping`);
       return;
     }
@@ -1226,162 +1544,30 @@ async function activateFoundingMember(
   }
 
   // Enrollment happens when the admin opens the next campaign — founding members
-  // are Active and within their prepaid year, so they get enrolled like anyone else.
+  // are Active and within their prepaid term, so they get enrolled like anyone else.
 
   // Welcome email — non-fatal (activation is already committed)
   try {
     const bizResult = await pool.query(`
-      SELECT b.name, u.email, fm.seat_number, s.current_period_end,
-             (SELECT founding_member_cap FROM platform_settings WHERE id = 1) AS cap
+      SELECT b.name, u.email, s.current_period_end
       FROM business b
       JOIN "user" u ON u.id = b.user_id
-      JOIN founding_member fm ON fm.business_id = b.id
       JOIN subscription s ON s.business_id = b.id
       WHERE b.id = $1
     `, [businessId]);
     const biz = bizResult.rows[0];
     if (biz?.email) {
+      // Seat number / founding cap intentionally not passed: internal data, never shown to partners.
       await sendFoundingWelcomeEmail(biz.email, biz.name, {
-        seatNumber: Number(biz.seat_number),
-        cap: Number(biz.cap ?? 30),
         termEnd: new Date(biz.current_period_end),
+        amountPaid: amountPaidDollars,
+        locationCount,
+        termMonths: FOUNDING_TERM_MONTHS,
       });
     }
   } catch (err: unknown) {
     console.error(`[Founding] Welcome email failed for business ${businessId} (non-fatal):`, err instanceof Error ? err.message : err);
   }
-}
-
-// ─── Founding Member: Cancel + Prorated Refund ────────────────────────────────
-
-async function cancelFoundingMembership(
-  pool: Pool,
-  businessId: number,
-  paymentIntentId: string,
-): Promise<CancelResult> {
-  // Membership period for the time-based refund. The year STARTS at the founding payment
-  // (founding_member.paid_at) - NOT subscription.created_at, which can be years older when
-  // the business had a regular plan before buying founding (the upsert never resets it)
-  // and would wrongly shrink the refund.
-  const subResult = await pool.query(
-    `SELECT fm.paid_at, s.current_period_end
-     FROM founding_member fm
-     JOIN subscription s ON s.business_id = fm.business_id
-     WHERE fm.business_id = $1`,
-    [businessId],
-  );
-  const sub = subResult.rows[0] as { paid_at: Date; current_period_end: Date } | undefined;
-
-  // 50% refund of remaining time: $1,200 × (days_remaining / total_days) × 0.5.
-  // The refund is issued BEFORE any destructive change — if Stripe rejects it,
-  // the whole cancellation aborts and the business keeps its membership intact.
-  // (Previously a failed refund was logged "non-fatal" while the membership was
-  // still deleted and the user told a refund was issued.)
-  let refundType: CancelRefundType = 'none';
-  let refundAmount = 0;
-  let refundCents = 0;
-
-  if (sub) {
-    const now = new Date();
-    const periodEnd = new Date(sub.current_period_end);
-    const periodStart = new Date(sub.paid_at);
-    const totalMs = periodEnd.getTime() - periodStart.getTime();
-    const remainingMs = Math.max(0, periodEnd.getTime() - now.getTime());
-    const remainingFraction = totalMs > 0 ? remainingMs / totalMs : 0;
-    refundCents = Math.round(120000 * remainingFraction * 0.5);
-  }
-
-  // Step 1 — Stripe refund FIRST. A refund cannot be rolled back, so it must precede
-  // every DB change: if Stripe rejects it the cancellation aborts and the business
-  // keeps its membership intact (no destructive change has happened yet).
-  if (refundCents > 0) {
-    // Double-refund guard: Stripe is the source of truth for prior refunds. If an earlier
-    // cancel attempt refunded but our DB commit then failed, the ledger never recorded it —
-    // a retry must NOT refund again. Cap by what Stripe says was already returned. If we
-    // cannot verify, abort rather than risk paying twice.
-    try {
-      const pi = await stripe.paymentIntents.retrieve(paymentIntentId, { expand: ['latest_charge'] });
-      const charge = pi.latest_charge;
-      const alreadyRefundedCents = charge && typeof charge !== 'string' ? (charge.amount_refunded ?? 0) : 0;
-      if (alreadyRefundedCents > 0) {
-        console.warn(`[Founding] Business ${businessId}: $${(alreadyRefundedCents / 100).toFixed(2)} already refunded on Stripe (prior attempt) — capping this refund.`);
-      }
-      refundCents = Math.max(0, refundCents - alreadyRefundedCents);
-    } catch (err: unknown) {
-      console.error(`[Founding] Could not verify prior refunds — cancellation aborted for business ${businessId}: ${err instanceof Error ? err.message : err}`);
-      throw new Error('REFUND_FAILED');
-    }
-  }
-  if (refundCents > 0) {
-    try {
-      await stripe.refunds.create({ payment_intent: paymentIntentId, amount: refundCents });
-    } catch (err: unknown) {
-      console.error(`[Founding] Stripe refund failed — cancellation aborted for business ${businessId}: ${err instanceof Error ? err.message : err}`);
-      throw new Error('REFUND_FAILED');
-    }
-    refundAmount = refundCents / 100;
-    refundType = 'prorated'; // always 50% of remaining time — never the full payment
-  }
-
-  // Step 2 — all DB writes atomically. Record the refund on the ledger AND apply the
-  // destructive cancellation in ONE transaction, so the business is never left
-  // half-cancelled (e.g. refunded but still a founding_member with an active sub).
-  const client = await pool.connect();
-  let removedFromDraw = false;
-  let removedCount = 0;
-  try {
-    await client.query('BEGIN');
-
-    if (refundAmount > 0) {
-      // Ledger record so the plan page shows net/refund state from the DB alone.
-      await client.query(
-        `UPDATE founding_payment SET refunded_amount = refunded_amount + $1 WHERE stripe_payment_intent_id = $2`,
-        [refundAmount, paymentIntentId],
-      );
-    }
-
-    // Remove from all upcoming draws
-    const deleteResult = await client.query(
-      `DELETE FROM draw_entry de
-       USING draw d
-       WHERE de.draw_id = d.id AND de.business_id = $1 AND d.status = 'Upcoming'
-       RETURNING de.draw_id`,
-      [businessId],
-    );
-    removedCount = deleteResult.rowCount ?? 0;
-    removedFromDraw = removedCount > 0;
-
-    // Remove founding_member record entirely — they had their chance, no longer founding.
-    await client.query(`DELETE FROM founding_member WHERE business_id = $1`, [businessId]);
-
-    // Cancel subscription immediately (one-time payment, nothing to cancel on Stripe).
-    await client.query(
-      `UPDATE subscription SET status = 'Cancelled', cancel_at_period_end = false, updated_at = NOW()
-       WHERE business_id = $1`,
-      [businessId],
-    );
-
-    await client.query('COMMIT');
-    console.log(`[Founding] Business ${businessId} cancelled. Removed from ${removedCount} upcoming draws. Refunded $${refundAmount} (50% of remaining time).`);
-  } catch (err) {
-    await client.query('ROLLBACK');
-    // Stripe-vs-DB can't be one atomic unit: if the refund already went through but the
-    // DB cancellation rolled back, the money was returned yet the membership is intact.
-    // This is the unavoidable edge — make it LOUD so ops can reconcile manually.
-    if (refundAmount > 0) {
-      console.error(
-        `[Founding] CRITICAL: refund of $${refundAmount} was issued to Stripe for business ${businessId} ` +
-        `but the DB cancellation ROLLED BACK — manual reconciliation needed.`,
-        err instanceof Error ? err.message : err,
-      );
-    }
-    throw err;
-  } finally {
-    client.release();
-  }
-
-  invalidatePublicBusinessData();
-  return { removedFromDraw, refundType, refundAmount };
 }
 
 // ─── Shared Activation Logic ──────────────────────────────────────────────────
@@ -1409,8 +1595,8 @@ async function activateBusinessSubscription(
 
     // ── Founding hand-off ─────────────────────────────────────────────────────
     // If this business is a founding member, this activation is the transition to a
-    // regular plan. The founding seat ends here (row deleted; the $1,200 stays in the
-    // append-only founding_payment ledger). When the founding year still covers the
+    // regular plan. The founding seat ends here (row deleted; the one-time payment stays in the
+    // append-only founding_payment ledger). When the founding term still covers the
     // currently OPEN campaign, the new tier/fee must NOT shrink benefits already paid
     // for — they are staged in pending_* and applied by openDrawInTx when the next
     // campaign opens. When nothing covered remains (expired), the new plan applies now.
@@ -1423,7 +1609,7 @@ async function activateBusinessSubscription(
     if (wasFounding) {
       // The founding benefits cover the currently OPEN campaign iff the business is
       // enrolled in it — enrollment at open is the single source of truth, and a founder
-      // is in every campaign that opened inside their year (even one that draws after
+      // is in every campaign that opened inside their term (even one that draws after
       // the expiry date). An expired founder has no Open-draw entry, so the new plan
       // applies immediately.
       const covered = await client.query(
@@ -1452,6 +1638,7 @@ async function activateBusinessSubscription(
             pending_fee_at_entry         = $6,
             pending_entries_per_location = $7,
             skip_next_campaign           = false,
+            participation_paused         = false,
             billing_interval             = $8,
             updated_at                   = NOW()
         WHERE business_id = $1
@@ -1473,6 +1660,7 @@ async function activateBusinessSubscription(
               pending_fee_at_entry         = NULL,
               pending_entries_per_location = NULL,
               skip_next_campaign     = false,
+              participation_paused   = false,
               billing_interval       = EXCLUDED.billing_interval,
               updated_at             = NOW()
       `, [businessId, customerId, subscriptionId, priceId, currentPeriodEnd, monthlyFee, entriesPerLocation || null, 'monthly', initialStatus]);
@@ -1627,8 +1815,11 @@ export const syncSubscriptionQuantity = async (userId: number, newNextCampaignCo
   }
 
   // Step 3 — stage the new fee (and tier, unchanged here) to go live at the next open.
-  // Actively changing the plan/locations means the business intends to PARTICIPATE - a
-  // previously set skip-campaign opt-out no longer reflects their intent, so clear it.
+  // Actively changing locations means the business intends to PARTICIPATE - a previously
+  // set skip-campaign opt-out no longer reflects their intent, so clear it.
+  // participation_paused is deliberately NOT touched here: the only businesses that can
+  // be paused on this path are immediate-removal cancels (founding cannot add/remove
+  // locations), and a location edit must never silently undo the owner's cancel choice.
   await pool.query(
     `UPDATE subscription
      SET pending_entries_per_location = $1, pending_fee_at_entry = $2, skip_next_campaign = false, updated_at = NOW()
@@ -1758,10 +1949,11 @@ export const updateSubscriptionPlan = async (userId: number, newEntriesPerLocati
   // Step 3 — stage the plan to go live at the next campaign open. The running campaign
   // keeps its tier; stripe_price_id tracks the live Stripe price (just changed).
   // Actively changing the plan means the business intends to PARTICIPATE - clear any
-  // previously set skip-campaign opt-out (it no longer reflects their intent).
+  // previously set skip-campaign opt-out or founding participation pause (neither
+  // reflects their intent any more).
   await pool.query(
     `UPDATE subscription
-     SET pending_entries_per_location = $1, pending_fee_at_entry = $2, stripe_price_id = $3, skip_next_campaign = false, updated_at = NOW()
+     SET pending_entries_per_location = $1, pending_fee_at_entry = $2, stripe_price_id = $3, skip_next_campaign = false, participation_paused = false, updated_at = NOW()
      WHERE business_id = $4`,
     [newEntriesPerLocation, newTotalFee, priceId, sub.business_id],
   );
@@ -1809,8 +2001,8 @@ export const getSubscriptionInvoices = async (userId: number): Promise<Subscript
   const pool = getPool();
 
   // Single round-trip: pull the customer id plus any founding payments at once.
-  // The founding ledger is append-only and records refunds when issued, so the
-  // history read is pure DB — no per-load Stripe call.
+  // The founding ledger is append-only and records refunds when issued; amounts come
+  // straight from the DB (the only Stripe lookups below are the hosted receipt links).
   const result = await pool.query(
     `SELECT s.stripe_customer_id,
             fp.stripe_payment_intent_id, fp.amount, fp.refunded_amount, fp.created_at
@@ -1825,12 +2017,28 @@ export const getSubscriptionInvoices = async (userId: number): Promise<Subscript
   const stripeCustomerId: string | null = result.rows[0]?.stripe_customer_id ?? null;
 
   // Founding members pay once via PaymentIntent — Stripe never creates invoices for
-  // one-time payments, and founding_member is wiped on cancel. The founding_payment
+  // one-time payments, and founding_member is removed only at the founding-to-regular hand-off (founding cannot be cancelled). The founding_payment
   // ledger is the source of truth for history.
   // Founding payments are one-time PaymentIntents (no Stripe invoices). A business that later
   // resubscribes to a regular plan keeps its founding_payment ledger rows, so we must show BOTH
   // the founding history AND any recurring Stripe invoices - merged, newest first - not one or the other.
   const foundingRows = result.rows.filter(r => r.stripe_payment_intent_id);
+
+  // No invoice exists for a one-time payment, but every charge has a Stripe-hosted
+  // receipt page (receipt_url) — surface it through hosted_invoice_url so the client's
+  // Invoice button works for founding rows too. One small Stripe call per founding
+  // payment (almost always exactly one); non-fatal, the row just has no link on failure.
+  const foundingReceiptUrls = new Map<string, string | null>();
+  await Promise.all(foundingRows.map(async (row) => {
+    try {
+      const pi = await stripe.paymentIntents.retrieve(row.stripe_payment_intent_id, { expand: ['latest_charge'] });
+      const charge = pi.latest_charge as Stripe.Charge | null;
+      foundingReceiptUrls.set(row.stripe_payment_intent_id, charge?.receipt_url ?? null);
+    } catch {
+      foundingReceiptUrls.set(row.stripe_payment_intent_id, null);
+    }
+  }));
+
   const foundingInvoices: SubscriptionInvoice[] = foundingRows.map((row) => {
     const grossDollars = Number(row.amount);
     const refundedDollars = Number(row.refunded_amount);
@@ -1855,7 +2063,7 @@ export const getSubscriptionInvoices = async (userId: number): Promise<Subscript
       invoice_description: null,
       description: [{ description: lineDesc, quantity: 1, amount: grossDollars, period_start: undefined, period_end: undefined }],
       invoice_pdf: null,
-      hosted_invoice_url: null,
+      hosted_invoice_url: foundingReceiptUrls.get(row.stripe_payment_intent_id) ?? null,
       kind: 'founding',
     };
   });
@@ -1883,12 +2091,19 @@ export const getSubscriptionInvoices = async (userId: number): Promise<Subscript
     hosted_invoice_url: null,
   }));
 
+  // charges.list drives the refund entries below (each charge carries its refunds directly).
+  let customerCharges: Stripe.Charge[] = [];
+  if (stripeCustomerId) {
+    const chargeList = await stripe.charges.list({ customer: stripeCustomerId, limit: 24, expand: ['data.refunds'] });
+    customerCharges = chargeList.data;
+  }
+
   let stripeInvoices: SubscriptionInvoice[] = [];
   if (stripeCustomerId) {
     const invoiceList = await stripe.invoices.list({
       customer: stripeCustomerId,
       limit: 24,
-      expand: ['data.lines'],
+      expand: ['data.lines', 'data.payments'],
     });
     stripeInvoices = invoiceList.data
       // Drop Stripe accounting artifacts: subscription creation (and similar) produces a
@@ -1896,23 +2111,28 @@ export const getSubscriptionInvoices = async (userId: number): Promise<Subscript
       // description to explain anything, so showing it as a payment only confuses the
       // business. Zero-total invoices WITH a description (change notes) are kept.
       .filter((invoice) => !(invoice.amount_due === 0 && invoice.amount_paid === 0 && !invoice.description))
-      .map((invoice): SubscriptionInvoice => ({
-      id: invoice.id,
-      date: invoice.created,
-      amount_paid: invoice.amount_paid / 100,
-      amount_due: invoice.amount_due / 100,
-      status: invoice.status,
-      invoice_description: invoice.description ?? null,
-      description: invoice.lines.data.map(line => ({
-        description: line.description,
-        quantity: line.quantity ?? null,
-        amount: line.amount / 100,
-        period_start: line.period?.start,
-        period_end: line.period?.end,
-      })),
-      invoice_pdf: invoice.invoice_pdf ?? null,
-      hosted_invoice_url: invoice.hosted_invoice_url ?? null,
-    }));
+      .map((invoice): SubscriptionInvoice => {
+        return {
+          id: invoice.id,
+          date: invoice.created,
+          amount_paid: invoice.amount_paid / 100,
+          amount_due: invoice.amount_due / 100,
+          status: invoice.status,
+          invoice_description: invoice.description ?? null,
+          description: invoice.lines.data.map(line => ({
+            description: line.description,
+            quantity: line.quantity ?? null,
+            amount: line.amount / 100,
+            period_start: line.period?.start,
+            period_end: line.period?.end,
+          })),
+          invoice_pdf: invoice.invoice_pdf ?? null,
+          // The clean hosted invoice page (invoice.stripe.com/i/...) - a single "Paid" invoice view.
+          // NOT the charge receipt_url: for a subscription (invoice-backed) charge that opens the
+          // /receipts/invoices/ page with a combined invoice + receipt ("two block") layout.
+          hosted_invoice_url: invoice.hosted_invoice_url ?? null,
+        };
+      });
   }
 
   // Refunds on regular (Stripe-invoice) charges. In-window downgrades and location removals
@@ -1922,9 +2142,9 @@ export const getSubscriptionInvoices = async (userId: number): Promise<Subscript
   // ledger above, so skip any PaymentIntent that belongs to a founding payment.
   const foundingPIs = new Set(foundingRows.map((r) => r.stripe_payment_intent_id as string));
   let refundEntries: SubscriptionInvoice[] = [];
-  if (stripeCustomerId) {
-    const chargeList = await stripe.charges.list({ customer: stripeCustomerId, limit: 24, expand: ['data.refunds'] });
-    for (const charge of chargeList.data) {
+  {
+    // Reuses the customerCharges list fetched above (refunds already expanded there).
+    for (const charge of customerCharges) {
       const refunds = (charge as unknown as { refunds?: { data?: Stripe.Refund[] } }).refunds?.data ?? [];
       for (const refund of refunds) {
         if (refund.status !== 'succeeded') continue;
@@ -1943,7 +2163,11 @@ export const getSubscriptionInvoices = async (userId: number): Promise<Subscript
           // description verbatim instead of synthesizing a per-location monthly breakdown.
           description: [{ description: `Refund: ${reason}`, quantity: 1, amount: -amt, period_start: refund.created, period_end: refund.created }],
           invoice_pdf: null,
-          hosted_invoice_url: null,
+          // A refund is a reversal on a charge, not an invoice of its own. The charge's receipt page
+          // is the one Stripe document that actually shows the refund (amount refunded + date); an
+          // invoice's hosted page shows the ORIGINAL pre-refund total (misleading for a partial
+          // refund). So link the charge receipt here.
+          hosted_invoice_url: charge.receipt_url ?? null,
         });
       }
     }
@@ -1972,11 +2196,16 @@ export const getSubscriptionDetails = async (userId: number) => {
            ELSE d.prize_pool END AS prize_amount,
       CASE WHEN fm.id IS NOT NULL THEN true ELSE false END AS is_founding,
       fm.seat_number AS founding_seat_number,
+      -- Special Terms Section 6: one-time renewal at the original monthly rate x renewal term.
+      -- ONE-TIME option: founding_renewed = the single renewal was already used.
+      fm.amount_paid::float AS founding_amount_paid,
+      (fm.renewed_at IS NOT NULL) AS founding_renewed,
       s.fee_at_entry,
       s.entries_per_location,
       s.pending_fee_at_entry,
       s.pending_entries_per_location,
       s.skip_next_campaign,
+      s.participation_paused,
       (SELECT d5.opened_at FROM draw d5 WHERE d5.status = 'Open' ORDER BY d5.opened_at DESC NULLS LAST LIMIT 1) AS open_campaign_opened_at,
       (SELECT COUNT(*)::int FROM business_location WHERE business_id = b.id AND is_active = TRUE) AS active_location_count,
       -- What the NEXT campaign runs with: live locations minus scheduled removals plus
@@ -2033,6 +2262,21 @@ export const getSubscriptionDetails = async (userId: number) => {
       !sub.stripe_subscription_id &&
       sub.current_period_end != null &&
       isFoundingTransitionWindow(new Date(sub.current_period_end));
+    // Renewal banner flag - computed with the SAME window helper the renewal checkout
+    // guard uses, so the client never shows a banner the server would reject.
+    sub.founding_renewal_open =
+      sub.is_founding === true &&
+      sub.founding_renewed !== true &&
+      sub.status === 'Active' &&
+      sub.current_period_end != null &&
+      foundingRenewalWindowState(new Date(sub.current_period_end)) === 'open';
+    // What the renewal will actually charge (dollars) - SAME formula as the renewal
+    // checkout (monthly rate snapshot x renewal term), so the banner price and the
+    // Stripe charge can never disagree.
+    sub.founding_renewal_price =
+      sub.is_founding === true && sub.founding_amount_paid != null
+        ? foundingRenewalAmountCents(sub.fee_at_entry, sub.founding_amount_paid) / 100
+        : null;
     // True between the 24th charge and the paid campaign's open — the window where the
     // business may opt out of the paid campaign (no refund) and where changes settle
     // their difference immediately. Same rule the server mutations use.
@@ -2055,34 +2299,50 @@ export const getSubscriptionDetails = async (userId: number) => {
       sub.founding_seat_number = null;
       sub.founding_transition_available = false;
       sub.in_charged_window = false;
+      // Founding billing facts are the owner's too: what they paid and their renewal state.
+      sub.founding_amount_paid = null;
+      sub.founding_renewed = null;
+      sub.founding_renewal_open = false;
+      sub.founding_renewal_price = null;
     }
     delete sub.owner_user_id;
   }
   return sub;
 };
 
-// ─── Skip the Paid Campaign (opt out, no refund) ──────────────────────────────
-// After the 24th charge a business cannot cancel the upcoming campaign, but it may opt
-// out of participating in it — no refund. The flag is consumed at the next campaign open
-// (enrollment skips the business, then resets it). Only available inside the charged
-// window; once the campaign opens, removal is an admin/support action.
-export const setSkipNextCampaign = async (userId: number, skip: boolean): Promise<void> => {
+// ─── Founding Participation Pause (voluntary cancel, no refund) ───────────────
+// Founding Partner cancellation: the Special Terms allow no refund and no early
+// termination of the TERM, but the member may stop PARTICIPATING at any time. Pausing
+// takes the business off the map immediately and blocks new customer entries; customer
+// entries already earned in the running campaign stay valid (draw_entry is kept, same
+// H2 rule as everywhere else). While paused the business is not enrolled when campaigns
+// open. The founding term keeps running (no extension); reactivation is allowed only
+// while current_period_end is still in the future - an expired term needs a new plan.
+export const setParticipationPaused = async (userId: number, paused: boolean): Promise<void> => {
   const pool = getPool();
 
-  if (skip && !(await isChargedNotOpenedWindow(pool))) {
-    throw new Error('SKIP_WINDOW_CLOSED');
+  const result = await pool.query(`
+    SELECT s.id, s.current_period_end, (fm.id IS NOT NULL) AS is_founding
+    FROM subscription s
+    JOIN business b ON b.id = s.business_id
+    LEFT JOIN founding_member fm ON fm.business_id = b.id
+    WHERE b.user_id = $1 AND s.status != 'Cancelled'
+  `, [userId]);
+  const sub = result.rows[0];
+  if (!sub) throw new Error('No active subscription found');
+  // Founding-only until the monthly-plan cancellation model is decided: monthly plans
+  // use the Stripe cancel_at_period_end flow instead.
+  if (!sub.is_founding) throw new Error('FOUNDING_ONLY');
+  if (!paused && (!sub.current_period_end || new Date(sub.current_period_end) < new Date())) {
+    throw new Error('FOUNDING_TERM_ENDED');
   }
 
-  const result = await pool.query(
-    `UPDATE subscription s
-     SET skip_next_campaign = $2, updated_at = NOW()
-     FROM business b
-     WHERE b.id = s.business_id AND b.user_id = $1 AND s.status != 'Cancelled'
-     RETURNING s.id`,
-    [userId, skip],
+  await pool.query(
+    `UPDATE subscription SET participation_paused = $2, updated_at = NOW() WHERE id = $1`,
+    [sub.id, paused],
   );
-  if (result.rowCount === 0) throw new Error('No active subscription found');
   invalidatePublicBusinessData();
+  console.log(`[Founding] Subscription ${sub.id} participation ${paused ? 'paused (voluntary cancel, no refund)' : 'reactivated'}`);
 };
 
 // ─── Resume Subscription ──────────────────────────────────────────────────────
@@ -2100,11 +2360,17 @@ export const resumeSubscription = async (userId: number): Promise<void> => {
     throw new Error('Founding partner memberships cannot be paused and resumed. Contact support if you need assistance.');
   }
 
+  // participation_paused = true also qualifies (not just cancel_at_period_end): if a
+  // prior resume updated Stripe but the DB write failed, the webhook later syncs
+  // cancel_at_period_end = false while the pause stays - without this clause the row
+  // would never match again and the business would stay off the map while PAYING.
+  // Retrying resume here heals that state (the Stripe update is an idempotent no-op).
   const subResult = await pool.query(`
     SELECT s.id, s.stripe_subscription_id, b.id AS business_id
     FROM subscription s
     JOIN business b ON b.id = s.business_id
-    WHERE b.user_id = $1 AND s.cancel_at_period_end = true AND s.status != 'Cancelled'
+    WHERE b.user_id = $1 AND (s.cancel_at_period_end = true OR s.participation_paused = true)
+      AND s.status != 'Cancelled' AND s.stripe_subscription_id IS NOT NULL
   `, [userId]);
 
   const sub = subResult.rows[0];
@@ -2112,8 +2378,13 @@ export const resumeSubscription = async (userId: number): Promise<void> => {
 
   await stripe.subscriptions.update(sub.stripe_subscription_id, { cancel_at_period_end: false });
 
+  // participation_paused clears too: a cancel with immediate removal took the business
+  // off the map, and resuming means the owner wants back in. Done before the paid
+  // campaign opens this restores that spot; after the open the campaign is gone (the
+  // owner was warned there is no refund) and enrollment resumes from the next one.
+  // skip_next_campaign is cleared defensively (the skip feature was removed; no setters remain).
   await pool.query(
-    `UPDATE subscription SET cancel_at_period_end = false, updated_at = NOW() WHERE id = $1`,
+    `UPDATE subscription SET cancel_at_period_end = false, participation_paused = false, skip_next_campaign = false, updated_at = NOW() WHERE id = $1`,
     [sub.id],
   );
 
@@ -2130,27 +2401,34 @@ export interface CancelResult {
   removedFromDraw: boolean;
   refundType: CancelRefundType;
   refundAmount: number; // actual dollars refunded (0 if none)
+  // Echo of the owner's choice: true = business removed from the map immediately and not
+  // enrolled in the paid upcoming campaign (no refund); false = keeps participating in
+  // everything already paid for, the plan just does not renew.
+  immediateRemoval: boolean;
 }
 
-export const cancelSubscription = async (userId: number): Promise<CancelResult> => {
+export const cancelSubscription = async (userId: number, immediate = false): Promise<CancelResult> => {
   const pool = getPool();
 
   // ── Founding member branch ─────────────────────────────────────────────────
+  // Founding Partner Special Terms: a fixed term with NO early termination and
+  // NO refund. Cancellation does not exist for founding - the membership runs through
+  // its term, stays enrolled in every campaign it covers, and simply does not renew
+  // (expiry is automatic: enrollment requires current_period_end >= NOW()).
   const foundingResult = await pool.query(`
-    SELECT fm.stripe_payment_intent_id, b.id AS business_id
+    SELECT b.id AS business_id
     FROM founding_member fm
     JOIN business b ON b.id = fm.business_id
     WHERE b.user_id = $1
   `, [userId]);
 
   if (foundingResult.rows.length > 0) {
-    const { business_id, stripe_payment_intent_id } = foundingResult.rows[0];
-    return cancelFoundingMembership(pool, business_id, stripe_payment_intent_id);
+    throw new Error('FOUNDING_NO_CANCEL');
   }
 
   // ── Recurring subscription branch ─────────────────────────────────────────
   const subResult = await pool.query(`
-    SELECT s.id, s.stripe_subscription_id, b.id AS business_id
+    SELECT s.id, s.stripe_subscription_id, s.status, b.id AS business_id
     FROM subscription s
     JOIN business b ON b.id = s.business_id
     WHERE b.user_id = $1 AND s.status != 'Cancelled'
@@ -2159,18 +2437,24 @@ export const cancelSubscription = async (userId: number): Promise<CancelResult> 
   const sub = subResult.rows[0];
   if (!sub) throw new Error('No active subscription found');
 
-  // Set cancel at period end on Stripe — the business keeps access AND its current
-  // paid draw until the period ends. We never remove from a draw on cancel; a
-  // Cancelled business simply isn't enrolled when the next campaign opens.
+  // Set cancel at period end on Stripe — the plan never renews and never charges again.
+  // The `immediate` flag is the owner's explicit choice from the confirm dialog:
+  //  - false: keep participating in everything already paid for (the running campaign
+  //    and, after the 24th, the paid upcoming one); the business just isn't renewed.
+  //  - true: participation_paused as well - off the map right away, no new customer
+  //    entries, and NOT enrolled when the paid upcoming campaign opens. No refund
+  //    (the dialog says so explicitly). Customer entries already earned stay valid;
+  //    we never remove a business from a draw (draw_entry is untouched).
+  // Resume clears both flags - done before the open it restores the paid spot.
   await stripe.subscriptions.update(sub.stripe_subscription_id, { cancel_at_period_end: true });
   await pool.query(
-    `UPDATE subscription SET cancel_at_period_end = true, updated_at = NOW() WHERE id = $1`,
-    [sub.id],
+    `UPDATE subscription SET cancel_at_period_end = true, participation_paused = (participation_paused OR $2), updated_at = NOW() WHERE id = $1`,
+    [sub.id, immediate],
   );
 
   invalidatePublicBusinessData();
-  console.log(`[Cancel] Business ${sub.business_id} set to cancel at period end. No draw change, no refund.`);
-  return { removedFromDraw: false, refundType: 'none', refundAmount: 0 };
+  console.log(`[Cancel] Business ${sub.business_id} set to cancel at period end.${immediate ? ' Removed from participation immediately (no refund).' : ''} No draw change, no refund.`);
+  return { removedFromDraw: false, refundType: 'none', refundAmount: 0, immediateRemoval: immediate };
 };
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────

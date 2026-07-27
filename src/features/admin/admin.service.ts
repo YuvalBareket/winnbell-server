@@ -9,11 +9,14 @@ const logDrawAudit = async (
   client: import('pg').PoolClient,
   drawId: number,
   action: string,
+  // The admin who performed the action. Every draw mutation is admin-initiated, so this is
+  // always a real id in practice; typed nullable only so a future automated caller can pass null.
+  actorUserId: number | null,
   metadata?: Record<string, unknown>,
 ) => {
   await client.query(
-    `INSERT INTO draw_audit_log (draw_id, action, metadata) VALUES ($1, $2, $3)`,
-    [drawId, action, metadata ? JSON.stringify(metadata) : null],
+    `INSERT INTO draw_audit_log (draw_id, action, actor_user_id, metadata) VALUES ($1, $2, $3, $4)`,
+    [drawId, action, actorUserId, metadata ? JSON.stringify(metadata) : null],
   );
 };
 
@@ -245,10 +248,22 @@ export const setDrawPrizeRevealedService = async (drawId: number, revealed: bool
 
 export const deleteDrawService = async (drawId: number) => {
   const pool = getPool();
-  const existing = await pool.query(`SELECT id, status FROM draw WHERE id = $1`, [drawId]);
+  const existing = await pool.query(
+    `SELECT id, status, winner_user_id, winner_ticket_id FROM draw WHERE id = $1`,
+    [drawId],
+  );
   if (!existing.rows[0]) throw new Error('Campaign not found');
   if (existing.rows[0].status !== 'Upcoming')
     throw new Error('Only upcoming campaigns can be deleted');
+  // Belt-and-suspenders for the legal audit trail: a draw that carries any winner record must
+  // never be hard-deleted (deletion would CASCADE-wipe its draw_audit_log / draw_rejected_winner
+  // history). The Upcoming-only rule above already implies no winner, but assert it explicitly so
+  // the trail can never be lost, even if the status invariant is ever weakened.
+  if (existing.rows[0].winner_user_id !== null || existing.rows[0].winner_ticket_id !== null)
+    throw new Error('Cannot delete a campaign that has a winner on record');
+  const rejected = await pool.query(`SELECT 1 FROM draw_rejected_winner WHERE draw_id = $1 LIMIT 1`, [drawId]);
+  if (rejected.rows.length > 0)
+    throw new Error('Cannot delete a campaign that has a rejected-winner record');
   await pool.query(`DELETE FROM draw WHERE id = $1`, [drawId]);
   invalidatePublicBusinessData();
 };
@@ -354,7 +369,7 @@ export const getDrawBusinessesService = async (
 //    purchase day), and for regular subs this closes the timing hole where a subscription
 //    cancelled on the 24th still shows a stale Active status because Stripe's deleted
 //    webhook has not landed yet - its period ended on the 24th, so it is excluded anyway.
-const openDrawInTx = async (client: import('pg').PoolClient, drawId: number): Promise<void> => {
+const openDrawInTx = async (client: import('pg').PoolClient, drawId: number, actorUserId: number | null): Promise<void> => {
   // prize_revealed = TRUE on open: a live campaign's prize is public fact. Sticky on
   // purpose - if a reopen later reverts this draw to Upcoming, the already-seen prize
   // must not vanish back behind the teaser.
@@ -412,14 +427,19 @@ const openDrawInTx = async (client: import('pg').PoolClient, drawId: number): Pr
     WHERE d.id = $1
       AND s.current_period_end >= NOW()
       AND s.skip_next_campaign = FALSE
+      AND s.participation_paused = FALSE
     ON CONFLICT (draw_id, business_id) DO NOTHING
   `, [drawId]);
   // Opt-outs are one campaign only: consume the flag so the business is back in next time.
+  // EXCEPT for cancelling subscriptions: their skip came from a charged-window cancel and
+  // must survive the open so the plan page keeps saying "you skipped the campaign you paid
+  // for, no refund" (not "you were never charged"). Enrollment-wise it is moot - their
+  // period ends before the following open - and resume clears both flags together.
   await client.query(`
     UPDATE subscription SET skip_next_campaign = FALSE, updated_at = NOW()
-    WHERE skip_next_campaign = TRUE
+    WHERE skip_next_campaign = TRUE AND cancel_at_period_end = FALSE
   `);
-  await logDrawAudit(client, drawId, 'opened');
+  await logDrawAudit(client, drawId, 'opened', actorUserId);
 };
 
 // After a campaign opens, tell every founding member for whom THIS is the final campaign
@@ -459,7 +479,7 @@ const notifyFoundingFinalCampaign = async (drawId: number): Promise<void> => {
   }
 };
 
-export const openDrawService = async (drawId: number): Promise<void> => {
+export const openDrawService = async (drawId: number, actorUserId: number | null): Promise<void> => {
   const pool = getPool();
   const client = await pool.connect();
   try {
@@ -483,7 +503,7 @@ export const openDrawService = async (drawId: number): Promise<void> => {
     const openCheck = await client.query(`SELECT id FROM draw WHERE status = 'Open' FOR UPDATE`);
     if (openCheck.rows.length > 0) throw new Error('A draw is already Open. Close it before opening another.');
 
-    await openDrawInTx(client, drawId);
+    await openDrawInTx(client, drawId, actorUserId);
     await client.query('COMMIT');
     invalidatePublicBusinessData();
     await notifyFoundingFinalCampaign(drawId);
@@ -495,7 +515,7 @@ export const openDrawService = async (drawId: number): Promise<void> => {
   }
 };
 
-export const closeDrawService = async (drawId: number): Promise<void> => {
+export const closeDrawService = async (drawId: number, actorUserId: number | null): Promise<void> => {
   const pool = getPool();
   const client = await pool.connect();
   try {
@@ -522,7 +542,7 @@ export const closeDrawService = async (drawId: number): Promise<void> => {
     const nextDrawId = nextUpcoming.rows[0].id as number;
 
     await client.query(`UPDATE draw SET status = 'Closed', closed_at = NOW() WHERE id = $1`, [drawId]);
-    await logDrawAudit(client, drawId, 'closed');
+    await logDrawAudit(client, drawId, 'closed', actorUserId);
 
     // NOTE: the old draw-time "drop unpaid businesses" deletion is gone. Enrollment at
     // open is strictly paid-only now (no Past_Due grace), so draw_entry only ever holds
@@ -539,7 +559,7 @@ export const closeDrawService = async (drawId: number): Promise<void> => {
     `);
 
     // Hand off: open the next Upcoming draw in the SAME transaction so there is never a gap.
-    await openDrawInTx(client, nextDrawId);
+    await openDrawInTx(client, nextDrawId, actorUserId);
 
     await client.query('COMMIT');
     invalidatePublicBusinessData();
@@ -552,7 +572,7 @@ export const closeDrawService = async (drawId: number): Promise<void> => {
   }
 };
 
-export const reopenDrawService = async (drawId: number): Promise<void> => {
+export const reopenDrawService = async (drawId: number, actorUserId: number | null): Promise<void> => {
   const pool = getPool();
   const client = await pool.connect();
   try {
@@ -583,7 +603,7 @@ export const reopenDrawService = async (drawId: number): Promise<void> => {
       // Revert the auto-opened draw to its exact pre-open state: Upcoming, no enrolment, no opened_at.
       await client.query(`DELETE FROM draw_entry WHERE draw_id = $1`, [row.id]);
       await client.query(`UPDATE draw SET status = 'Upcoming', opened_at = NULL WHERE id = $1`, [row.id]);
-      await logDrawAudit(client, row.id, 'reverted_to_upcoming', { reason: 'reopen_swap', reopened_draw_id: drawId });
+      await logDrawAudit(client, row.id, 'reverted_to_upcoming', actorUserId, { reason: 'reopen_swap', reopened_draw_id: drawId });
     }
 
     await client.query(
@@ -597,7 +617,7 @@ export const reopenDrawService = async (drawId: number): Promise<void> => {
        WHERE id = $1`,
       [drawId],
     );
-    await logDrawAudit(client, drawId, 'reopened');
+    await logDrawAudit(client, drawId, 'reopened', actorUserId);
 
     await client.query('COMMIT');
     invalidatePublicBusinessData();
@@ -609,7 +629,7 @@ export const reopenDrawService = async (drawId: number): Promise<void> => {
   }
 };
 
-export const pickDrawWinnerService = async (drawId: number, applyPenalty = false, reason?: string): Promise<{
+export const pickDrawWinnerService = async (drawId: number, applyPenalty: boolean, reason: string | undefined, actorUserId: number | null): Promise<{
   winnerId: number;
   winnerName: string;
   winnerEmail: string;
@@ -669,10 +689,10 @@ export const pickDrawWinnerService = async (drawId: number, applyPenalty = false
       // Log rejection (always) with the admin's documented reason — append-only record. This row
       // is also what excludes the ticket from every future pick of this draw.
       await client.query(
-        `INSERT INTO draw_rejected_winner (draw_id, ticket_id, user_id, risk_penalty, reason) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING`,
-        [drawId, prevTicketId, prevUserId, penalty, disqualifyReason],
+        `INSERT INTO draw_rejected_winner (draw_id, ticket_id, user_id, rejected_by_user_id, risk_penalty, reason) VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING`,
+        [drawId, prevTicketId, prevUserId, actorUserId, penalty, disqualifyReason],
       );
-      await logDrawAudit(client, drawId, 'winner_rejected', { ticket_id: prevTicketId, user_id: prevUserId, penalty, reason: disqualifyReason });
+      await logDrawAudit(client, drawId, 'winner_rejected', actorUserId, { ticket_id: prevTicketId, user_id: prevUserId, penalty, reason: disqualifyReason });
     }
 
     // Winner selection scans this draw's eligible tickets once (ORDER BY random() LIMIT 1 is a
@@ -723,7 +743,7 @@ export const pickDrawWinnerService = async (drawId: number, applyPenalty = false
       `UPDATE draw SET winner_user_id = $1, winner_ticket_id = $2 WHERE id = $3`,
       [winnerId, winnerTicketId, drawId],
     );
-    await logDrawAudit(client, drawId, 'winner_picked', { ticket_id: winnerTicketId, user_id: winnerId });
+    await logDrawAudit(client, drawId, 'winner_picked', actorUserId, { ticket_id: winnerTicketId, user_id: winnerId });
 
     await client.query('COMMIT');
     invalidatePublicBusinessData();
@@ -762,7 +782,7 @@ export const pickDrawWinnerService = async (drawId: number, applyPenalty = false
   }
 };
 
-export const confirmWinnerService = async (drawId: number): Promise<{
+export const confirmWinnerService = async (drawId: number, actorUserId: number | null): Promise<{
   winnerId: number;
   winnerName: string;
   winnerEmail: string;
@@ -838,7 +858,7 @@ export const confirmWinnerService = async (drawId: number): Promise<{
       `UPDATE draw SET winner_confirmed = TRUE WHERE id = $1`,
       [drawId],
     );
-    await logDrawAudit(client, drawId, 'winner_confirmed', { ticket_id: winnerTicketId, user_id: winnerId });
+    await logDrawAudit(client, drawId, 'winner_confirmed', actorUserId, { ticket_id: winnerTicketId, user_id: winnerId });
 
     await client.query('COMMIT');
     invalidatePublicBusinessData();
@@ -1595,72 +1615,151 @@ export const adminImageDecisionService = async (
   const pool = getPool();
   const { updateUserRiskScore, syncUserQuarantineState } = await import('../risk/risk.service.js');
 
-  const ticketRes = await pool.query(
-    `SELECT id, activated_by_user_id, draw_id, image_validation_status FROM ticket WHERE id = $1`,
+  // Read the immutable receipt coordinates first (business + identifier never change for a ticket)
+  // so the advisory lock can be keyed exactly like the submission and OCR paths.
+  const coord = await pool.query(
+    `SELECT business_id, receipt_identifier FROM ticket WHERE id = $1`,
     [ticketId],
   );
-  if (!ticketRes.rows[0]) throw new Error('Ticket not found');
+  if (!coord.rows[0]) throw new Error('Ticket not found');
+  const coordBusinessId: number = coord.rows[0].business_id;
+  const coordIdentifier: string = coord.rows[0].receipt_identifier ?? '';
 
-  const { activated_by_user_id: userId, draw_id: drawId, image_validation_status: prevStatus } = ticketRes.rows[0];
-  if (!userId) throw new Error('Ticket has no associated user');
-
-  const overrideable = ['passed', 'failed', 'ocr_error', 'pending'];
-  if (!overrideable.includes(prevStatus)) throw new Error(`Cannot override image decision for status: ${prevStatus}`);
-
-  // Idempotency: prevent double-approve or double-reject from farming risk score
-  if (decision === 'approve' && prevStatus === 'passed') throw new Error('Image is already approved');
-  if (decision === 'reject' && prevStatus === 'failed') throw new Error('Image is already rejected');
-
-  if (decision === 'approve') {
-    // Reverse the +2 penalty if previously failed, then apply -3 reward
-    const ticketDeltaChange = prevStatus === 'failed' ? -5 : -3;
-    const userDelta = prevStatus === 'failed' ? -5 : -3;
-
-    await pool.query(
-      `UPDATE ticket
-       SET image_validation_status = 'passed',
-           risk_score_delta        = risk_score_delta + $2,
-           is_quarantined          = FALSE,
-           quarantine_reason       = NULL,
-           quarantined_at          = NULL
-       WHERE id = $1`,
-      [ticketId, ticketDeltaChange],
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // Advisory lock BEFORE any row lock (same acquisition order as submission + OCR) so an admin
+    // decision can't race a concurrent OCR resolution / submission of the same receipt into a
+    // unique-index violation or a half-applied supersede. Namespace 4, key business|identifier.
+    await client.query(
+      `SELECT pg_advisory_xact_lock(4, hashtext($1::text || '|' || $2::text))`,
+      [String(coordBusinessId), coordIdentifier],
     );
-    await pool.query(
-      `UPDATE ticket
-       SET is_quarantined = FALSE, quarantine_reason = NULL, quarantined_at = NULL
-       WHERE anchor_ticket_id = $1
-         AND quarantine_reason IN ('ocr_pending', 'ocr_validation_failed', 'ocr_error_pending_review')`,
+
+    const ticketRes = await client.query(
+      `SELECT id, activated_by_user_id, draw_id, image_validation_status FROM ticket WHERE id = $1 FOR UPDATE`,
       [ticketId],
     );
-    await updateUserRiskScore(userId, userDelta);
-    await syncUserQuarantineState(userId, drawId);
-  } else {
-    // Reverse the -3 reward if previously passed, then apply +2 penalty
-    const ticketDeltaChange = prevStatus === 'passed' ? 5 : 2;
-    const userDelta = prevStatus === 'passed' ? 5 : 2;
+    if (!ticketRes.rows[0]) throw new Error('Ticket not found');
 
-    await pool.query(
-      `UPDATE ticket
-       SET image_validation_status = 'failed',
-           risk_score_delta        = risk_score_delta + $2,
-           is_quarantined          = TRUE,
-           quarantine_reason       = 'ocr_validation_failed',
-           quarantined_at          = NOW()
-       WHERE id = $1`,
-      [ticketId, ticketDeltaChange],
-    );
-    // Siblings may have quarantine_reason=NULL if a prior APPROVE un-quarantined them; a later
-    // reject must still pull them back out of the draw pool, so match on the anchor alone.
-    await pool.query(
-      `UPDATE ticket
-       SET is_quarantined = TRUE, quarantine_reason = 'ocr_validation_failed', quarantined_at = NOW()
-       WHERE anchor_ticket_id = $1
-         AND (quarantine_reason = 'ocr_pending' OR is_quarantined = FALSE)`,
-      [ticketId],
-    );
-    await updateUserRiskScore(userId, userDelta, undefined, []);
-    await syncUserQuarantineState(userId, drawId);
+    const { activated_by_user_id: userId, draw_id: drawId, image_validation_status: prevStatus } = ticketRes.rows[0];
+    if (!userId) throw new Error('Ticket has no associated user');
+
+    const overrideable = ['passed', 'failed', 'ocr_error', 'pending'];
+    if (!overrideable.includes(prevStatus)) throw new Error(`Cannot override image decision for status: ${prevStatus}`);
+
+    // Idempotency: prevent double-approve or double-reject from farming risk score
+    if (decision === 'approve' && prevStatus === 'passed') throw new Error('Image is already approved');
+    if (decision === 'reject' && prevStatus === 'failed') throw new Error('Image is already rejected');
+
+    if (decision === 'approve') {
+      // Reverse the +2 penalty if previously failed, then apply -3 reward
+      const ticketDeltaChange = prevStatus === 'failed' ? -5 : -3;
+      const userDelta = prevStatus === 'failed' ? -5 : -3;
+
+      // Admin approval outranks any competing claim on the same receipt. While this ticket
+      // sat rejected/quarantined its receipt number was released (partial unique index), so
+      // another user may hold an active or OCR-pending ticket for it. Silently quarantine
+      // that competing group (anchor + siblings, shadowban style - its owner sees nothing)
+      // BEFORE un-quarantining the approved ticket, or the index would reject the approval.
+      // Winner tickets are never displaced (mirrors syncUserQuarantineState's protection).
+
+      // If the competing claim already WON a draw it can never be displaced - fail up front
+      // with a clear message instead of erroring mid-way on the unique index.
+      const winnerConflict = await client.query(
+        `SELECT 1
+         FROM ticket me
+         JOIN ticket o
+           ON o.business_id = me.business_id
+          AND o.draw_id = me.draw_id
+          AND o.receipt_identifier = me.receipt_identifier
+          AND o.id <> me.id
+          AND (o.is_quarantined = FALSE OR o.quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review'))
+         JOIN draw d ON d.winner_ticket_id = o.id
+         WHERE me.id = $1 AND me.receipt_identifier IS NOT NULL
+         LIMIT 1`,
+        [ticketId],
+      );
+      if (winnerConflict.rows.length > 0) {
+        throw new Error('Cannot approve: another entry with this receipt already won a draw and cannot be displaced.');
+      }
+
+      await client.query(
+        `WITH approved AS (
+           SELECT business_id, draw_id, receipt_identifier, id
+           FROM ticket
+           WHERE id = $1 AND receipt_identifier IS NOT NULL
+         )
+         UPDATE ticket t
+         SET is_quarantined    = TRUE,
+             quarantine_reason = 'superseded_by_admin_decision',
+             quarantined_at    = NOW()
+         FROM approved a
+         WHERE COALESCE(t.anchor_ticket_id, t.id) IN (
+                 SELECT o.id FROM ticket o
+                 WHERE o.business_id = a.business_id
+                   AND o.draw_id = a.draw_id
+                   AND o.receipt_identifier = a.receipt_identifier
+                   AND o.id <> a.id
+                   AND (o.is_quarantined = FALSE OR o.quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review'))
+               )
+           AND t.id NOT IN (SELECT winner_ticket_id FROM draw WHERE winner_ticket_id IS NOT NULL)`,
+        [ticketId],
+      );
+
+      await client.query(
+        `UPDATE ticket
+         SET image_validation_status = 'passed',
+             risk_score_delta        = risk_score_delta + $2,
+             is_quarantined          = FALSE,
+             quarantine_reason       = NULL,
+             quarantined_at          = NULL
+         WHERE id = $1`,
+        [ticketId, ticketDeltaChange],
+      );
+      await client.query(
+        `UPDATE ticket
+         SET is_quarantined = FALSE, quarantine_reason = NULL, quarantined_at = NULL
+         WHERE anchor_ticket_id = $1
+           AND quarantine_reason IN ('ocr_pending', 'ocr_validation_failed', 'ocr_error_pending_review', 'contest_pending', 'contest_not_won')`,
+        [ticketId],
+      );
+      await updateUserRiskScore(userId, userDelta, client);
+      await syncUserQuarantineState(userId, drawId, client);
+    } else {
+      // Reverse the -3 reward if previously passed, then apply +2 penalty
+      const ticketDeltaChange = prevStatus === 'passed' ? 5 : 2;
+      const userDelta = prevStatus === 'passed' ? 5 : 2;
+
+      await client.query(
+        `UPDATE ticket
+         SET image_validation_status = 'failed',
+             risk_score_delta        = risk_score_delta + $2,
+             is_quarantined          = TRUE,
+             quarantine_reason       = 'ocr_validation_failed',
+             quarantined_at          = NOW()
+         WHERE id = $1`,
+        [ticketId, ticketDeltaChange],
+      );
+      // Siblings may have quarantine_reason=NULL if a prior APPROVE un-quarantined them; a later
+      // reject must still pull them back out of the draw pool, so match on the anchor alone.
+      await client.query(
+        `UPDATE ticket
+         SET is_quarantined = TRUE, quarantine_reason = 'ocr_validation_failed', quarantined_at = NOW()
+         WHERE anchor_ticket_id = $1
+           AND (quarantine_reason = 'ocr_pending' OR is_quarantined = FALSE)`,
+        [ticketId],
+      );
+      await updateUserRiskScore(userId, userDelta, client, []);
+      await syncUserQuarantineState(userId, drawId, client);
+    }
+
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
   }
 };
 
@@ -1672,12 +1771,25 @@ export const getDrawCandidateService = async (drawId: number) => {
       t.code, t.receipt_identifier, t.transaction_amount, t.transaction_date,
       t.receipt_image_url, t.entry_source, t.image_validation_status,
       u.full_name, u.email, u.risk_score,
-      b.name AS business_name, bl.name AS location_name
+      b.name AS business_name, bl.name AS location_name,
+      conf.created_at AS confirmed_at, conf.actor_user_id AS confirmed_by_id,
+      cu.full_name AS confirmed_by_name, cu.email AS confirmed_by_email
     FROM draw d
     LEFT JOIN ticket t ON t.id = d.winner_ticket_id
     LEFT JOIN "user" u ON u.id = d.winner_user_id
     LEFT JOIN business b ON b.id = t.business_id
     LEFT JOIN business_location bl ON bl.id = t.location_id
+    -- Who confirmed the winner and when, from the append-only audit log (there is at most one
+    -- 'winner_confirmed' row per draw). actor is NULL for confirmations recorded before actor
+    -- tracking existed; created_at is always present.
+    LEFT JOIN LATERAL (
+      SELECT dal.actor_user_id, dal.created_at
+      FROM draw_audit_log dal
+      WHERE dal.draw_id = d.id AND dal.action = 'winner_confirmed'
+      ORDER BY dal.created_at DESC
+      LIMIT 1
+    ) conf ON TRUE
+    LEFT JOIN "user" cu ON cu.id = conf.actor_user_id
     WHERE d.id = $1
   `, [drawId]);
 
@@ -1700,6 +1812,12 @@ export const getDrawCandidateService = async (drawId: number) => {
     entrySource: row.entry_source ?? null,
     imageValidationStatus: row.image_validation_status ?? null,
     riskScore: row.risk_score ?? 0,
+    // Confirmation trail (present once winnerConfirmed is true). confirmedByName is null for
+    // winners confirmed before actor tracking existed; confirmedAt is always available.
+    confirmedAt: row.confirmed_at ?? null,
+    confirmedById: row.confirmed_by_id ?? null,
+    confirmedByName: row.confirmed_by_name ?? null,
+    confirmedByEmail: row.confirmed_by_email ?? null,
   };
 };
 
@@ -1708,6 +1826,7 @@ export const getDrawRejectedWinnersService = async (drawId: number) => {
   const result = await pool.query(`
     SELECT
       drw.id, drw.rejected_at, drw.risk_penalty, drw.reason,
+      drw.rejected_by_user_id, ru.full_name AS rejected_by_name, ru.email AS rejected_by_email,
       t.id AS ticket_id, t.code, t.receipt_identifier, t.transaction_amount,
       t.transaction_date, t.receipt_image_url, t.entry_source,
       u.id AS user_id, u.full_name, u.email, u.risk_score,
@@ -1715,6 +1834,7 @@ export const getDrawRejectedWinnersService = async (drawId: number) => {
     FROM draw_rejected_winner drw
     JOIN ticket t ON t.id = drw.ticket_id
     JOIN "user" u ON u.id = drw.user_id
+    LEFT JOIN "user" ru ON ru.id = drw.rejected_by_user_id
     LEFT JOIN business b ON b.id = t.business_id
     LEFT JOIN business_location bl ON bl.id = t.location_id
     WHERE drw.draw_id = $1
@@ -1739,13 +1859,22 @@ export const getDrawRejectedWinnersService = async (drawId: number) => {
     userRiskScore: r.risk_score ?? 0,
     businessName: r.business_name ?? null,
     locationName: r.location_name ?? null,
+    // Who performed the rejection (null only if that admin account was later deleted).
+    rejectedById: r.rejected_by_user_id ?? null,
+    rejectedByName: r.rejected_by_name ?? null,
+    rejectedByEmail: r.rejected_by_email ?? null,
   }));
 };
 
 export const getDrawAuditLogService = async (drawId: number) => {
   const pool = getPool();
   const result = await pool.query(
-    `SELECT id, action, metadata, created_at FROM draw_audit_log WHERE draw_id = $1 ORDER BY created_at DESC LIMIT 200`,
+    `SELECT dal.id, dal.action, dal.metadata, dal.created_at,
+            dal.actor_user_id, au.full_name AS actor_name, au.email AS actor_email
+     FROM draw_audit_log dal
+     LEFT JOIN "user" au ON au.id = dal.actor_user_id
+     WHERE dal.draw_id = $1
+     ORDER BY dal.created_at DESC LIMIT 200`,
     [drawId],
   );
   return result.rows;

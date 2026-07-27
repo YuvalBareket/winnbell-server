@@ -1,6 +1,7 @@
 import nodemailer from 'nodemailer';
 import { WINNBELL_LOGO_BASE64 } from './winnbell-logo.data.js';
 import { nextChargeAtNy, nextCampaignOpensNy, CHARGE_DAY_OF_MONTH } from '../dates.js';
+import { FOUNDING_TERM_MONTHS, FOUNDING_PRICE_PER_LOCATION, FOUNDING_ENTRIES_PER_LOCATION } from '../founding.js';
 
 // "9" -> "9th", "21" -> "21st", "24" -> "24th". Keeps the billing copy in sync with the
 // actual charge day (CHARGE_DAY_OF_MONTH) so the email never names the wrong date.
@@ -178,14 +179,18 @@ export const sendSubscriptionConfirmationEmail = async (
                     <div style="font-size:11px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:#94a3b8;">Your plan</div>
                   </td>
                 </tr>
+                <!-- Stacked full-width rows (no side-by-side columns): the old two-column
+                     layout squeezed and wrapped badly on narrow phone screens. -->
                 <tr>
-                  <td style="padding:14px 0 20px 22px;vertical-align:bottom;">
+                  <td colspan="2" style="padding:14px 22px 0;">
                     <div style="font-size:17px;font-weight:700;color:#0f2747;">${plan.planName} &middot; ${locationLabel}</div>
                     <div style="font-size:12.5px;color:#94a3b8;font-weight:600;margin-top:3px;">${plan.entriesPerLocation.toLocaleString('en-US')} entries per location, every campaign</div>
                   </td>
-                  <td align="right" style="padding:14px 22px 20px 0;vertical-align:bottom;">
-                    <div style="font-size:22px;font-weight:700;letter-spacing:-0.02em;color:#0f2747;">${totalLabel}<span style="font-size:12.5px;font-weight:600;color:#94a3b8;"> / mo</span></div>
-                    <div style="font-size:11.5px;color:#94a3b8;font-weight:600;">billed on ${CHARGE_DAY_LABEL}</div>
+                </tr>
+                <tr>
+                  <td colspan="2" style="padding:12px 22px 20px;">
+                    <div style="font-size:24px;font-weight:700;letter-spacing:-0.02em;color:#0f2747;">${totalLabel}<span style="font-size:12.5px;font-weight:600;color:#94a3b8;"> / mo</span></div>
+                    <div style="font-size:11.5px;color:#94a3b8;font-weight:600;margin-top:2px;">billed on ${CHARGE_DAY_LABEL}</div>
                   </td>
                 </tr>
               </table>
@@ -252,10 +257,17 @@ ${stepsHtml}
 // payment story is spelled out: one charge today, $0 recurring, covers every campaign
 // opening before the term end, no auto-renewal.
 
+// Seat numbers and the founding cap are deliberately NOT mentioned anywhere in the email:
+// how many founding spots exist and which one a business holds is internal only.
 export const sendFoundingWelcomeEmail = async (
   toEmail: string,
   businessName: string,
-  details: { seatNumber: number; cap: number; termEnd: Date },
+  // Everything price/term-related is passed IN by the caller (stripe.service owns the
+  // term constants and the DB price setting): the amount actually charged, the location
+  // count paid for, and the term length in months (initial term or renewal term).
+  // isRenewal switches the copy for the one-time renewal confirmation (the payment
+  // explainer must not tell a member who just renewed to go pick a regular plan).
+  details: { termEnd: Date; amountPaid?: number; locationCount?: number; termMonths?: number; isRenewal?: boolean },
 ): Promise<void> => {
   if (!process.env.SMTP_HOST) {
     console.warn('[Email] SMTP_HOST not configured — skipping founding welcome email');
@@ -269,9 +281,21 @@ export const sendFoundingWelcomeEmail = async (
   const openDate = fmtNyDate(campaignOpen);
   const termEndLabel = fmtNyDate(details.termEnd);
   const goldGradient = 'linear-gradient(90deg,#fcd34d,#f59e0b)';
+  const locationCount = Math.max(1, details.locationCount ?? 1);
+  const amountPaid = details.amountPaid ?? FOUNDING_PRICE_PER_LOCATION * locationCount;
+  const amountLabel = `$${amountPaid.toLocaleString('en-US')}`;
+  const locationLabel = locationCount === 1 ? '1 location' : `${locationCount} locations`;
+  const termMonths = Math.max(1, details.termMonths ?? FOUNDING_TERM_MONTHS);
+  const termLabel = `${termMonths} months`;
+  // Renewals are the ONE-TIME option already used - never invite another renewal.
+  const finalNote = details.isRenewal
+    ? `This was your one-time founding renewal, so when this term ends you can continue with a regular monthly plan - we'll email you before your final included campaign ends.`
+    : `Before your final included campaign ends we'll email you, and you can pick a regular monthly plan to continue without missing a day.`;
+  // Per-location price derived from what was actually paid (price changes never touch existing members).
+  const perLocationLabel = `$${Math.round(amountPaid / locationCount).toLocaleString('en-US')}`;
 
   const included: string[] = [
-    `<strong style="color:#0f2747;">1,000 entries</strong> per location in every campaign`,
+    `<strong style="color:#0f2747;">${FOUNDING_ENTRIES_PER_LOCATION.toLocaleString('en-US')} entries</strong> per location in every campaign`,
     `Every campaign that opens before <strong style="color:#0f2747;">${termEndLabel}</strong>`,
     `<strong style="color:#0f2747;">One-time payment.</strong> $0 charged monthly, no auto-renewal`,
     `Your locations shown on the <strong style="color:#0f2747;">Winnbell map</strong>`,
@@ -311,7 +335,9 @@ export const sendFoundingWelcomeEmail = async (
                   </td>
                 </tr>`).join('');
 
-  const subject = `Welcome, Founding Partner! ${businessName} is locked in for a full year`;
+  const subject = details.isRenewal
+    ? `Renewed! ${businessName} is locked in for another ${termLabel}`
+    : `Welcome, Founding Partner! ${businessName} is locked in for ${termLabel}`;
 
   const html = `
 <!DOCTYPE html>
@@ -349,7 +375,7 @@ export const sendFoundingWelcomeEmail = async (
                       <div style="width:52px;height:52px;border-radius:50%;background:#ffffff;margin:11px auto 0;text-align:center;line-height:52px;font-size:26px;font-weight:700;color:#f59e0b;">&#10003;</div>
                     </div>
                     <div style="font-size:27px;font-weight:700;letter-spacing:-0.02em;color:#ffffff;line-height:1.2;">Welcome aboard, ${businessName}!</div>
-                    <div style="font-size:14px;color:rgba(255,255,255,.82);font-weight:500;line-height:1.6;max-width:400px;margin:10px auto 0;">You're officially a Winnbell Founding Partner. A full year of campaigns, one payment, locked in.</div>
+                    <div style="font-size:14px;color:rgba(255,255,255,.82);font-weight:500;line-height:1.6;max-width:400px;margin:10px auto 0;">You're officially a Winnbell Founding Partner. ${termLabel} of campaigns, one payment, locked in.</div>
                   </td>
                 </tr>
               </table>
@@ -360,7 +386,7 @@ export const sendFoundingWelcomeEmail = async (
           <tr>
             <td style="padding:34px 40px 8px;">
 
-              <p style="margin:0;font-size:14.5px;color:#475569;line-height:1.7;">Congratulations, and thank you for backing Winnbell early. You hold founding seat #${details.seatNumber}, and your membership is now active. Below is everything your year includes and exactly how the payment works - keep this email as your confirmation.</p>
+              <p style="margin:0;font-size:14.5px;color:#475569;line-height:1.7;">Congratulations, and thank you for backing Winnbell early. Your Founding Partner membership is now active. Below is everything your membership includes and exactly how the payment works - keep this email as your confirmation.</p>
 
               <!-- membership summary -->
               <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:24px;border:1px solid #e7edf4;border-radius:16px;overflow:hidden;">
@@ -372,14 +398,18 @@ export const sendFoundingWelcomeEmail = async (
                     <div style="font-size:11px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;color:#94a3b8;">Your founding membership</div>
                   </td>
                 </tr>
+                <!-- Stacked full-width rows (no side-by-side columns): the old two-column
+                     layout squeezed and wrapped badly on narrow phone screens. -->
                 <tr>
-                  <td style="padding:14px 0 16px 22px;vertical-align:bottom;">
-                    <div style="font-size:17px;font-weight:700;color:#0f2747;">Founding Partner &middot; seat #${details.seatNumber}</div>
-                    <div style="font-size:12.5px;color:#94a3b8;font-weight:600;margin-top:3px;">1,000 entries per location, every campaign</div>
+                  <td colspan="2" style="padding:14px 22px 0;">
+                    <div style="font-size:17px;font-weight:700;color:#0f2747;">Founding Partner &middot; ${locationLabel}</div>
+                    <div style="font-size:12.5px;color:#94a3b8;font-weight:600;margin-top:3px;">2,500 entries per location, every campaign</div>
                   </td>
-                  <td align="right" style="padding:14px 22px 16px 0;vertical-align:bottom;">
-                    <div style="font-size:22px;font-weight:700;letter-spacing:-0.02em;color:#0f2747;">$1,200<span style="font-size:12.5px;font-weight:600;color:#94a3b8;"> one-time</span></div>
-                    <div style="font-size:11.5px;color:#94a3b8;font-weight:600;">then $0 / month for 12 months</div>
+                </tr>
+                <tr>
+                  <td colspan="2" style="padding:12px 22px 16px;">
+                    <div style="font-size:24px;font-weight:700;letter-spacing:-0.02em;color:#0f2747;">${amountLabel}<span style="font-size:12.5px;font-weight:600;color:#94a3b8;"> one-time</span></div>
+                    <div style="font-size:11.5px;color:#94a3b8;font-weight:600;margin-top:2px;">${perLocationLabel} per location &middot; then $0 / month for ${termLabel}</div>
                   </td>
                 </tr>
                 <tr>
@@ -399,10 +429,11 @@ ${includedHtml}
                 <tr>
                   <td style="padding:16px 20px;">
                     <div style="font-size:13px;font-weight:700;color:#0f2747;margin-bottom:6px;">About your payment</div>
-                    <div style="font-size:13px;color:#475569;line-height:1.65;"><strong style="color:#0f2747;">Your card was charged $1,200 today, and that is the only charge.</strong>
+                    <div style="font-size:13px;color:#475569;line-height:1.65;"><strong style="color:#0f2747;">Your card was charged ${amountLabel} today (${perLocationLabel} per location), and that is the only charge.</strong>
                     This email is your confirmation, not an invoice. Nothing is billed monthly, and your membership does not auto-renew.
-                    It covers every campaign that opens before <strong style="color:#0f2747;">${termEndLabel}</strong>.
-                    Before your final included campaign ends we'll email you, and you can pick a regular monthly plan to continue without missing a day.</div>
+                    It covers your ${locationLabel} in every campaign that opens before <strong style="color:#0f2747;">${termEndLabel}</strong>.
+                    Your location set is fixed for your founding term - you can edit location details anytime, and our support team is happy to help with anything else.
+                    ${finalNote}</div>
                   </td>
                 </tr>
               </table>
@@ -426,7 +457,7 @@ ${stepsHtml}
               <table width="100%" cellpadding="0" cellspacing="0" style="margin-top:28px;">
                 <tr>
                   <td align="center" style="padding:22px 0 24px;border-top:1px solid #f1f5f9;">
-                    <div style="font-size:13px;color:#475569;line-height:1.6;">Questions about your founding year? We're here to help. Just reply to this email or reach us at <a href="mailto:support@winnbell.com" style="color:#1565c0;text-decoration:none;font-weight:700;">support@winnbell.com</a>.</div>
+                    <div style="font-size:13px;color:#475569;line-height:1.6;">Questions about your founding membership? We're here to help. Just reply to this email or reach us at <a href="mailto:support@winnbell.com" style="color:#1565c0;text-decoration:none;font-weight:700;">support@winnbell.com</a>.</div>
                   </td>
                 </tr>
               </table>
@@ -586,7 +617,7 @@ export const sendPaymentFailedEmail = async (
 };
 
 // ─── Founding Partner: Final Included Campaign ────────────────────────────────
-// Sent when a campaign opens and it is the LAST one covered by the founding year.
+// Sent when a campaign opens and it is the LAST one covered by the founding term.
 // The subscribe-by date is the end of the current campaign: starting a regular plan
 // before then puts the business in the next campaign with no gap.
 
@@ -594,8 +625,8 @@ export const sendFoundingFinalCampaignEmail = async (
   toEmail: string,
   businessName: string,
   dates: {
-    termEnd: Date;             // when the founding year ends
-    nextCampaignOpensAt: Date; // 1st of next month - the open the founding year no longer covers
+    termEnd: Date;             // when the founding term ends
+    nextCampaignOpensAt: Date; // 1st of next month - the open the founding term no longer covers
   },
 ): Promise<void> => {
   if (!process.env.SMTP_HOST) {
@@ -637,10 +668,10 @@ export const sendFoundingFinalCampaignEmail = async (
           <tr>
             <td style="background:#ffffff;padding:36px 40px;">
               <p style="margin:0 0 8px;font-size:22px;font-weight:700;color:#1e293b;">
-                Thank you for a great founding year, ${businessName}!
+                Thank you for being a Founding Partner, ${businessName}!
               </p>
               <p style="margin:0 0 20px;color:#64748b;font-size:15px;line-height:1.6;">
-                The campaign running right now is the last one included in your Founding Partner year,
+                The campaign running right now is the last one included in your Founding Partner term,
                 which ends on <strong style="color:#1e293b;">${fmtNyDate(dates.termEnd)}</strong>.
               </p>
               <p style="margin:0 0 28px;color:#64748b;font-size:15px;line-height:1.6;">

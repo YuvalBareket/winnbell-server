@@ -4,6 +4,7 @@ import { getPool } from '../../shared/db/db.js';
 import { AuthRequest } from '../../shared/middleware/auth.middleware.js';
 import { validateLength } from '../../shared/validation.js';
 import { getClientIp } from '../../shared/clientIp.js';
+import { normalizeReceiptIdentifier } from '../ocr/receiptIdentity.js';
 
 export const getMyTickets = async (req: AuthRequest, res: Response) => {
   try {
@@ -53,7 +54,11 @@ export const activate = async (req: AuthRequest, res: Response) => {
     const result = await ticketService.activateFreeTicket(userId, getClientIp(req));
     res.status(201).json(result);
   } catch (error: unknown) {
-    res.status(400).json({ message: 'Activation failed' });
+    // Surface the service's curated, user-facing reason (weekly limit, no open campaign,
+    // 30-entry cap, email not verified) - same pattern as activatePromotional/submitReceiptEntry.
+    // PHONE_NOT_VERIFIED never reaches here (requirePhoneVerified middleware runs first).
+    const message = error instanceof Error && error.message ? error.message : 'Activation failed';
+    res.status(400).json({ message });
   }
 };
 
@@ -71,8 +76,18 @@ export const submitReceiptEntry = async (req: AuthRequest, res: Response) => {
       return;
     }
     const sanitizedId = String(receiptIdentifier).trim();
-    if (sanitizedId.length < 4 || sanitizedId.length > 100) {
-      res.status(400).json({ message: 'receiptIdentifier must be between 4 and 100 characters.' });
+    // Min 5 (matches the client). Shorter numeric strings collide with digit runs that appear
+    // incidentally in unrelated receipt images (barcodes, phone numbers), which weakens the
+    // contest OCR proof - so the floor is enforced server-side, not just in the form.
+    if (sanitizedId.length < 5 || sanitizedId.length > 100) {
+      res.status(400).json({ message: 'receiptIdentifier must be between 5 and 100 characters.' });
+      return;
+    }
+    // Canonical form (uppercase alnum only) is what we STORE and dedup on, so "#1366-3859"
+    // and "1366-3859" can't both be entered as if they were different receipts.
+    const normalizedId = normalizeReceiptIdentifier(sanitizedId);
+    if (normalizedId.length < 4) {
+      res.status(400).json({ message: 'receiptIdentifier must contain at least 4 letters or numbers.' });
       return;
     }
 
@@ -98,7 +113,7 @@ export const submitReceiptEntry = async (req: AuthRequest, res: Response) => {
 
     const result = await ticketService.submitReceiptEntryService(userId, {
       locationId: Number(locationId),
-      receiptIdentifier: String(receiptIdentifier).trim(),
+      receiptIdentifier: normalizedId,
       // Round to 2 dp (cents) so the stored amount and entry math never carry float noise.
       transactionAmount: Math.round(Number(transactionAmount) * 100) / 100,
       transactionDate: typeof transactionDate === 'string' ? transactionDate : undefined,
@@ -119,6 +134,16 @@ export const submitReceiptEntry = async (req: AuthRequest, res: Response) => {
   } catch (error: unknown) {
     if (error instanceof Error && error.message === 'PHONE_NOT_VERIFIED') {
       res.status(403).json({ message: 'PHONE_NOT_VERIFIED' });
+      return;
+    }
+    // Anti-squatting: another user typed this receipt with no image. Ask this user (who may
+    // be the real owner) to attach a photo so OCR can verify it and override the squatter.
+    // A distinct code lets the client show the specific message + reveal the image upload.
+    if (error instanceof Error && error.message === 'RECEIPT_CONTEST_IMAGE_REQUIRED') {
+      res.status(409).json({
+        code: 'RECEIPT_CONTEST_IMAGE_REQUIRED',
+        message: 'It looks like this receipt was already entered. Attach a photo of it and try again to confirm it is yours.',
+      });
       return;
     }
     // Surface the service's curated, user-facing message (threshold, dates, duplicates, etc.).
@@ -161,6 +186,23 @@ export const activatePromotional = async (req: AuthRequest, res: Response) => {
     // Surface the service's curated, user-facing message (invalid code, max uses, one-per-campaign, cap).
     const message = error instanceof Error && error.message ? error.message : 'Promotional entry failed.';
     res.status(400).json({ message });
+  }
+};
+
+// STAGING DEMO ONLY (temporary). Lets the demo account wipe its own activity between
+// demos. The service double-gates on isDemoUser, so this is a no-op 403 for anyone else
+// and whenever DEMO_USER_ENABLED is unset (production). Remove with the demo scaffolding.
+export const resetDemo = async (req: AuthRequest, res: Response) => {
+  try {
+    const userId = req.user!.id;
+    const result = await ticketService.resetDemoUserService(userId);
+    res.json({ success: true, ...result });
+  } catch (error: unknown) {
+    if (error instanceof Error && error.message === 'DEMO_RESET_NOT_PERMITTED') {
+      res.status(403).json({ message: 'Not permitted.' });
+      return;
+    }
+    res.status(500).json({ message: 'Failed to reset demo account.' });
   }
 };
 

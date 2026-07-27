@@ -27,9 +27,13 @@ jest.mock('../../tickets/tickets.service.js', () => ({
   generateGlobalUniqueCode: jest.fn().mockResolvedValue('TESTCODE'),
 }));
 
-// Risk decay runs AFTER winner confirmation commits (non-fatal) — stub it
+// Risk decay runs AFTER winner confirmation commits (non-fatal) — stub it.
+// updateUserRiskScore/syncUserQuarantineState are dynamically imported by
+// adminImageDecisionService — stub them too so its tests don't hit real SQL.
 jest.mock('../../risk/risk.service.js', () => ({
   decayAllUserRiskScores: jest.fn().mockResolvedValue({ unquarantinedUserIds: [] }),
+  updateUserRiskScore: jest.fn().mockResolvedValue(undefined),
+  syncUserQuarantineState: jest.fn().mockResolvedValue(undefined),
 }));
 
 // email.service is imported for the founding final-campaign notice — stub it
@@ -39,7 +43,7 @@ jest.mock('../../../shared/email/email.service.js', () => ({
   sendFoundingFinalCampaignEmail: (...args: unknown[]) => mockSendFoundingFinalCampaignEmail(...args),
 }));
 
-import { createDrawService, openDrawService, closeDrawService, confirmWinnerService, removeBusinessFromDrawService, duplicateDrawService } from '../admin.service';
+import { createDrawService, openDrawService, closeDrawService, confirmWinnerService, removeBusinessFromDrawService, duplicateDrawService, adminImageDecisionService } from '../admin.service';
 
 // ─────────────────────────────────────────────
 // Helpers
@@ -409,7 +413,7 @@ describe('openDrawService — enrollment', () => {
       { rows: [] },                               // COMMIT
     );
 
-    await openDrawService(5);
+    await openDrawService(5, 1);
 
     const enroll = mockClientQuery.mock.calls.find(
       ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO draw_entry'),
@@ -428,12 +432,17 @@ describe('openDrawService — enrollment', () => {
     expect(sql).toMatch(/current_period_end >= NOW\(\)/);
     // Businesses that opted out of the paid campaign are skipped (flag consumed after)
     expect(sql).toMatch(/skip_next_campaign = FALSE/);
+    // Founding members who cancelled participation are never enrolled
+    expect(sql).toMatch(/participation_paused = FALSE/);
     expect(enroll![1]).toEqual([5]);
 
     const skipReset = mockClientQuery.mock.calls.find(
       ([s]: [string]) => typeof s === 'string' && s.includes('SET skip_next_campaign = FALSE'),
     );
     expect(skipReset).toBeDefined();
+    // The reset spares cancelling subs: their skip records "skipped the campaign they
+    // already paid for" and must survive the open for the plan page to say so.
+    expect(skipReset![0]).toMatch(/cancel_at_period_end = FALSE/);
   });
 
   test('refuses to open a second draw while one is already Open', async () => {
@@ -444,7 +453,7 @@ describe('openDrawService — enrollment', () => {
       { rows: [{ id: 9 }] },                      // an Open draw already exists
     );
 
-    await expect(openDrawService(5)).rejects.toThrow(/already Open/);
+    await expect(openDrawService(5, 1)).rejects.toThrow(/already Open/);
 
     const enroll = mockClientQuery.mock.calls.find(
       ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO draw_entry'),
@@ -458,7 +467,7 @@ describe('openDrawService — enrollment', () => {
       { rows: [] },                               // pg_advisory_xact_lock
       { rows: [{ id: 5, status: 'Open' }] },      // already Open
     );
-    await expect(openDrawService(5)).rejects.toThrow(/Only Upcoming/);
+    await expect(openDrawService(5, 1)).rejects.toThrow(/Only Upcoming/);
   });
 });
 
@@ -482,7 +491,7 @@ describe('closeDrawService — paid entries are never ejected at close', () => {
       { rows: [] },                            // COMMIT
     );
 
-    await closeDrawService(5);
+    await closeDrawService(5, 1);
 
     // Every business in draw_entry PAID for the campaign (strict open-time enrollment).
     // A charge that fails later in the month is for the NEXT campaign and must never
@@ -515,7 +524,7 @@ describe('openDrawInTx — staged plan changes (founding hand-off)', () => {
       { rows: [] },                               // COMMIT
     );
 
-    await openDrawService(5);
+    await openDrawService(5, 1);
 
     const calls = mockClientQuery.mock.calls;
     const pendingIdx = calls.findIndex(
@@ -567,7 +576,7 @@ describe('confirmWinnerService — eligibility re-check', () => {
       { rows: [] },                    // audit log
       { rows: [] },                    // COMMIT
     );
-    await expect(confirmWinnerService(1)).resolves.toBeDefined();
+    await expect(confirmWinnerService(1, 1)).resolves.toBeDefined();
     const confirmed = mockClientQuery.mock.calls.some(
       ([sql]: [string]) => typeof sql === 'string' && sql.includes('winner_confirmed = TRUE'),
     );
@@ -581,7 +590,7 @@ describe('confirmWinnerService — eligibility re-check', () => {
       { rows: [{ ...eligibleWinner, is_active: false }] },
       { rows: [] },
     );
-    await expect(confirmWinnerService(1)).rejects.toThrow('WINNER_NO_LONGER_ELIGIBLE');
+    await expect(confirmWinnerService(1, 1)).rejects.toThrow('WINNER_NO_LONGER_ELIGIBLE');
     const confirmed = mockClientQuery.mock.calls.some(
       ([sql]: [string]) => typeof sql === 'string' && sql.includes('winner_confirmed = TRUE'),
     );
@@ -595,7 +604,7 @@ describe('confirmWinnerService — eligibility re-check', () => {
       { rows: [{ ...eligibleWinner, is_quarantined: true }] },
       { rows: [] },
     );
-    await expect(confirmWinnerService(1)).rejects.toThrow('WINNER_NO_LONGER_ELIGIBLE');
+    await expect(confirmWinnerService(1, 1)).rejects.toThrow('WINNER_NO_LONGER_ELIGIBLE');
   });
 
   test('rejects a candidate whose risk score climbed to the quarantine threshold', async () => {
@@ -605,7 +614,7 @@ describe('confirmWinnerService — eligibility re-check', () => {
       { rows: [{ ...eligibleWinner, risk_score: 20 }] },
       { rows: [] },
     );
-    await expect(confirmWinnerService(1)).rejects.toThrow('WINNER_NO_LONGER_ELIGIBLE');
+    await expect(confirmWinnerService(1, 1)).rejects.toThrow('WINNER_NO_LONGER_ELIGIBLE');
   });
 });
 
@@ -680,12 +689,68 @@ describe('openDrawService — opening reveals the prize permanently', () => {
       { rows: [] },                                    // no open draw check
       { rows: [] },                                    // everything else
     );
-    await openDrawService(3);
+    await openDrawService(3, 1);
     const openUpdate = mockClientQuery.mock.calls.find(
       ([sql]: [string]) => typeof sql === 'string' && sql.includes("SET status = 'Open'"),
     );
     expect(openUpdate).toBeDefined();
     expect(openUpdate![0]).toMatch(/prize_revealed = TRUE/);
+  });
+});
+<<<<<<< HEAD
+>>>>>>> develop
+=======
+
+// ─────────────────────────────────────────────
+// adminImageDecisionService — admin approval outranks competing claims (audit P2-4)
+// While a ticket sat rejected its receipt slot was released; approval must first
+// silently supersede any competing claim (shadowban style) or the partial unique
+// index would reject the un-quarantine. Winner tickets are never displaced.
+// ─────────────────────────────────────────────
+describe('adminImageDecisionService — approval supersedes competing claims (P2-4)', () => {
+  const TICKET_ROW = { id: 9, activated_by_user_id: 7, draw_id: 42, image_validation_status: 'failed' };
+
+  test('approve quarantines the competing group BEFORE un-quarantining the approved ticket', async () => {
+    // pool.query serves only the immutable coord read; the whole decision runs on the txn client.
+    mockQuery.mockResolvedValueOnce({ rows: [{ business_id: 3, receipt_identifier: 'RCP1' }] });
+    mockClientQuery.mockImplementation((sql: string) => {
+      if (sql.includes('FOR UPDATE')) return Promise.resolve({ rows: [TICKET_ROW] });        // locked lookup
+      if (sql.includes('JOIN draw d ON d.winner_ticket_id')) return Promise.resolve({ rows: [] }); // no winner conflict
+      return Promise.resolve({ rows: [], rowCount: 1 });
+    });
+
+    await adminImageDecisionService(9, 'approve');
+
+    const calls = mockClientQuery.mock.calls.map(([sql]) => sql as string);
+    const supersedeIdx = calls.findIndex(s => s.includes('superseded_by_admin_decision'));
+    const approveIdx = calls.findIndex(s => s.includes("image_validation_status = 'passed'"));
+    expect(supersedeIdx).toBeGreaterThan(-1);
+    expect(approveIdx).toBeGreaterThan(-1);
+    // Kick first — otherwise the partial unique index rejects the approval.
+    expect(supersedeIdx).toBeLessThan(approveIdx);
+    // The kick displaces the whole competing group (anchor + siblings) but never winners.
+    expect(calls[supersedeIdx]).toContain('COALESCE(t.anchor_ticket_id, t.id)');
+    expect(calls[supersedeIdx]).toContain('winner_ticket_id');
+    // The decision is wrapped in a transaction that commits.
+    expect(calls).toContain('BEGIN');
+    expect(calls).toContain('COMMIT');
+  });
+
+  test('approve fails cleanly when the competing claim already won a draw', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ business_id: 3, receipt_identifier: 'RCP1' }] });
+    mockClientQuery.mockImplementation((sql: string) => {
+      if (sql.includes('FOR UPDATE')) return Promise.resolve({ rows: [TICKET_ROW] });          // locked lookup
+      if (sql.includes('JOIN draw d ON d.winner_ticket_id')) return Promise.resolve({ rows: [{ found: 1 }] }); // winner conflict HIT
+      return Promise.resolve({ rows: [] });
+    });
+
+    await expect(adminImageDecisionService(9, 'approve')).rejects.toThrow(/already won a draw/);
+
+    // No mutation happened and the transaction rolled back.
+    const calls = mockClientQuery.mock.calls.map(([sql]) => sql as string);
+    const updates = calls.filter(s => s.includes('UPDATE ticket'));
+    expect(updates).toHaveLength(0);
+    expect(calls).toContain('ROLLBACK');
   });
 });
 >>>>>>> develop

@@ -1,4 +1,4 @@
-/**
+﻿/**
  * Tests — stripe.service.ts: checkout, activation (24th anchor + immediate window charge),
  * cancellation/refunds, the founding transition, and fee resolution.
  *
@@ -77,7 +77,7 @@ process.env.STRIPE_PRICE_ID_1000 = 'price_test_1000';
 process.env.STRIPE_PRICE_ID_2500 = 'price_test_2500';
 process.env.STRIPE_PRICE_ID_5000 = 'price_test_5000';
 
-import { createCheckoutSession, createFoundingMemberCheckoutSession, cancelSubscription, verifyAndActivateSession, resumeSubscription, resolveMonthlyFee, isFoundingTransitionWindow, updateSubscriptionPlan, invoicePaymentIntentId } from '../stripe.service';
+import { createCheckoutSession, createFoundingMemberCheckoutSession, cancelSubscription, verifyAndActivateSession, resumeSubscription, resolveMonthlyFee, isFoundingTransitionWindow, updateSubscriptionPlan, invoicePaymentIntentId, createFoundingRenewalCheckoutSession, activateFoundingRenewal, setParticipationPaused, FOUNDING_RENEWAL_TERM_MONTHS, FOUNDING_PRICE_PER_LOCATION } from '../stripe.service';
 import { invalidatePlatformSettings } from '../../../shared/cache/cache';
 import { CHARGE_DAY_OF_MONTH } from '../../../shared/dates';
 
@@ -186,16 +186,16 @@ describe('createCheckoutSession — setup session', () => {
 // cancelSubscription — recurring path never removes from a draw
 // ─────────────────────────────────────────────
 describe('cancelSubscription — recurring', () => {
-  it('sets cancel_at_period_end, removes NOTHING from draws, issues no refund', async () => {
+  it('default (keep participating): cancel_at_period_end only, nothing removed, no refund', async () => {
     mockSubscriptionsUpdate.mockResolvedValue({});
     mockQuery
       .mockResolvedValueOnce({ rows: [] }) // founding check — not a founding member
-      .mockResolvedValueOnce({ rows: [{ id: 1, stripe_subscription_id: 'sub_1', business_id: 42 }] }) // subResult
+      .mockResolvedValueOnce({ rows: [{ id: 1, stripe_subscription_id: 'sub_1', status: 'Active', business_id: 42 }] }) // subResult
       .mockResolvedValueOnce({ rows: [], rowCount: 1 }); // UPDATE cancel_at_period_end
 
     const res = await cancelSubscription(7);
 
-    // Stripe told to cancel at period end (keeps access + paid draw until then)
+    // Stripe told to cancel at period end (keeps access + every paid campaign until then)
     expect(mockSubscriptionsUpdate).toHaveBeenCalledWith('sub_1', { cancel_at_period_end: true });
 
     // The business is NEVER pulled from a draw on cancel.
@@ -204,129 +204,59 @@ describe('cancelSubscription — recurring', () => {
     );
     expect(deletedDraw).toBeUndefined();
 
-    expect(res).toEqual({ removedFromDraw: false, refundType: 'none', refundAmount: 0 });
+    // Keep-participating choice: participation stays untouched ($2 = false). The OR form
+    // matters - a direct `participation_paused = $2` would wrongly UN-pause on re-cancel.
+    const update = mockQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('SET cancel_at_period_end = true'),
+    );
+    expect(update![0]).toContain('participation_paused = (participation_paused OR $2)');
+    expect(update![1]).toEqual([1, false]);
+
+    expect(res).toEqual({ removedFromDraw: false, refundType: 'none', refundAmount: 0, immediateRemoval: false });
+  });
+
+  it('immediate removal choice: also sets participation_paused (off map, no enrollment), still no refund and no draw teardown', async () => {
+    mockSubscriptionsUpdate.mockResolvedValue({});
+    mockQuery
+      .mockResolvedValueOnce({ rows: [] }) // founding check
+      .mockResolvedValueOnce({ rows: [{ id: 1, stripe_subscription_id: 'sub_1', status: 'Active', business_id: 42 }] })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 }); // UPDATE
+
+    const res = await cancelSubscription(7, true);
+
+    const update = mockQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('SET cancel_at_period_end = true'),
+    );
+    expect(update![0]).toContain('participation_paused');
+    expect(update![1]).toEqual([1, true]);
+    // The pause is the whole effect: no refund, no draw_entry removal.
+    expect(mockRefundsCreate).not.toHaveBeenCalled();
+    const deletedDraw = mockQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('DELETE FROM draw_entry'),
+    );
+    expect(deletedDraw).toBeUndefined();
+    expect(res).toEqual({ removedFromDraw: false, refundType: 'none', refundAmount: 0, immediateRemoval: true });
   });
 });
 
 // ─────────────────────────────────────────────
-// cancelSubscription — FOUNDING member refund flow (the refund path)
+// cancelSubscription — FOUNDING member (Special Terms: fixed term, no cancellation)
 // ─────────────────────────────────────────────
-describe('cancelSubscription — founding refund', () => {
-  const FOUNDING_ROW = { stripe_payment_intent_id: 'pi_1', business_id: 42 };
+describe('cancelSubscription — founding (no cancellation per Special Terms)', () => {
+  const FOUNDING_ROW = { business_id: 42 };
 
-  beforeEach(() => {
-    // Double-refund guard verifies prior refunds on Stripe before refunding; default: none.
-    mockPaymentIntentsRetrieve.mockResolvedValue({ latest_charge: { amount: 120000, amount_refunded: 0 } });
-  });
+  it('throws FOUNDING_NO_CANCEL and makes NO changes: no refund, no teardown', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [FOUNDING_ROW] }); // founding check
 
-  it('issues a prorated 50%-of-remaining-time refund, then tears down the membership', async () => {
-    const createdAt = new RealDate('2026-01-01T00:00:00.000Z');
-    const periodEnd = new RealDate('2027-01-01T00:00:00.000Z');
-    const now = new RealDate('2026-07-02T00:00:00.000Z');
-    mockDateNow(now);
-    mockRefundsCreate.mockResolvedValue({ id: 're_1' });
+    await expect(cancelSubscription(7)).rejects.toThrow('FOUNDING_NO_CANCEL');
 
-    mockQuery
-      .mockResolvedValueOnce({ rows: [FOUNDING_ROW] })                                              // founding check
-      .mockResolvedValueOnce({ rows: [{ paid_at: createdAt, current_period_end: periodEnd }] }); // membership period
-    // Destructive writes (ledger + deletes + cancel) now run in a client transaction.
-    mockClientQuery.mockImplementation((sql: string) =>
-      Promise.resolve(
-        typeof sql === 'string' && sql.includes('DELETE FROM draw_entry')
-          ? { rows: [{ draw_id: 9 }], rowCount: 1 }
-          : { rows: [], rowCount: 1 },
-      ),
-    );
-
-    const res = await cancelSubscription(7);
-
-    const totalMs = periodEnd.getTime() - createdAt.getTime();
-    const remainingMs = periodEnd.getTime() - now.getTime();
-    const expectedCents = Math.round(120000 * (remainingMs / totalMs) * 0.5);
-
-    expect(mockRefundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_1', amount: expectedCents });
-    expect(res.refundType).toBe('prorated');
-    expect(res.refundAmount).toBeCloseTo(expectedCents / 100, 2);
-    expect(res.removedFromDraw).toBe(true);
-  });
-
-  it('aborts with REFUND_FAILED and makes NO destructive change when the Stripe refund fails', async () => {
-    mockDateNow(new RealDate('2026-07-02T00:00:00.000Z'));
-    mockRefundsCreate.mockRejectedValue(new Error('charge_already_refunded'));
-
-    mockQuery
-      .mockResolvedValueOnce({ rows: [FOUNDING_ROW] })
-      .mockResolvedValueOnce({ rows: [{ paid_at: new RealDate('2026-01-01T00:00:00.000Z'), current_period_end: new RealDate('2027-01-01T00:00:00.000Z') }] });
-
-    await expect(cancelSubscription(7)).rejects.toThrow('REFUND_FAILED');
-
-    // Membership must remain intact — the refund fails BEFORE the DB transaction opens,
-    // so the client (which now runs all destructive writes) is never even acquired.
-    expect(mockClientQuery).not.toHaveBeenCalled();
-  });
-
-  it('no refund when the membership year has already ended, but still tears down', async () => {
-    mockDateNow(new RealDate('2026-06-01T00:00:00.000Z'));
-    mockQuery
-      .mockResolvedValueOnce({ rows: [FOUNDING_ROW] })
-      .mockResolvedValueOnce({ rows: [{ paid_at: new RealDate('2025-01-01T00:00:00.000Z'), current_period_end: new RealDate('2026-01-01T00:00:00.000Z') }] });
-    // No refund, but the teardown still runs in a transaction; DELETE draw_entry finds none.
-    mockClientQuery.mockResolvedValue({ rows: [], rowCount: 0 });
-
-    const res = await cancelSubscription(7);
-
+    // The Special Terms give no early termination and no refund: nothing may move.
     expect(mockRefundsCreate).not.toHaveBeenCalled();
-    expect(res.refundType).toBe('none');
-    expect(res.refundAmount).toBe(0);
-    expect(res.removedFromDraw).toBe(false);
-  });
-
-  it('refund never exceeds 50% of the $1,200 fee, even cancelling on day one', async () => {
-    mockDateNow(new RealDate('2026-01-01T00:01:00.000Z')); // ~1 minute into the year
-    mockRefundsCreate.mockResolvedValue({ id: 're_1' });
-    mockQuery
-      .mockResolvedValueOnce({ rows: [FOUNDING_ROW] })
-      .mockResolvedValueOnce({ rows: [{ paid_at: new RealDate('2026-01-01T00:00:00.000Z'), current_period_end: new RealDate('2027-01-01T00:00:00.000Z') }] });
-    mockClientQuery.mockResolvedValue({ rows: [], rowCount: 0 });
-
-    await cancelSubscription(7);
-
-    const amount = mockRefundsCreate.mock.calls[0][0].amount;
-    expect(amount).toBeLessThanOrEqual(60000); // never more than $600 (50% of $1,200)
-    expect(amount).toBeGreaterThan(59900);     // ~$600 on day one
-  });
-
-  it('does NOT refund again on a retry after a failed commit — Stripe already shows the refund', async () => {
-    mockDateNow(new RealDate('2026-07-02T00:00:00.000Z'));
-    // A prior attempt refunded $302 (say) and the DB commit then failed; Stripe remembers.
-    mockPaymentIntentsRetrieve.mockResolvedValue({ latest_charge: { amount: 120000, amount_refunded: 60000 } });
-    mockQuery
-      .mockResolvedValueOnce({ rows: [FOUNDING_ROW] })
-      .mockResolvedValueOnce({ rows: [{ paid_at: new RealDate('2026-01-01T00:00:00.000Z'), current_period_end: new RealDate('2027-01-01T00:00:00.000Z') }] });
-    mockClientQuery.mockResolvedValue({ rows: [], rowCount: 0 });
-
-    const res = await cancelSubscription(7);
-
-    // $60,000c already refunded >= the ~$302 entitled now → nothing more goes out,
-    // but the teardown still completes.
-    expect(mockRefundsCreate).not.toHaveBeenCalled();
-    expect(res.refundAmount).toBe(0);
-    const teardown = mockClientQuery.mock.calls.find(
-      ([sql]: [string]) => typeof sql === 'string' && sql.includes('DELETE FROM founding_member'),
-    );
-    expect(teardown).toBeDefined();
-  });
-
-  it('aborts when prior refunds cannot be verified (never risk a double refund)', async () => {
-    mockDateNow(new RealDate('2026-07-02T00:00:00.000Z'));
-    mockPaymentIntentsRetrieve.mockRejectedValue(new Error('stripe unavailable'));
-    mockQuery
-      .mockResolvedValueOnce({ rows: [FOUNDING_ROW] })
-      .mockResolvedValueOnce({ rows: [{ paid_at: new RealDate('2026-01-01T00:00:00.000Z'), current_period_end: new RealDate('2027-01-01T00:00:00.000Z') }] });
-
-    await expect(cancelSubscription(7)).rejects.toThrow('REFUND_FAILED');
-    expect(mockRefundsCreate).not.toHaveBeenCalled();
-    expect(mockClientQuery).not.toHaveBeenCalled(); // no destructive change happened
+    expect(mockClientQuery).not.toHaveBeenCalled(); // no destructive transaction opened
+    // No draw removal, no founding_member delete, no subscription status change.
+    const destructive = mockQuery.mock.calls.filter(([sql]) =>
+      typeof sql === 'string' && (sql.includes('DELETE') || sql.includes('UPDATE')));
+    expect(destructive).toHaveLength(0);
   });
 });
 
@@ -475,6 +405,12 @@ describe('resumeSubscription', () => {
       ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO draw_entry'),
     );
     expect(enroll).toBeUndefined();
+    // An immediate-removal cancel also paused participation; resuming means the owner
+    // wants back in, so the pause must clear in the same UPDATE.
+    const update = mockQuery.mock.calls.find(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('SET cancel_at_period_end = false'),
+    );
+    expect(update![0]).toContain('participation_paused = false');
   });
 });
 
@@ -691,7 +627,8 @@ describe('verifyAndActivateSession — founding activation guards', () => {
     payment_status: 'paid',
     payment_intent: pi,
     customer: 'cus_1',
-    metadata: { business_id: '42', founding: 'true' },
+    amount_total: 30000, // per-location pricing: 1 location x the 3-month founding total
+    metadata: { business_id: '42', founding: 'true', locations: '1' },
   });
 
   it('auto-refunds a DUPLICATE founding purchase (seat already held via another session)', async () => {
@@ -704,15 +641,17 @@ describe('verifyAndActivateSession — founding activation guards', () => {
 
     await verifyAndActivateSession('cs_NEW', 7);
 
-    // Full $1,200 refunded automatically; no seat claim transaction ever starts.
+    // The full charge is refunded automatically; no seat claim transaction ever starts.
     expect(mockRefundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_dup' });
     expect(mockClientQuery).not.toHaveBeenCalled();
-    // Recorded on the append-only ledger as fully refunded.
+    // Recorded on the append-only ledger as fully refunded (amount = what the session
+    // actually charged; per-location pricing makes this dynamic, bound as $4).
     const ledger = mockQuery.mock.calls.find(
       ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO founding_payment'),
     );
     expect(ledger).toBeDefined();
-    expect(ledger![0]).toMatch(/1200\.00,\s*1200\.00/);
+    expect(ledger![0]).toMatch(/\$4,\s*\$4/);
+    expect(ledger![1]).toContain(300);
   });
 
   it('is still idempotent for the SAME session (webhook + verify double call)', async () => {
@@ -774,25 +713,34 @@ describe('verifyAndActivateSession — founding activation guards', () => {
     );
     expect(claim).toBeDefined();
     // And the founding partner gets a REAL welcome email (not just a log line).
+    // Seat number / cap are internal-only and deliberately NOT part of the email contract.
     expect(mockSendFoundingWelcomeEmail).toHaveBeenCalledWith('owner@cafe.com', 'Cafe One',
-      expect.objectContaining({ seatNumber: 3, cap: 30 }));
+      expect.objectContaining({ termEnd: expect.any(Date) }));
   });
 });
 
 // ─────────────────────────────────────────────
-// createFoundingMemberCheckoutSession — server-side location limit
+// createFoundingMemberCheckoutSession — per-location pricing (no location limit)
 // ─────────────────────────────────────────────
-describe('createFoundingMemberCheckoutSession — location limit', () => {
-  it('rejects founding checkout for a business with more than 3 locations', async () => {
+describe('createFoundingMemberCheckoutSession — per-location pricing', () => {
+  it('prices the checkout per location ($1,200 x N) with no location limit', async () => {
     invalidatePlatformSettings(); // force the settings read through the mocked pool
+    mockSessionsCreate.mockResolvedValue({ url: 'https://checkout.stripe.com/f/1' });
     mockQuery
       .mockResolvedValueOnce({ rows: [{ founding_phase_active: true, founding_member_cap: 30 }] }) // platform settings
       .mockResolvedValueOnce({ rows: [{ taken: 5 }] })                                             // seats taken
       .mockResolvedValueOnce({ rows: [] })                                                         // no existing subscription
-      .mockResolvedValueOnce({ rows: [{ cnt: 4 }] });                                              // 4 locations
+      .mockResolvedValueOnce({ rows: [{ cnt: 4 }] });                                              // 4 locations — allowed now
 
-    await expect(createFoundingMemberCheckoutSession(42, 'owner@test.com')).rejects.toThrow('FOUNDING_LOCATION_LIMIT');
-    expect(mockSessionsCreate).not.toHaveBeenCalled();
+    const res = await createFoundingMemberCheckoutSession(42, 'owner@test.com');
+
+    expect(res.url).toBe('https://checkout.stripe.com/f/1');
+    const sessionArgs = mockSessionsCreate.mock.calls[0][0];
+    // quantity = location count, unit price = the single-source constant
+    expect(sessionArgs.line_items[0].quantity).toBe(4);
+    expect(sessionArgs.line_items[0].price_data.unit_amount).toBe(FOUNDING_PRICE_PER_LOCATION * 100);
+    // location count stamped into metadata so activation records what was paid for
+    expect(sessionArgs.metadata.locations).toBe('4');
   });
 });
 
@@ -874,7 +822,7 @@ describe('verifyAndActivateSession — founding hand-off', () => {
     expect(sqls.some((s) => s.includes('INSERT INTO subscription'))).toBe(false);
   });
 
-  it('applies the new plan immediately when the founding year covers no open campaign (expired)', async () => {
+  it('applies the new plan immediately when the founding term covers no open campaign (expired)', async () => {
     stripeSetupMocks();
     poolMocks();
     setupHandoffClientQueries(false);
@@ -935,5 +883,228 @@ describe('invoicePaymentIntentId — Basil + legacy PaymentIntent resolution', (
     expect(invoicePaymentIntentId(asInvoice({}))).toBeUndefined();
     expect(invoicePaymentIntentId(asInvoice({ payments: { data: [] } }))).toBeUndefined();
     expect(invoicePaymentIntentId(asInvoice({ payments: { data: [{ payment: {} }] } }))).toBeUndefined();
+  });
+});
+
+// ─────────────────────────────────────────────
+// Founding second-year renewal (Special Terms Section 6)
+// ─────────────────────────────────────────────
+describe('createFoundingRenewalCheckoutSession — window + monthly-rate pricing', () => {
+  // 2 locations at $100/location/month: initial 3-month purchase was $600 total,
+  // fee_at_entry (monthly rate snapshot) = $200. Renewal = $200 x 12 = $2,400.
+  const FOUNDING_SUB_ROW = {
+    business_id: 42, email: 'owner@cafe.com', amount_paid: '600.00', fee_at_entry: '200.00',
+    current_period_end: new RealDate('2026-08-10T00:00:00.000Z'),
+  };
+
+  it('rejects before the final-30-days window opens (RENEWAL_NOT_OPEN)', async () => {
+    mockDateNow(new RealDate('2026-06-01T00:00:00.000Z')); // >30 days before term end
+    mockQuery.mockResolvedValueOnce({ rows: [FOUNDING_SUB_ROW] });
+
+    await expect(createFoundingRenewalCheckoutSession(7)).rejects.toThrow('RENEWAL_NOT_OPEN');
+    expect(mockSessionsCreate).not.toHaveBeenCalled();
+  });
+
+  it('rejects after the term already ended (RENEWAL_EXPIRED)', async () => {
+    mockDateNow(new RealDate('2026-08-15T00:00:00.000Z')); // after term end
+    mockQuery.mockResolvedValueOnce({ rows: [FOUNDING_SUB_ROW] });
+
+    await expect(createFoundingRenewalCheckoutSession(7)).rejects.toThrow('RENEWAL_EXPIRED');
+    expect(mockSessionsCreate).not.toHaveBeenCalled();
+  });
+
+  it('rejects when the ONE-TIME renewal was already used (RENEWAL_ALREADY_USED)', async () => {
+    mockDateNow(new RealDate('2026-07-25T00:00:00.000Z')); // within the window
+    mockQuery.mockResolvedValueOnce({ rows: [{ ...FOUNDING_SUB_ROW, renewed_at: new RealDate('2026-07-20T00:00:00.000Z') }] });
+
+    await expect(createFoundingRenewalCheckoutSession(7)).rejects.toThrow('RENEWAL_ALREADY_USED');
+    expect(mockSessionsCreate).not.toHaveBeenCalled();
+  });
+
+  it('creates a checkout at the ORIGINAL MONTHLY RATE x the renewal term inside the window', async () => {
+    mockDateNow(new RealDate('2026-07-25T00:00:00.000Z')); // within final 30 days
+    mockQuery.mockResolvedValueOnce({ rows: [FOUNDING_SUB_ROW] });
+    mockSessionsCreate.mockResolvedValue({ url: 'https://checkout.stripe.com/r/1' });
+
+    const res = await createFoundingRenewalCheckoutSession(7);
+
+    expect(res.url).toBe('https://checkout.stripe.com/r/1');
+    const args = mockSessionsCreate.mock.calls[0][0];
+    // Section 6: original monthly rate ($200) x FOUNDING_RENEWAL_TERM_MONTHS = $2,400.
+    expect(args.line_items[0].price_data.unit_amount).toBe(200 * 100 * FOUNDING_RENEWAL_TERM_MONTHS);
+    expect(args.metadata.founding_renewal).toBe('true');
+  });
+
+  it('derives the rate from amount_paid when fee_at_entry is missing (legacy rows)', async () => {
+    mockDateNow(new RealDate('2026-07-25T00:00:00.000Z'));
+    mockQuery.mockResolvedValueOnce({ rows: [{ ...FOUNDING_SUB_ROW, fee_at_entry: null }] });
+    mockSessionsCreate.mockResolvedValue({ url: 'https://checkout.stripe.com/r/2' });
+
+    await createFoundingRenewalCheckoutSession(7);
+
+    const args = mockSessionsCreate.mock.calls[0][0];
+    // $600 over the 3-month initial term = $200/month; x 12 = $2,400. Same result.
+    expect(args.line_items[0].price_data.unit_amount).toBe(240000);
+  });
+});
+
+describe('activateFoundingRenewal — term extension + idempotency (transactional)', () => {
+  const RENEWAL_SESSION = {
+    id: 'cs_renew', payment_intent: 'pi_renew', amount_total: 240000,
+    metadata: { business_id: '42', founding_renewal: 'true' },
+  } as never;
+
+  it('ledgers the payment and extends current_period_end by the renewal term FROM the term end', async () => {
+    mockClientQuery.mockImplementation((sql: string) => {
+      if (typeof sql === 'string' && sql.includes('INSERT INTO founding_payment')) {
+        return Promise.resolve({ rows: [], rowCount: 1 }); // ledger claim (fresh payment intent)
+      }
+      if (typeof sql === 'string' && sql.includes('UPDATE founding_member')) {
+        return Promise.resolve({ rows: [{ id: 9 }], rowCount: 1 }); // renewed_at claim won
+      }
+      if (typeof sql === 'string' && sql.includes('UPDATE subscription')) {
+        return Promise.resolve({ rows: [{ current_period_end: new RealDate('2027-08-10T00:00:00.000Z') }], rowCount: 1 });
+      }
+      return Promise.resolve({ rows: [], rowCount: 0 }); // BEGIN / COMMIT
+    });
+    mockQuery.mockResolvedValueOnce({ rows: [{ name: 'Cafe One', email: 'owner@cafe.com', locs: 2 }] }); // email lookup
+
+    const { getPool } = jest.requireMock('../../../shared/db/db.js') as { getPool: () => never };
+    await activateFoundingRenewal(getPool(), RENEWAL_SESSION);
+
+    const extend = mockClientQuery.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('current_period_end + make_interval(months => $2)'),
+    );
+    expect(extend).toBeDefined();
+    // The interval param is the single-source renewal-term constant.
+    expect(extend![1][1]).toBe(FOUNDING_RENEWAL_TERM_MONTHS);
+    // The one-time renewal is claimed at ACTIVATION time (renewed_at IS NULL guard).
+    const marked = mockClientQuery.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('SET renewed_at = NOW()') && sql.includes('renewed_at IS NULL'),
+    );
+    expect(marked).toBeDefined();
+    // Everything commits together — money ledgered AND term extended, or neither.
+    expect(mockClientQuery.mock.calls.some(([sql]) => sql === 'COMMIT')).toBe(true);
+    // Renewal confirmation email carries the amount, locations, and RENEWAL copy flag.
+    expect(mockSendFoundingWelcomeEmail).toHaveBeenCalledWith('owner@cafe.com', 'Cafe One',
+      expect.objectContaining({ amountPaid: 2400, locationCount: 2, termMonths: FOUNDING_RENEWAL_TERM_MONTHS, isRenewal: true }));
+    expect(mockRefundsCreate).not.toHaveBeenCalled();
+  });
+
+  it('is idempotent: a second call with the SAME payment intent (webhook + verify double fire) is a no-op', async () => {
+    mockClientQuery.mockImplementation((sql: string) => {
+      if (typeof sql === 'string' && sql.includes('INSERT INTO founding_payment')) {
+        return Promise.resolve({ rows: [], rowCount: 0 }); // ledger claim lost (already processed)
+      }
+      return Promise.resolve({ rows: [], rowCount: 0 });
+    });
+
+    const { getPool } = jest.requireMock('../../../shared/db/db.js') as { getPool: () => never };
+    await activateFoundingRenewal(getPool(), RENEWAL_SESSION);
+
+    const extend = mockClientQuery.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('make_interval'),
+    );
+    expect(extend).toBeUndefined();
+    expect(mockClientQuery.mock.calls.some(([sql]) => sql === 'ROLLBACK')).toBe(true);
+    expect(mockSendFoundingWelcomeEmail).not.toHaveBeenCalled();
+    expect(mockRefundsCreate).not.toHaveBeenCalled();
+  });
+
+  it('refunds a DUPLICATE renewal payment (different intent, renewal already used) and never extends twice', async () => {
+    // Two tabs both created a renewal checkout while renewed_at was NULL; the second
+    // paid session arrives with a DIFFERENT payment intent after the first extended.
+    mockRefundsCreate.mockResolvedValue({ id: 're_dup_renew' });
+    mockClientQuery.mockImplementation((sql: string) => {
+      if (typeof sql === 'string' && sql.includes('INSERT INTO founding_payment')) {
+        return Promise.resolve({ rows: [], rowCount: 1 }); // fresh PI — ledger insert succeeds
+      }
+      if (typeof sql === 'string' && sql.includes('UPDATE founding_member')) {
+        return Promise.resolve({ rows: [], rowCount: 0 }); // renewed_at already set — claim LOST
+      }
+      return Promise.resolve({ rows: [], rowCount: 0 });
+    });
+
+    const { getPool } = jest.requireMock('../../../shared/db/db.js') as { getPool: () => never };
+    await activateFoundingRenewal(getPool(), { ...(RENEWAL_SESSION as object), payment_intent: 'pi_renew_2' } as never);
+
+    // The term is NEVER extended a second time.
+    const extend = mockClientQuery.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('make_interval'),
+    );
+    expect(extend).toBeUndefined();
+    // The duplicate payment is refunded in full and ledgered as refunded.
+    expect(mockRefundsCreate).toHaveBeenCalledWith({ payment_intent: 'pi_renew_2' });
+    const refundMark = mockClientQuery.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('SET refunded_amount = amount'),
+    );
+    expect(refundMark).toBeDefined();
+    expect(mockClientQuery.mock.calls.some(([sql]) => sql === 'COMMIT')).toBe(true);
+    expect(mockSendFoundingWelcomeEmail).not.toHaveBeenCalled();
+  });
+});
+
+// ─────────────────────────────────────────────
+// setParticipationPaused — founding cancel (permanent opt-out, no refund) + reactivate
+// ─────────────────────────────────────────────
+describe('setParticipationPaused — founding cancel and reactivate', () => {
+  const FUTURE = new RealDate(RealDate.now() + 30 * 24 * 3600 * 1000);
+  const PAST = new RealDate(RealDate.now() - 24 * 3600 * 1000);
+
+  it('pauses a founding subscription (no Stripe calls, no draw removal)', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 5, current_period_end: FUTURE, is_founding: true }] })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 }); // UPDATE participation_paused
+
+    await setParticipationPaused(7, true);
+
+    const update = mockQuery.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('SET participation_paused'),
+    );
+    expect(update).toBeDefined();
+    expect(update![1]).toEqual([5, true]);
+    // Voluntary opt-out only: nothing is refunded, nothing leaves a draw.
+    expect(mockRefundsCreate).not.toHaveBeenCalled();
+    expect(mockSubscriptionsUpdate).not.toHaveBeenCalled();
+    const deletedDraw = mockQuery.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('DELETE FROM draw_entry'),
+    );
+    expect(deletedDraw).toBeUndefined();
+  });
+
+  it('reactivates while the founding term still runs', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ id: 5, current_period_end: FUTURE, is_founding: true }] })
+      .mockResolvedValueOnce({ rows: [], rowCount: 1 });
+
+    await setParticipationPaused(7, false);
+
+    const update = mockQuery.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('SET participation_paused'),
+    );
+    expect(update![1]).toEqual([5, false]);
+  });
+
+  it('rejects reactivation after the founding term ended', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 5, current_period_end: PAST, is_founding: true }] });
+
+    await expect(setParticipationPaused(7, false)).rejects.toThrow('FOUNDING_TERM_ENDED');
+
+    const update = mockQuery.mock.calls.find(
+      ([sql]) => typeof sql === 'string' && sql.includes('SET participation_paused'),
+    );
+    expect(update).toBeUndefined();
+  });
+
+  it('rejects non-founding subscriptions (monthly plans use the Stripe cancel flow)', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ id: 5, current_period_end: FUTURE, is_founding: false }] });
+
+    await expect(setParticipationPaused(7, true)).rejects.toThrow('FOUNDING_ONLY');
+  });
+
+  it('throws when there is no active subscription', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+
+    await expect(setParticipationPaused(7, true)).rejects.toThrow('No active subscription found');
   });
 });

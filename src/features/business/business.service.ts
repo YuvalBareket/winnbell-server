@@ -61,11 +61,17 @@ export const getNearbyBusinessesService = async (
     -- Participation = membership in the Open campaign (draw_entry), NOT subscription
     -- status: billing runs on the 24th while campaigns run to month end, so a business
     -- whose subscription ended on the 24th still owns the campaign it paid for.
+    -- Exception: participation_paused is a VOLUNTARY opt-out (founding cancel) - the
+    -- owner asked to leave the map immediately, so it overrides the draw_entry rule.
     WHERE loc.is_active = true
       AND EXISTS (
         SELECT 1 FROM draw_entry de
         JOIN draw d ON d.id = de.draw_id
         WHERE de.business_id = b.id AND d.status = 'Open'
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM subscription sp
+        WHERE sp.business_id = b.id AND sp.participation_paused = TRUE
       )
       AND loc.latitude  BETWEEN $1 AND $2
       AND loc.longitude BETWEEN $3 AND $4
@@ -214,6 +220,15 @@ export const getMyBusinessData = async (userId: number, managedLocationId?: numb
         s.current_period_end,
         s.cancel_at_period_end,
         s.entries_per_location,
+        -- Enrolled in the currently OPEN campaign (draw_entry = the paid-participation
+        -- record, same rule as the location profile). Gates the pre-save "campaign is
+        -- live, change applies next campaign" warning on CampaignCard (audit P2-10).
+        -- participation_paused counts as not participating (voluntary cancel/removal),
+        -- same exception every public-facing surface applies.
+        (EXISTS (
+          SELECT 1 FROM draw_entry de JOIN draw d ON d.id = de.draw_id
+          WHERE de.business_id = b.id AND d.status = 'Open'
+        ) AND COALESCE(s.participation_paused, FALSE) = FALSE) AS is_participating,
         (
           SELECT COALESCE(json_agg(json_build_object(
             'id', bl.id,
@@ -249,10 +264,22 @@ export const getMyBusinessData = async (userId: number, managedLocationId?: numb
     global_entry_cap: platformSettings.global_entry_cap ?? null,
   };
 
-  if (managedLocationId != null && Array.isArray(full.locations)) {
+  if (managedLocationId != null) {
+    // Location managers get CAMPAIGN facts, never the owner's billing (audit P2-9,
+    // same scoping as getSubscriptionDetails). The UI never rendered these for
+    // managers, but the raw values were on the wire:
+    //  - subscription_status is coarsened to Active/null (is_subscribed already says
+    //    that much; Past_Due/Incomplete/Cancelled internals are the owner's business)
+    //  - renew/cancel dates and the plan tier (entries_per_location) are nulled
     return {
       ...full,
-      locations: full.locations.filter((l: { id: number }) => l.id === managedLocationId),
+      subscription_status: full.is_subscribed ? 'Active' : null,
+      current_period_end: null,
+      cancel_at_period_end: null,
+      entries_per_location: null,
+      locations: Array.isArray(full.locations)
+        ? full.locations.filter((l: { id: number }) => l.id === managedLocationId)
+        : full.locations,
     };
   }
 
@@ -263,7 +290,7 @@ export const createManagerInviteToken = async (locationId: number, ownerUserId: 
   const pool = getPool();
 
   const result = await pool.query(`
-    SELECT b.id AS business_id
+    SELECT b.id AS business_id, bl.manager_user_id
     FROM business b
     JOIN business_location bl ON b.id = bl.business_id
     WHERE b.user_id = $1 AND bl.id = $2
@@ -271,6 +298,12 @@ export const createManagerInviteToken = async (locationId: number, ownerUserId: 
 
   const businessRecord = result.rows[0];
   if (!businessRecord) throw new Error('UNAUTHORIZED_OR_INVALID_LOCATION');
+
+  // One manager per location, enforced at mint time. Accepting an invite overwrites
+  // manager_user_id WITHOUT demoting the incumbent (no role reset, no session revoke),
+  // which would strand the displaced manager as a business-less 'Business' user. The UI
+  // already hides Invite when a manager exists; this guard closes the API path.
+  if (businessRecord.manager_user_id != null) throw new Error('LOCATION_HAS_MANAGER');
 
   const businessId = businessRecord.business_id;
 
@@ -527,6 +560,9 @@ export const searchParticipatingLocationsService = async (query: string): Promis
         JOIN draw d ON d.id = de.draw_id
         WHERE de.business_id = b.id AND d.status = 'Open'
       )
+      -- Voluntary opt-out (founding cancel): the owner asked to stop participating,
+      -- so search omits the business even though its draw_entry is kept.
+      AND COALESCE(s.participation_paused, FALSE) = FALSE
       -- A location at its campaign capacity cannot accept entries, so search (the
       -- "where can I enter" tool) omits it entirely. NULL cap = uncapped, always shown.
       AND (
@@ -564,7 +600,8 @@ const fetchLocationProfile = async (
 
   const gate = participatingOnly
     ? `AND bl.is_active
-       AND EXISTS (SELECT 1 FROM draw_entry de JOIN draw d ON d.id = de.draw_id WHERE de.business_id = b.id AND d.status = 'Open')`
+       AND EXISTS (SELECT 1 FROM draw_entry de JOIN draw d ON d.id = de.draw_id WHERE de.business_id = b.id AND d.status = 'Open')
+       AND NOT EXISTS (SELECT 1 FROM subscription sp WHERE sp.business_id = b.id AND sp.participation_paused = TRUE)`
     : '';
 
   const pool = getPool();
@@ -608,11 +645,13 @@ const fetchLocationProfile = async (
       (SELECT draw_date FROM open_draw) AS draw_date,
       -- active location + enrolled in the open draw (draw_entry = the paid-participation
       -- record; subscription status is NOT consulted, since a subscription that ended on
-      -- the 24th still owns the campaign it paid for). On the unconditional fetch this
-      -- tells the client whether to show the "Submit a Receipt" action.
+      -- the 24th still owns the campaign it paid for). participation_paused IS consulted:
+      -- it is a voluntary opt-out (founding cancel), not a billing lapse. On the
+      -- unconditional fetch this tells the client whether to show "Submit a Receipt".
       (
         bl.is_active
         AND EXISTS (SELECT 1 FROM draw_entry de JOIN draw d ON d.id = de.draw_id WHERE de.business_id = b.id AND d.status = 'Open')
+        AND NOT EXISTS (SELECT 1 FROM subscription sp WHERE sp.business_id = b.id AND sp.participation_paused = TRUE)
       ) AS is_participating
     FROM business_location bl
     JOIN business b ON bl.business_id = b.id

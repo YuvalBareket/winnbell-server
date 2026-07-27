@@ -218,10 +218,10 @@ function mintToken(user, locationId = null) {
   await ensureLocation(bFoundBiz, 'Main', '52 W 8th St, New York, NY', COORDS[5]);
   await ensureSubscription(bFoundBiz, { perLoc: 250, fee: 0 });
   const seat = (await q(`SELECT COALESCE(MAX(seat_number),0)+1 AS s FROM founding_member`)).rows[0].s;
-  await q(`INSERT INTO founding_member (business_id, seat_number, amount_paid) VALUES ($1,$2,1200)
+  await q(`INSERT INTO founding_member (business_id, seat_number, amount_paid) VALUES ($1,$2,300)
            ON CONFLICT (business_id) DO NOTHING`, [bFoundBiz, seat]);
   await q(`INSERT INTO founding_payment (business_id, stripe_payment_intent_id, amount)
-           VALUES ($1, $2, 1200) ON CONFLICT (stripe_payment_intent_id) DO NOTHING`,
+           VALUES ($1, $2, 300) ON CONFLICT (stripe_payment_intent_id) DO NOTHING`,
     [bFoundBiz, `pi_ux_seed_${bFoundBiz}`]);
   await enroll(DRAW, bFoundBiz, 0);
   add('b_founding', bFound, { business_id: bFoundBiz, businessIsActive: true });

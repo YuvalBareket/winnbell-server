@@ -16,6 +16,9 @@ export interface OcrValidationResult {
   businessNameFound: true | null;    // true = confirmed; null = unverifiable (logo-only, etc.) → never fails
   confidence: 'high' | 'medium' | 'low';
   rawText?: string;                 // extracted text, for debugging/logging
+  // Identifier-like tokens printed on the image (the document fingerprint). Used to detect
+  // the SAME physical receipt being reused under a different number (invoice # vs receipt #).
+  documentTokens?: string[];
 }
 
 // The contract every OCR provider must implement

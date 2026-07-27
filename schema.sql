@@ -185,6 +185,11 @@ CREATE TABLE subscription (
   -- Business opted out of the campaign it already paid for (no refund). Consumed at the
   -- next campaign open: enrollment skips the business, then the flag resets to FALSE.
   skip_next_campaign     BOOLEAN NOT NULL DEFAULT FALSE,
+  -- Founding member voluntarily cancelled participation (no refund): the business goes
+  -- off the map immediately, customers cannot start new entries at it, and it is NOT
+  -- enrolled when campaigns open. PERSISTENT (unlike skip_next_campaign) until the owner
+  -- reactivates; the founding term keeps running while paused (no extension).
+  participation_paused   BOOLEAN NOT NULL DEFAULT FALSE,
   billing_interval       billing_interval_enum NOT NULL DEFAULT 'monthly',
   created_at             TIMESTAMP NOT NULL DEFAULT NOW(),
   updated_at             TIMESTAMP NOT NULL DEFAULT NOW()
@@ -211,8 +216,15 @@ CREATE TABLE founding_member (
   -- Stripe one-time payment tracking (no stripe_subscription_id — it's a single charge)
   stripe_payment_intent_id   TEXT UNIQUE,
   stripe_checkout_session_id TEXT UNIQUE,
-  amount_paid                NUMERIC(10, 2) NOT NULL DEFAULT 1200.00,
+  -- No DEFAULT on purpose: the founding price lives in code (shared/founding.ts), and this
+  -- snapshot drives the member's exact-price renewal - every insert must state what was
+  -- actually charged. A default would silently record the wrong price.
+  amount_paid                NUMERIC(10, 2) NOT NULL,
   paid_at                    TIMESTAMP NOT NULL DEFAULT NOW(),
+  -- Special Terms Section 6: the second-year renewal is a ONE-TIME option. Set when the
+  -- renewal payment lands; a non-null value blocks any further renewal (after the second
+  -- year the business subscribes through the regular plans).
+  renewed_at                 TIMESTAMP NULL,
   created_at                 TIMESTAMP NOT NULL DEFAULT NOW(),
   updated_at                 TIMESTAMP NOT NULL DEFAULT NOW()
 );
@@ -323,7 +335,13 @@ CREATE TABLE ticket (
   activated_at            TIMESTAMP NULL,
 
   -- Receipt-entry fields (NULL for code/free/promo tickets) ──────────────────
+  -- receipt_identifier is stored in CANONICAL form (uppercase alnum only) so formatting
+  -- variants of the same number ("#1366-3859" vs "1366-3859") dedup as one.
   receipt_identifier      VARCHAR(255) NULL,
+  -- Document fingerprint: identifier-like tokens OCR'd off the image (the anchor only).
+  -- Lets us catch the SAME physical receipt reused under a different number (invoice # vs
+  -- receipt #). Only ever compared TYPED-id <-> tokens, never token-set <-> token-set.
+  receipt_tokens          TEXT[] NULL,
   transaction_amount      NUMERIC(10, 2) NULL CHECK (transaction_amount IS NULL OR transaction_amount > 0),
   transaction_date        DATE NULL,
   receipt_image_url       VARCHAR(500) NULL,
@@ -337,7 +355,9 @@ CREATE TABLE ticket (
   -- Quarantine: ticket excluded from draw pool and cap count ─────────────────
   is_quarantined          BOOLEAN NOT NULL DEFAULT FALSE,
   -- Reason codes: high_risk_user | ocr_pending | ocr_validation_failed |
-  --               ocr_error_pending_review | shared_receipt_suspected
+  --               ocr_error_pending_review | shared_receipt_suspected |
+  --               superseded_by_admin_decision (an admin approved a COMPETING ticket for the
+  --               same receipt; this claim silently loses the slot - shadowban style)
   quarantine_reason       TEXT NULL,
   quarantined_at          TIMESTAMP NULL,
 
@@ -445,8 +465,14 @@ CREATE TABLE refresh_token (
   expires_at   TIMESTAMP NOT NULL,
   -- Rotation grace window: set on first use instead of hard-deleting the row. A consumed
   -- token is accepted again for a short grace period (concurrent tabs / PWA windows race
-  -- to refresh with the same single-use token); cleanup purges rows consumed beyond grace.
+  -- to refresh with the same single-use token). Rows consumed beyond grace are kept for
+  -- 24h as THEFT TRIPWIRES (see family_id), then purged.
   consumed_at  TIMESTAMP,
+  -- Token-family lineage for reuse/theft detection: a login starts a family (random
+  -- default) and every rotation inherits it. Presenting a token consumed beyond the
+  -- grace window is proof of theft - the whole family is revoked (every session
+  -- descended from that login), forcing a clean re-login.
+  family_id    UUID NOT NULL DEFAULT gen_random_uuid(),
   created_at   TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
@@ -463,6 +489,9 @@ CREATE TABLE platform_settings (
   -- Founding partner program: max seats (default 30) and active toggle
   founding_member_cap   INTEGER NOT NULL DEFAULT 30 CHECK (founding_member_cap >= 1),
   founding_phase_active BOOLEAN NOT NULL DEFAULT TRUE,
+  -- Founding price is NOT stored here: it is a code constant (shared/founding.ts,
+  -- FOUNDING_PRICE_PER_LOCATION). Purchases snapshot the amount actually paid
+  -- (founding_member.amount_paid), so a price change never affects existing members.
   updated_at            TIMESTAMP NOT NULL DEFAULT NOW()
 );
 
@@ -524,15 +553,32 @@ CREATE INDEX idx_ticket_cap_check
   ON ticket (business_id, draw_id, is_quarantined);
 
 -- Receipt duplicate check + unique enforcement
--- Partial unique index: only one ticket per (business, receipt_identifier)
+-- Partial unique index: only one ticket per (business, receipt_identifier) among tickets
+-- whose claim on the receipt STANDS: active tickets, plus quarantined ones still awaiting
+-- an OCR verdict (ocr_pending / ocr_error_pending_review - provisionally valid, the slot
+-- is held during the wait). REJECTED claims (high_risk_user shadowban, ocr_validation_failed,
+-- superseded_by_admin_decision, superseded_by_verified_image) fall out of the index, releasing
+-- the receipt so the person holding the real paper receipt can still enter (anti-poisoning: a
+-- scammer's quarantined submission must not burn the number for the legitimate owner).
+-- 'contest_pending' is also excluded: a contest entry (the real owner attaching a photo to
+-- override a squatter who typed the number with no image) is held OUT of the slot until OCR
+-- resolves it, so it never collides with the squatter's standing row.
+-- Scoped to (business, draw): a receipt number is unique WITHIN a campaign, not across all time.
+-- A merchant that resets its receipt counter each campaign (carbon pads) can have a genuinely
+-- different receipt #1001 in a later draw without colliding with a prior one, while same-campaign
+-- reuse of one number is still blocked.
 CREATE UNIQUE INDEX idx_ticket_receipt_unique
-  ON ticket (business_id, receipt_identifier)
-  WHERE receipt_identifier IS NOT NULL;
+  ON ticket (business_id, draw_id, receipt_identifier)
+  WHERE receipt_identifier IS NOT NULL
+    AND (is_quarantined = FALSE OR quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review'));
 
 -- Quarantine filter (admin views, draw pool exclusion)
 CREATE INDEX idx_ticket_quarantine
   ON ticket (draw_id, is_quarantined)
   WHERE is_quarantined = TRUE;
+
+-- Document-fingerprint lookups: "does any prior entry's token set contain this identifier"
+CREATE INDEX idx_ticket_receipt_tokens ON ticket USING GIN (receipt_tokens);
 
 -- Velocity & throttle queries: COUNT by user + source + time window
 CREATE INDEX idx_ticket_velocity
@@ -664,6 +710,8 @@ CREATE INDEX idx_refresh_token_user ON refresh_token (user_id);
 -- so each is index-driven instead of a full scan).
 CREATE INDEX idx_refresh_token_expires ON refresh_token (expires_at);
 CREATE INDEX idx_refresh_token_consumed ON refresh_token (consumed_at);
+-- Family revocation on reuse detection deletes by family
+CREATE INDEX idx_refresh_token_family ON refresh_token (family_id);
 
 -- ── promotional_entry ─────────────────────────────────────────────────────────
 
@@ -713,6 +761,10 @@ CREATE TABLE IF NOT EXISTS draw_audit_log (
   id         SERIAL PRIMARY KEY,
   draw_id    INTEGER NOT NULL REFERENCES draw(id) ON DELETE CASCADE,
   action     TEXT NOT NULL,
+  -- Which admin performed this action (NULL = automated/system, or the admin account was
+  -- later hard-deleted). SET NULL so the audit row survives the actor's deletion (legal
+  -- retention: the WHAT/WHEN/WHY must outlive account churn).
+  actor_user_id INTEGER NULL REFERENCES "user"(id) ON DELETE SET NULL,
   metadata   JSONB NULL,
   created_at TIMESTAMP NOT NULL DEFAULT NOW()
 );
@@ -725,7 +777,11 @@ CREATE TABLE IF NOT EXISTS draw_rejected_winner (
   ticket_id       BIGINT NOT NULL REFERENCES ticket(id) ON DELETE CASCADE,
   -- Nullable: the audit row must survive even if the user account is hard-deleted (SET NULL).
   user_id         INTEGER NULL REFERENCES "user"(id) ON DELETE SET NULL,
-  risk_penalty    INTEGER NOT NULL DEFAULT 10,
+  -- Which admin performed the rejection (NULL only if that admin account is later deleted).
+  -- Together with reason + rejected_at this is the full who/when/why of every disqualification.
+  rejected_by_user_id INTEGER NULL REFERENCES "user"(id) ON DELETE SET NULL,
+  -- Always written explicitly by the rejection path (currently 12); this default is a fallback only.
+  risk_penalty    INTEGER NOT NULL DEFAULT 12,
   -- Mandatory admin justification for disqualifying this winner (legal/regulatory trail).
   reason          TEXT NULL,
   rejected_at     TIMESTAMP NOT NULL DEFAULT NOW(),

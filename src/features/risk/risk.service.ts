@@ -18,6 +18,10 @@ const scoreToLevel = (score: number): RiskLevel => {
 
 export interface RiskContext {
   businessId: number;
+  /** Current draw. When provided, the threshold-probing signal is scoped to this draw so a
+   *  cross-draw resubmission of a recycled receipt number (allowed since per-draw uniqueness,
+   *  2026-07-25) does not falsely flag an honest customer. */
+  drawId?: number;
   receiptIdentifier: string;
   transactionAmount: number;
   /** Active (non-quarantined) cross-user duplicate — triggers scaled penalty. */
@@ -100,7 +104,7 @@ export const evaluateUserRisk = async (
   let delta = 0;
 
   if (context) {
-    const { businessId, receiptIdentifier, transactionAmount, isDuplicateCrossUser } = context;
+    const { businessId, drawId, receiptIdentifier, transactionAmount, isDuplicateCrossUser } = context;
 
     // Signal 1: cross-user duplicate — penalty scaled by submitter's current risk level
     if (isDuplicateCrossUser) {
@@ -177,10 +181,16 @@ export const evaluateUserRisk = async (
         probe AS (
           -- Same receipt submitted with a different amount: counts both accepted tickets
           -- AND below-threshold attempts that were rejected (and left no ticket).
+          -- The accepted-ticket count is scoped to the current draw ($5) when provided: receipt
+          -- numbers are unique per (business, draw) since 2026-07-25, so a legitimate cross-draw
+          -- resubmission of a recycled number with a different amount must NOT read as probing.
+          -- (receipt_threshold_attempt has no draw_id but self-purges after 7 days, so it is
+          -- naturally bounded to the current campaign window.)
           SELECT (
             (SELECT COUNT(*) FROM ticket
               WHERE activated_by_user_id = $1 AND business_id = $2
-                AND receipt_identifier = $3 AND transaction_amount != $4)
+                AND receipt_identifier = $3 AND transaction_amount != $4
+                AND ($5::int IS NULL OR draw_id = $5))
             + (SELECT COUNT(*) FROM receipt_threshold_attempt
               WHERE user_id = $1 AND business_id = $2
                 AND receipt_identifier = $3 AND attempted_amount != $4)
@@ -200,7 +210,7 @@ export const evaluateUserRisk = async (
         (SELECT ids          FROM seq24h)  AS seq24h_ids,
         (SELECT cnt          FROM probe)   AS probe_count,
         (SELECT avg_amount   FROM outlier) AS avg_amount`,
-      [userId, businessId, receiptIdentifier, transactionAmount],
+      [userId, businessId, receiptIdentifier, transactionAmount, drawId ?? null],
     );
 
     const sr = signalRes.rows[0];
@@ -375,12 +385,15 @@ export const updateUserRiskScore = async (
 };
 
 /**
- * Check if a receipt identifier has already been used by another user for the same business.
+ * Check if a receipt identifier has already been used by another user for the same business
+ * IN THE SAME DRAW. Receipt numbers are unique per campaign, not across all time, so a merchant
+ * that recycles receipt numbers between draws does not false-flag honest customers.
  */
 export const checkDuplicateReceiptIdentifier = async (
   businessId: number,
   receiptIdentifier: string,
   submittingUserId: number,
+  drawId: number,
   client?: PoolClient,
 ): Promise<DuplicateCheckResult> => {
   const db = client ?? getPool();
@@ -390,8 +403,8 @@ export const checkDuplicateReceiptIdentifier = async (
        BOOL_OR(is_quarantined = FALSE)                                      AS has_active,
        BOOL_OR(is_quarantined = TRUE)                                       AS has_quarantined
      FROM ticket
-     WHERE business_id = $1 AND receipt_identifier = $2 AND activated_by_user_id != $3`,
-    [businessId, receiptIdentifier, submittingUserId],
+     WHERE business_id = $1 AND receipt_identifier = $2 AND activated_by_user_id != $3 AND draw_id = $4`,
+    [businessId, receiptIdentifier, submittingUserId, drawId],
   );
   const row = result.rows[0];
   return {
@@ -408,6 +421,12 @@ export const checkDuplicateReceiptIdentifier = async (
 export const syncUserQuarantineState = async (userId: number, drawId: number, client?: PoolClient): Promise<void> => {
   const db = client ?? getPool();
 
+  // The un-quarantine branch carries a slot guard: while a ticket sat shadowbanned, its
+  // receipt number was released (partial unique index idx_ticket_receipt_unique) and someone
+  // else may have legitimately claimed it. Lifting such a ticket would collide with the new
+  // claim (and violate the index), so it stays quarantined - the active claim wins. The
+  // guard is keyed on the receipt group's ANCHOR identifier so anchor + siblings lift (or
+  // stay) together; tickets without a receipt identifier (free/promo/referral) lift freely.
   await db.query(
     `WITH r AS (SELECT risk_score > $3 AS is_high FROM "user" WHERE id = $1)
      UPDATE ticket SET
@@ -417,7 +436,21 @@ export const syncUserQuarantineState = async (userId: number, drawId: number, cl
      WHERE activated_by_user_id = $1 AND draw_id = $2
        AND (
          ((SELECT is_high FROM r) IS TRUE  AND is_quarantined = FALSE AND (image_validation_status IS NULL OR image_validation_status != 'passed'))
-         OR ((SELECT is_high FROM r) IS FALSE AND is_quarantined = TRUE AND quarantine_reason = 'high_risk_user')
+         OR (
+           (SELECT is_high FROM r) IS FALSE AND is_quarantined = TRUE AND quarantine_reason = 'high_risk_user'
+           AND NOT EXISTS (
+             SELECT 1
+             FROM ticket a
+             JOIN ticket o
+               ON o.business_id = a.business_id
+              AND o.draw_id = a.draw_id
+              AND o.receipt_identifier = a.receipt_identifier
+              AND o.id <> a.id
+              AND (o.is_quarantined = FALSE OR o.quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review'))
+             WHERE a.id = COALESCE(ticket.anchor_ticket_id, ticket.id)
+               AND a.receipt_identifier IS NOT NULL
+           )
+         )
        )
        AND id NOT IN (
          SELECT winner_ticket_id FROM draw WHERE winner_ticket_id IS NOT NULL
