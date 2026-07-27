@@ -162,8 +162,11 @@ async function getRoleState(userId: number): Promise<RoleState | null> {
     // per-request DB reads — NOT silently skip the revocation/role checks below.
     try { userCache.set(cacheKey, state); } catch { /* serve uncached */ }
     return state;
-  } catch {
-    return null; // fail open on transient DB errors; mutation guards still apply
+  } catch (err) {
+    // Propagate DB errors so authenticateToken can fail CLOSED (503) - never swallow them into
+    // a null that would silently skip the revocation / liveness checks. null is returned ONLY
+    // above, for a genuinely missing user row (a deleted account).
+    throw err;
   }
 }
 
@@ -203,8 +206,24 @@ export const authenticateToken = async (
     //      compromised token is rejected on its very next request, not after the 1h expiry.
     //  (b) Stale elevated sessions (Business/Manager only): a token claiming a role or a
     //      specific managed location the DB no longer backs (e.g. a removed manager).
-    const fresh = await getRoleState(decoded.id);
-    if (fresh) {
+    let fresh: RoleState | null;
+    try {
+      fresh = await getRoleState(decoded.id);
+    } catch {
+      // DB unavailable: we cannot verify revocation / role liveness. FAIL CLOSED with a
+      // retryable 503 rather than accept an unverifiable token - a revoked or demoted token must
+      // never slip through during a DB blip. The 60s role cache absorbs momentary errors, so
+      // active users are not logged out; during a real outage most endpoints are down anyway.
+      res.status(503).json({ message: 'Service temporarily unavailable. Please try again.' });
+      return;
+    }
+    // No DB row for this id → the account was deleted; reject the stale token.
+    if (!fresh) {
+      res.status(401).json({ message: 'Session no longer valid. Please sign in again.' });
+      return;
+    }
+    // fresh is guaranteed present here; run the revocation + liveness checks.
+    {
       if ((decoded.se ?? 0) < fresh.tokenEpoch) {
         res.status(401).json({ message: 'Session no longer valid. Please sign in again.' });
         return;

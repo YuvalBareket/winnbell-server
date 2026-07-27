@@ -75,6 +75,13 @@ export const submitReceiptEntry = async (req: AuthRequest, res: Response) => {
       res.status(400).json({ message: 'transactionAmount must be a positive number.' });
       return;
     }
+    // Absolute sanity ceiling: a single real receipt total is never this high. The entry COUNT
+    // is already capped elsewhere, but the raw amount is stored on the ticket, so bound it here
+    // to stop an absurd value (e.g. 999999999) from polluting stored amounts / revenue analytics.
+    if (transactionAmount > 1_000_000) {
+      res.status(400).json({ message: 'transactionAmount is too large.' });
+      return;
+    }
     const sanitizedId = String(receiptIdentifier).trim();
     // Min 5 (matches the client). Shorter numeric strings collide with digit runs that appear
     // incidentally in unrelated receipt images (barcodes, phone numbers), which weakens the

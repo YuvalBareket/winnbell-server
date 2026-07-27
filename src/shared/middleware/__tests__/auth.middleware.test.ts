@@ -282,12 +282,11 @@ describe('authenticateToken — stale elevated session rejection', () => {
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
-// 5. Fail-open on DB error
+// 5. Fail CLOSED on DB error (a revoked/demoted token must never slip through a DB blip)
 // ─────────────────────────────────────────────────────────────────────────────
 
-describe('authenticateToken — fail open on DB error', () => {
-  it('should allow the request through when the DB lookup throws (transient error)', async () => {
-    // getRoleState returns null on error → fresh === null → no rejection
+describe('authenticateToken — fail closed on DB error', () => {
+  it('should reject with a retryable 503 when the DB lookup throws', async () => {
     mockPoolQuery.mockRejectedValueOnce(new Error('connection timeout'));
 
     const token = makeToken({ id: 60, role: 'Business' });
@@ -297,12 +296,12 @@ describe('authenticateToken — fail open on DB error', () => {
 
     await authenticateToken(req, res, next);
 
-    // Must NOT reject — fail open
-    expect(next).toHaveBeenCalled();
-    expect(res.status).not.toHaveBeenCalledWith(401);
+    // Fail closed: never accept an unverifiable token. 503 is retryable.
+    expect(res.status).toHaveBeenCalledWith(503);
+    expect(next).not.toHaveBeenCalled();
   });
 
-  it('should still attach req.user when failing open on DB error', async () => {
+  it('should NOT attach req.user when the DB lookup throws', async () => {
     mockPoolQuery.mockRejectedValueOnce(new Error('timeout'));
 
     const token = makeToken({ id: 61, role: 'Business', location_id: 5 });
@@ -312,7 +311,22 @@ describe('authenticateToken — fail open on DB error', () => {
 
     await authenticateToken(req, res, next);
 
-    expect(req.user).toMatchObject({ id: 61, role: 'Business', location_id: 5 });
+    expect(req.user).toBeUndefined();
+    expect(next).not.toHaveBeenCalled();
+  });
+
+  it('should reject with 401 when the user row is gone (deleted account)', async () => {
+    mockPoolQuery.mockResolvedValueOnce({ rows: [] });
+
+    const token = makeToken({ id: 62, role: 'User' });
+    const req = makeReq(token);
+    const res = makeRes();
+    const next = makeNext();
+
+    await authenticateToken(req, res, next);
+
+    expect(res.status).toHaveBeenCalledWith(401);
+    expect(next).not.toHaveBeenCalled();
   });
 });
 
