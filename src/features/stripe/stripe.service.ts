@@ -2218,11 +2218,7 @@ export const getSubscriptionDetails = async (userId: number) => {
       nd.name       AS next_campaign_name,
       nd.start_date AS next_campaign_start_date,
       nd.draw_date  AS next_campaign_date,
-<<<<<<< HEAD
-      nd.prize_pool AS next_campaign_prize,
-=======
       CASE WHEN nd.prize_revealed = FALSE THEN NULL ELSE nd.prize_pool END AS next_campaign_prize,
->>>>>>> develop
       b.user_id     AS owner_user_id
     FROM business b
     JOIN subscription s ON s.business_id = b.id
