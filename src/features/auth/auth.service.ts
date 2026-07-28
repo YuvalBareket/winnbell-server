@@ -1,5 +1,6 @@
 import bcrypt from 'bcryptjs';
 import { getPool } from '../../shared/db/db.js';
+import { safeRollback } from '../../shared/db/txn.js';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import { isIP } from 'net';
@@ -310,7 +311,7 @@ export const registerUser = async (
       },
     };
   } catch (error) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw error;
   } finally {
     client.release();
@@ -395,12 +396,12 @@ export const loginUser = async (
           locationId = decoded.locationId;
           inviteApplied = true;
         } else {
-          await client.query('ROLLBACK');
+          await safeRollback(client);
         }
       }
     } catch (err: unknown) {
       if (transactionStarted) {
-        try { await client.query('ROLLBACK'); } catch { /* ignore */ }
+        await safeRollback(client);
       }
       // A stale/used/expired invite token must not block sign-in; ignore it and
       // log the user in with their current role (mirrors syncExternalUser).
@@ -690,7 +691,7 @@ export const syncExternalUser = async (
       },
     };
   } catch (error) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw error;
   } finally {
     client.release();

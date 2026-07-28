@@ -5,6 +5,7 @@ import { createRemoteJWKSet, jwtVerify } from 'jose';
 import * as authService from './auth.service.js';
 import { RegisterRequest, AuthResponse } from './auth.types.js';
 import { getPool } from '../../shared/db/db.js';
+import { safeRollback } from '../../shared/db/txn.js';
 import { getPlatformSettings, invalidateUserAuth } from '../../shared/cache/cache.js';
 import { validateLengths } from '../../shared/validation.js';
 import { getClientIp } from '../../shared/clientIp.js';
@@ -208,7 +209,7 @@ export const revokeAllSessions = async (req: Request, res: Response): Promise<vo
         await client.query(`DELETE FROM refresh_token WHERE user_id = $1`, [userId]);
         await client.query('COMMIT');
       } catch (txErr) {
-        await client.query('ROLLBACK');
+        await safeRollback(client);
         throw txErr;
       } finally {
         client.release();
@@ -342,7 +343,7 @@ export const deleteAccount = async (req: Request, res: Response): Promise<void> 
       );
       await client.query('COMMIT');
     } catch (txErr) {
-      await client.query('ROLLBACK');
+      await safeRollback(client);
       throw txErr;
     } finally {
       client.release();
@@ -438,7 +439,7 @@ export const refreshTokenController = async (req: Request, res: Response): Promi
         [hash],
       );
       if (who.rows.length === 0) {
-        await client.query('ROLLBACK');
+        await safeRollback(client);
         res.status(401).json({ message: 'Invalid or expired refresh token' });
         return;
       }
@@ -486,7 +487,7 @@ export const refreshTokenController = async (req: Request, res: Response): Promi
           res.status(401).json({ message: 'Invalid or expired refresh token' });
           return;
         }
-        await client.query('ROLLBACK');
+        await safeRollback(client);
         res.status(401).json({ message: 'Invalid or expired refresh token' });
         return;
       }
@@ -527,7 +528,7 @@ export const refreshTokenController = async (req: Request, res: Response): Promi
       await client.query('COMMIT');
       res.json({ token: newToken, refreshToken: newRefreshToken });
     } catch (txErr) {
-      await client.query('ROLLBACK'); // undo the consume -> old token stays valid for a clean retry
+      await safeRollback(client); // undo the consume -> old token stays valid for a clean retry
       throw txErr;
     } finally {
       client.release();

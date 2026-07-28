@@ -1,4 +1,5 @@
 import { getPool, PoolClient } from '../../shared/db/db.js';
+import { safeRollback } from '../../shared/db/txn.js';
 import { OPEN_DRAW_ID_SUBQUERY, getOpenDrawId } from '../../shared/db/queries.js';
 import crypto from 'crypto';
 import { invalidatePublicLocation } from '../../shared/cache/cache.js';
@@ -316,7 +317,7 @@ export const activateFreeTicket = async (userId: number, claimIp?: string): Prom
       code: ticketCode,
     };
   } catch (err) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw err;
   } finally {
     client.release();
@@ -854,7 +855,7 @@ export const submitReceiptEntryService = async (
 
     return { tickets: insertedTickets, entryCount: batchSize };
   } catch (err) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw err;
   } finally {
     client.release();
@@ -969,7 +970,7 @@ export const activatePromotionalEntry = async (
     // Promo entries have no business/location — they affect no public cache.
     return { entryId: result.rows[0].id, drawName: draw.name, ticketId: ticketResult.rows[0].id, code: ticketCode };
   } catch (err) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw err;
   } finally {
     client.release();
@@ -1065,7 +1066,7 @@ export const resetDemoUserService = async (
     await client.query('COMMIT');
     return { ticketsDeleted: del.rowCount ?? 0, entriesSeeded };
   } catch (err) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw err;
   } finally {
     client.release();

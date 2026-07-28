@@ -738,17 +738,21 @@ export const sendContactMessageEmail = async (details: {
     return;
   }
   const to = process.env.SUPPORT_EMAIL ?? 'support@winnbell.com';
-  const subject = `Contact form: ${details.topic} - ${details.fullName}`;
+  // Strip control chars (incl. CR/LF) from the display name before it enters email HEADERS
+  // (subject + replyTo) - a newline in the name could otherwise inject extra headers. The email
+  // address is already validated upstream (no whitespace) and the HTML body is escaped.
+  const safeName = details.fullName.replace(/[\x00-\x1F\x7F]/g, ' ').replace(/\s+/g, ' ').trim();
+  const subject = `Contact form: ${details.topic} - ${safeName}`;
   const html = `
 <p><strong>New contact form message</strong></p>
 <ul>
-  <li>From: ${escapeHtml(details.fullName)} &lt;${escapeHtml(details.email)}&gt;</li>
+  <li>From: ${escapeHtml(safeName)} &lt;${escapeHtml(details.email)}&gt;</li>
   <li>Topic: ${escapeHtml(details.topic)}</li>
 </ul>
 <p style="white-space:pre-wrap;border-left:3px solid #ccc;padding-left:12px;">${escapeHtml(details.message)}</p>
 <p>Reply directly to this email to answer them.</p>
   `.trim();
 
-  await transporter.sendMail({ from: FROM, to, replyTo: `${details.fullName} <${details.email}>`, subject, html });
+  await transporter.sendMail({ from: FROM, to, replyTo: `${safeName} <${details.email}>`, subject, html });
   console.log(`[Email] Contact form message sent to ${to}`);
 };

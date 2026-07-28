@@ -47,7 +47,7 @@ interface SubRow { endpoint: string; p256dh: string; auth: string }
 // Sends to a batch of subscriptions and prunes endpoints the push service
 // reports as gone (410) or not found (404) — otherwise dead rows accumulate
 // forever and every broadcast wastes time on them.
-const sendBatch = async (rows: SubRow[], payload: NotificationPayload): Promise<void> => {
+const sendBatch = async (rows: SubRow[], payload: NotificationPayload): Promise<number> => {
   const results = await Promise.allSettled(
     rows.map((sub) =>
       webpush.sendNotification(
@@ -77,6 +77,10 @@ const sendBatch = async (rows: SubRow[], payload: NotificationPayload): Promise<
       console.error('[Push] Failed to prune dead subscriptions:', err);
     }
   }
+
+  // Report ACTUAL successful deliveries (fulfilled sends) so the admin "Sent" count is honest -
+  // rejected sends (dead endpoints just pruned, transient failures) are excluded.
+  return results.filter((r) => r.status === 'fulfilled').length;
 };
 
 export const sendToUser = async (userId: number, payload: NotificationPayload): Promise<void> => {
@@ -136,8 +140,7 @@ export const sendToAudience = async (audience: Audience, payload: NotificationPa
     const result = await pool.query(baseQuery, params);
     if (result.rows.length === 0) break;
 
-    await sendBatch(result.rows, payload);
-    totalSent += result.rows.length;
+    totalSent += await sendBatch(result.rows, payload);
     lastId = result.rows[result.rows.length - 1].id;
     if (result.rows.length < BATCH_SIZE) break;
   }

@@ -1,6 +1,7 @@
 import twilio from 'twilio';
 import { randomInt } from 'crypto';
 import { getPool } from '../../shared/db/db.js';
+import { safeRollback } from '../../shared/db/txn.js';
 import { invalidateUserAuth } from '../../shared/cache/cache.js';
 import { grantPendingReferralBonus } from '../referral/referral.service.js';
 
@@ -203,7 +204,7 @@ export const verifyPhoneOtp = async (
     committed = true;
     invalidateUserAuth(userId);
   } catch (err) {
-    if (!committed) await client.query('ROLLBACK');
+    if (!committed) await safeRollback(client);
     throw err;
   } finally {
     client.release();
@@ -221,7 +222,7 @@ export const verifyPhoneOtp = async (
       referralBonusGranted = await grantPendingReferralBonus(bonusClient, userId);
       await bonusClient.query('COMMIT');
     } catch (e) {
-      await bonusClient.query('ROLLBACK');
+      await safeRollback(bonusClient);
       throw e;
     } finally {
       bonusClient.release();

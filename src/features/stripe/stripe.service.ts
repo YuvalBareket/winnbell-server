@@ -1,6 +1,7 @@
 ﻿import Stripe from 'stripe';
 import { Pool } from 'pg';
 import { getPool } from '../../shared/db/db.js';
+import { safeRollback } from '../../shared/db/txn.js';
 import { sendSubscriptionConfirmationEmail, sendPaymentFailedEmail, sendFoundingWelcomeEmail, sendDisputeAlertEmail } from '../../shared/email/email.service.js';
 import { getPlatformSettings, publicCache, invalidatePublicBusinessData } from '../../shared/cache/cache.js';
 import { nextCampaignOpensNy, lastChargeAtNy, CHARGE_DAY_OF_MONTH } from '../../shared/dates.js';
@@ -451,7 +452,7 @@ export const activateFoundingRenewal = async (pool: Pool, session: Stripe.Checko
       [businessId, paymentIntentId, session.id, amountDollars],
     );
     if ((ledger.rowCount ?? 0) === 0) {
-      await client.query('ROLLBACK');
+      await safeRollback(client);
       return;
     }
 
@@ -492,7 +493,7 @@ export const activateFoundingRenewal = async (pool: Pool, session: Stripe.Checko
       await client.query('COMMIT');
     }
   } catch (err: unknown) {
-    try { await client.query('ROLLBACK'); } catch { /* connection already gone */ }
+    await safeRollback(client);
     throw err;
   } finally {
     client.release();
@@ -1451,7 +1452,7 @@ async function activateFoundingMember(
     `, [businessId, paymentIntentId, checkoutSessionId, amountPaidDollars]);
 
     if ((seatResult.rowCount ?? 0) === 0) {
-      await client.query('ROLLBACK');
+      await safeRollback(client);
       console.error(`[Founding] No seats available for business ${businessId} — issuing auto-refund`);
       // Ledger the payment+refund BEFORE calling Stripe so the money trail exists even if
       // the process dies mid-refund. Idempotent on the payment intent, so a retry can't
@@ -1510,7 +1511,7 @@ async function activateFoundingMember(
     await client.query('COMMIT');
     console.log(`[Founding] subscription row upserted for business ${businessId} (seat #${seatNumber})`);
   } catch (err) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     // Two concurrent activations both pass the pre-check; the loser hits the
     // UNIQUE(business_id) seat constraint. Two distinct cases (audit P2-5):
     //  - SAME PaymentIntent (webhook + verify double call of one session): the winner
@@ -1676,7 +1677,7 @@ async function activateBusinessSubscription(
     await client.query('COMMIT');
     console.log(`[Stripe] subscription row upserted for business ${businessId}`);
   } catch (err) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw err;
   } finally {
     client.release();
@@ -2306,8 +2307,11 @@ export const getSubscriptionDetails = async (userId: number) => {
     // True between the 24th charge and the paid campaign's open — the window where the
     // business may opt out of the paid campaign (no refund) and where changes settle
     // their difference immediately. Same rule the server mutations use.
-    const openedAt = sub.open_campaign_opened_at ? new Date(sub.open_campaign_opened_at).getTime() : null;
-    sub.in_charged_window = openedAt === null || lastChargeAtNy().getTime() > openedAt;
+    // Reuse the single source of truth (the same helper the settlement paths use) so the client
+    // banner and the server settlement logic can never disagree. Crucially it returns FALSE when
+    // no draws exist at all (P3-2) - the old inline calc treated openedAt=null as in-window=true,
+    // which showed the "next campaign already paid" copy on a platform with zero campaigns.
+    sub.in_charged_window = await isChargedNotOpenedWindow(pool);
     delete sub.open_campaign_opened_at;
 
     // Location managers may see CAMPAIGN facts (their prep view needs draw name/dates/

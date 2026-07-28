@@ -1,4 +1,5 @@
 import { getPool } from '../../shared/db/db.js';
+import { safeRollback } from '../../shared/db/txn.js';
 import { OPEN_DRAW_ID_SUBQUERY } from '../../shared/db/queries.js';
 import { publicCache, invalidatePublicBusinessData, invalidatePublicLocation, getPlatformSettings, invalidateUserAuth } from '../../shared/cache/cache.js';
 import type { PoolClient } from 'pg';
@@ -191,7 +192,7 @@ export const createFullBusinessProfile = async (userId: number, data: BusinessSe
     invalidatePublicBusinessData();
     return { businessId };
   } catch (error) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw error;
   } finally {
     client.release();
@@ -396,7 +397,7 @@ export const removeLocationManagerService = async (locationId: number, ownerUser
     invalidatePublicBusinessData();
     invalidateUserAuth(managerId);
   } catch (err) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw err;
   } finally {
     client.release();
@@ -507,7 +508,7 @@ export const deleteBusinessLocation = async (locationId: number, ownerUserId: nu
     invalidatePublicLocation(locationId);
     if (managerId) invalidateUserAuth(managerId);
   } catch (err) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw err;
   } finally {
     client.release();

@@ -1,4 +1,5 @@
 import { getPool } from '../../shared/db/db.js';
+import { safeRollback } from '../../shared/db/txn.js';
 import { OPEN_DRAW_ID_SUBQUERY } from '../../shared/db/queries.js';
 import { getPlatformSettings, invalidatePlatformSettings, invalidatePublicBusinessData, invalidateUserAuth } from '../../shared/cache/cache.js';
 import { lastDayOfMonthNyMidnightUtc, nextCampaignOpensNy, drawDateFromString, drawStartDateFromString, nyMidnightFromString } from '../../shared/dates.js';
@@ -127,7 +128,7 @@ export const createBusinessService = async (data: {
     await client.query('COMMIT');
     return business;
   } catch (err) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw err;
   } finally {
     client.release();
@@ -307,7 +308,7 @@ export const createDrawService = async (data: {
     invalidatePublicBusinessData();
     return draw;
   } catch (err) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw err;
   } finally {
     client.release();
@@ -508,7 +509,7 @@ export const openDrawService = async (drawId: number, actorUserId: number | null
     invalidatePublicBusinessData();
     await notifyFoundingFinalCampaign(drawId);
   } catch (err) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw err;
   } finally {
     client.release();
@@ -565,7 +566,7 @@ export const closeDrawService = async (drawId: number, actorUserId: number | nul
     invalidatePublicBusinessData();
     await notifyFoundingFinalCampaign(nextDrawId);
   } catch (err) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw err;
   } finally {
     client.release();
@@ -622,7 +623,7 @@ export const reopenDrawService = async (drawId: number, actorUserId: number | nu
     await client.query('COMMIT');
     invalidatePublicBusinessData();
   } catch (err) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw err;
   } finally {
     client.release();
@@ -775,7 +776,7 @@ export const pickDrawWinnerService = async (drawId: number, applyPenalty: boolea
       riskScore: winner.risk_score ?? 0,
     };
   } catch (err) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw err;
   } finally {
     client.release();
@@ -901,7 +902,7 @@ export const confirmWinnerService = async (drawId: number, actorUserId: number |
       riskScore: winner.risk_score ?? 0,
     };
   } catch (err) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw err;
   } finally {
     client.release();
@@ -1756,7 +1757,7 @@ export const adminImageDecisionService = async (
 
     await client.query('COMMIT');
   } catch (err) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw err;
   } finally {
     client.release();

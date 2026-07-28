@@ -1,5 +1,6 @@
 import type { Pool, PoolClient } from 'pg';
 import { getPool } from '../../shared/db/db.js';
+import { safeRollback } from '../../shared/db/txn.js';
 import { updateUserRiskScore, syncUserQuarantineState } from '../risk/risk.service.js';
 import { TesseractProvider } from './providers/tesseract.provider.js';
 import { GoogleVisionProvider } from './providers/google-vision.provider.js';
@@ -48,7 +49,7 @@ async function resolveReceiptContest(
       [contestTicketId],
     );
     if (guard.rows[0]?.quarantine_reason !== 'contest_pending') {
-      await client.query('ROLLBACK');
+      await safeRollback(client);
       return;
     }
 
@@ -162,7 +163,7 @@ async function resolveReceiptContest(
 
     await client.query('COMMIT');
   } catch (err) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw err;
   } finally {
     client.release();
@@ -261,7 +262,7 @@ async function resolveReceiptValidation(
     );
     const status: string | undefined = guard.rows[0]?.image_validation_status;
     if (status !== 'pending' && status !== 'ocr_error') {
-      await client.query('ROLLBACK');
+      await safeRollback(client);
       return;
     }
 
@@ -353,7 +354,7 @@ async function resolveReceiptValidation(
 
     await client.query('COMMIT');
   } catch (err) {
-    await client.query('ROLLBACK');
+    await safeRollback(client);
     throw err; // let the caller's catch record an ocr_error for retry
   } finally {
     client.release();
