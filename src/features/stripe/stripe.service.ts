@@ -2237,7 +2237,6 @@ export const getSubscriptionDetails = async (userId: number) => {
       s.pending_entries_per_location,
       s.skip_next_campaign,
       s.participation_paused,
-      (SELECT d5.opened_at FROM draw d5 WHERE d5.status = 'Open' ORDER BY d5.opened_at DESC NULLS LAST LIMIT 1) AS open_campaign_opened_at,
       (SELECT COUNT(*)::int FROM business_location WHERE business_id = b.id AND is_active = TRUE) AS active_location_count,
       -- What the NEXT campaign runs with: live locations minus scheduled removals plus
       -- staged adds. Shown alongside the staged plan so money and counts always agree.
@@ -2312,7 +2311,6 @@ export const getSubscriptionDetails = async (userId: number) => {
     // no draws exist at all (P3-2) - the old inline calc treated openedAt=null as in-window=true,
     // which showed the "next campaign already paid" copy on a platform with zero campaigns.
     sub.in_charged_window = await isChargedNotOpenedWindow(pool);
-    delete sub.open_campaign_opened_at;
 
     // Location managers may see CAMPAIGN facts (their prep view needs draw name/dates/
     // prize/status) but never the owner's billing: fees, Stripe identifiers, staged plan
