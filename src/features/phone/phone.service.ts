@@ -133,6 +133,10 @@ export const verifyPhoneOtp = async (
 ): Promise<{ referralBonusGranted: boolean }> => {
   const pool = getPool();
   const client = await pool.connect();
+  // The validation-fail paths below COMMIT (to persist attempt accounting) and THEN throw a
+  // business error. Track that so the catch never issues a ROLLBACK on an already-committed txn,
+  // which otherwise logs a spurious PG "there is no transaction in progress" warning.
+  let committed = false;
 
   try {
     await client.query('BEGIN');
@@ -152,12 +156,14 @@ export const verifyPhoneOtp = async (
     if (otp.is_expired) {
       await client.query(`DELETE FROM phone_otp WHERE id = $1`, [otp.id]);
       await client.query('COMMIT');
+      committed = true;
       throw new Error('OTP_EXPIRED');
     }
 
     if (otp.attempts >= MAX_VERIFY_ATTEMPTS) {
       await client.query(`DELETE FROM phone_otp WHERE id = $1`, [otp.id]);
       await client.query('COMMIT');
+      committed = true;
       throw new Error('TOO_MANY_ATTEMPTS');
     }
 
@@ -172,6 +178,7 @@ export const verifyPhoneOtp = async (
 
     if (!codeOk) {
       await client.query('COMMIT');
+      committed = true;
       throw new Error('INVALID_CODE');
     }
 
@@ -182,6 +189,7 @@ export const verifyPhoneOtp = async (
     );
     if (conflict.rows.length > 0) {
       await client.query('COMMIT');
+      committed = true;
       throw new Error('PHONE_ALREADY_TAKEN');
     }
 
@@ -192,9 +200,10 @@ export const verifyPhoneOtp = async (
 
     await client.query(`DELETE FROM phone_otp WHERE user_id = $1`, [userId]);
     await client.query('COMMIT');
+    committed = true;
     invalidateUserAuth(userId);
   } catch (err) {
-    await client.query('ROLLBACK');
+    if (!committed) await client.query('ROLLBACK');
     throw err;
   } finally {
     client.release();

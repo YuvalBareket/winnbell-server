@@ -129,13 +129,28 @@ export const getNearby = async (req: Request, res: Response) => {
       return res.status(400).json({ message: 'Name filter is too long.' });
     }
 
+    // Parse + validate up front: a non-numeric value (e.g. limit='abc') parses to NaN and, passed
+    // to the SQL LIMIT / bounding box, makes Postgres reject the query -> a generic 500 on a public
+    // endpoint. Reject non-finite input with a 400 instead.
+    const bbox = [parseFloat(minLat), parseFloat(maxLat), parseFloat(minLng), parseFloat(maxLng)];
+    if (!bbox.every(Number.isFinite)) {
+      return res.status(400).json({ message: 'Bounding box params must be valid numbers.' });
+    }
+    let parsedLimit: number | undefined;
+    if (limit !== undefined && limit !== '') {
+      parsedLimit = parseInt(limit, 10);
+      if (!Number.isFinite(parsedLimit)) {
+        return res.status(400).json({ message: 'limit must be a valid number.' });
+      }
+    }
+
     const businesses = await getNearbyBusinessesService(
-      parseFloat(minLat),
-      parseFloat(maxLat),
-      parseFloat(minLng),
-      parseFloat(maxLng),
+      bbox[0],
+      bbox[1],
+      bbox[2],
+      bbox[3],
       sector,
-      limit ? parseInt(limit, 10) : undefined,
+      parsedLimit,
       name || undefined,
     );
 
