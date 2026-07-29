@@ -22,6 +22,10 @@ router.get('/businesses/health-summary', adminController.getBusinessHealthSummar
 router.get('/draws', adminController.getDraws);
 router.get('/draws-all', adminController.getAllDraws);
 router.get('/users', adminController.getUsers);
+// analytics-summary MUST be registered before /users/:userId so the literal string
+// 'analytics-summary' is never captured as a userId param (Express 5 matches routes
+// in registration order, identical to the /businesses/health-summary guard above).
+router.get('/users/analytics-summary', adminController.getUserAnalytics);
 router.get('/users/:userId', adminController.getUserDetail);
 router.get('/businesses/:businessId', adminController.getBusinessDetail);
 router.get('/businesses/:businessId/entries', adminController.getBusinessEntries);

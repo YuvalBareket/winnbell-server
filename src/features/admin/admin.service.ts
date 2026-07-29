@@ -1261,16 +1261,109 @@ export const getAdminOverviewService = async () => {
   };
 };
 
+// ---------------------------------------------------------------------------
+// USER_SEGMENT_PREDICATES
+// ---------------------------------------------------------------------------
+// Single source of truth for every user-triage segment threshold.
+// Both getUserAnalyticsSummaryService (COUNT...FILTER) and getAllUsersService
+// (WHERE AND clause) embed these strings verbatim so the thresholds are
+// never duplicated.
+//
+// All segments implicitly apply only to non-Admin users; the outer query
+// always carries `u.role != 'Admin'` as a baseline condition.
+//
+// Segment definitions:
+//   high_risk    - risk_score >= 20 (same threshold as riskLevel='high' filter)
+//   medium_risk  - risk_score in [10,19] (same as riskLevel='medium')
+//   suspended    - account deactivated by admin
+//   unverified   - User-role only; phone not yet verified.
+//                  Business/Manager accounts are exempt from the phone-verify
+//                  requirement and must NOT be flagged here.
+//   new_7d       - registered within the last 7 days
+//   active_30d   - has at least one valid (non-quarantined, cap-rule) entry
+//                  with activated_at in the last 30 days
+//
+// NOTE: high_risk and medium_risk have no index on risk_score today.
+// A btree index on "user"(risk_score) would speed up the ORDER BY risk_score DESC
+// sort used in the segment list view. Deferred post-launch (tracked).
+// ---------------------------------------------------------------------------
+export type UserSegment = 'high_risk' | 'medium_risk' | 'suspended' | 'unverified' | 'new_7d' | 'active_30d';
+const VALID_USER_SEGMENTS = new Set<UserSegment>([
+  'high_risk', 'medium_risk', 'suspended', 'unverified', 'new_7d', 'active_30d',
+]);
+
+const USER_SEGMENT_PREDICATES: Record<UserSegment, string> = {
+  high_risk:   `u.risk_score >= 20`,
+  medium_risk: `u.risk_score >= 10 AND u.risk_score < 20`,
+  suspended:   `u.is_active = FALSE`,
+  unverified:  `u.role = 'User' AND u.is_phone_verified = FALSE`,
+  new_7d:      `u.created_at >= NOW() - INTERVAL '7 days'`,
+  active_30d:  `EXISTS (
+    SELECT 1 FROM ticket t
+    WHERE t.activated_by_user_id = u.id
+      AND t.is_quarantined = FALSE
+      AND t.activated_by_user_id IS NOT NULL
+      AND t.activated_at >= NOW() - INTERVAL '30 days'
+  )`,
+};
+
+export const getUserAnalyticsSummaryService = async (): Promise<{
+  total: number;
+  users: number;
+  businesses: number;
+  high_risk: number;
+  medium_risk: number;
+  suspended: number;
+  unverified: number;
+  new_7d: number;
+  active_30d: number;
+}> => {
+  const pool = getPool();
+  const result = await pool.query(`
+    SELECT
+      COUNT(*)::int                                                                AS total,
+      COUNT(*) FILTER (WHERE u.role = 'User')::int                               AS users,
+      COUNT(*) FILTER (WHERE u.role = 'Business')::int                           AS businesses,
+      COUNT(*) FILTER (WHERE ${USER_SEGMENT_PREDICATES.high_risk})::int          AS high_risk,
+      COUNT(*) FILTER (WHERE ${USER_SEGMENT_PREDICATES.medium_risk})::int        AS medium_risk,
+      COUNT(*) FILTER (WHERE ${USER_SEGMENT_PREDICATES.suspended})::int          AS suspended,
+      COUNT(*) FILTER (WHERE ${USER_SEGMENT_PREDICATES.unverified})::int         AS unverified,
+      COUNT(*) FILTER (WHERE ${USER_SEGMENT_PREDICATES.new_7d})::int             AS new_7d,
+      COUNT(*) FILTER (WHERE ${USER_SEGMENT_PREDICATES.active_30d})::int         AS active_30d
+    FROM "user" u
+    WHERE u.role != 'Admin'
+  `);
+  const row = result.rows[0];
+  return {
+    total:       Number(row?.total       ?? 0),
+    users:       Number(row?.users       ?? 0),
+    businesses:  Number(row?.businesses  ?? 0),
+    high_risk:   Number(row?.high_risk   ?? 0),
+    medium_risk: Number(row?.medium_risk ?? 0),
+    suspended:   Number(row?.suspended   ?? 0),
+    unverified:  Number(row?.unverified  ?? 0),
+    new_7d:      Number(row?.new_7d      ?? 0),
+    active_30d:  Number(row?.active_30d  ?? 0),
+  };
+};
+
 export const getAllUsersService = async (params: {
   page: number;
   limit: number;
   search?: string;
   role?: string;
   riskLevel?: 'high' | 'medium' | 'low';
+  segment?: string;
 }) => {
   const pool = getPool();
   const { page, limit, search, role, riskLevel } = params;
   const offset = (page - 1) * limit;
+
+  // Whitelist the segment value — invalid strings are silently ignored (treated as absent)
+  // so a client sending an unknown value never triggers a 400; it just gets unfiltered results.
+  const segment: UserSegment | undefined = VALID_USER_SEGMENTS.has(params.segment as UserSegment)
+    ? (params.segment as UserSegment)
+    : undefined;
 
   const conditions: string[] = [`u.role != 'Admin'`];
   const values: unknown[] = [];
@@ -1295,7 +1388,20 @@ export const getAllUsersService = async (params: {
     conditions.push(`u.risk_score < 10`);
   }
 
+  // When a segment is active, AND the matching predicate into the conditions list.
+  // riskLevel and segment can both be present — they simply AND together (no conflict).
+  if (segment) {
+    conditions.push(USER_SEGMENT_PREDICATES[segment]);
+  }
+
   const where = `WHERE ${conditions.join(' AND ')}`;
+
+  // Default order: risk_score DESC, created_at DESC (preserves pre-existing behaviour).
+  // For risk segments, keep worst-first (ORDER BY risk_score DESC, created_at DESC).
+  // For all other segments, order by created_at DESC to surface the most relevant rows.
+  const orderBy = (segment === 'high_risk' || segment === 'medium_risk')
+    ? `ORDER BY u.risk_score DESC, u.created_at DESC`
+    : `ORDER BY u.created_at DESC`;
 
   const [rowsRes, countRes] = await Promise.all([
     pool.query(
@@ -1310,7 +1416,7 @@ export const getAllUsersService = async (params: {
        LEFT JOIN LATERAL (SELECT id, name FROM business WHERE user_id = u.id ORDER BY id LIMIT 1) b ON true
        LEFT JOIN subscription s2 ON s2.business_id = b.id
        ${where}
-       ORDER BY u.risk_score DESC, u.created_at DESC
+       ${orderBy}
        LIMIT $${idx} OFFSET $${idx + 1}`,
       [...values, limit, offset],
     ),

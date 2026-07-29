@@ -44,6 +44,7 @@ import {
   getDrawRejectedWinnersService,
   getDrawAuditLogService,
   getBusinessHealthSummaryService,
+  getUserAnalyticsSummaryService,
 } from './admin.service.js';
 import { getGrowthAnalyticsService } from './growth.service.js';
 
@@ -275,6 +276,16 @@ export const getOverview = async (req: Request, res: Response) => {
   }
 };
 
+export const getUserAnalytics = async (_req: Request, res: Response) => {
+  try {
+    const summary = await getUserAnalyticsSummaryService();
+    res.status(200).json(summary);
+  } catch (error: unknown) {
+    console.error('[admin.getUserAnalytics]', error);
+    res.status(500).json({ message: 'Failed to fetch user analytics summary' });
+  }
+};
+
 export const getUsers = async (req: Request, res: Response) => {
   const page = Math.max(1, parseInt(req.query.page as string) || 1);
   const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 50));
@@ -284,8 +295,10 @@ export const getUsers = async (req: Request, res: Response) => {
   const riskLevel = ['high', 'medium', 'low'].includes(req.query.riskLevel as string)
     ? (req.query.riskLevel as 'high' | 'medium' | 'low')
     : undefined;
+  // segment is an optional triage filter; invalid values are silently ignored by the service.
+  const segment = typeof req.query.segment === 'string' ? req.query.segment : undefined;
   try {
-    const result = await getAllUsersService({ page, limit, search, role, riskLevel });
+    const result = await getAllUsersService({ page, limit, search, role, riskLevel, segment });
     res.status(200).json(result);
   } catch (error) {
     res.status(500).json({ message: 'Failed to fetch users' });
