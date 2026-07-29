@@ -69,6 +69,7 @@ export const getNearbyBusinessesService = async (
         SELECT 1 FROM draw_entry de
         JOIN draw d ON d.id = de.draw_id
         WHERE de.business_id = b.id AND d.status = 'Open'
+          AND de.paused_at IS NULL
       )
       AND NOT EXISTS (
         SELECT 1 FROM subscription sp
@@ -560,6 +561,7 @@ export const searchParticipatingLocationsService = async (query: string): Promis
         SELECT 1 FROM draw_entry de
         JOIN draw d ON d.id = de.draw_id
         WHERE de.business_id = b.id AND d.status = 'Open'
+          AND de.paused_at IS NULL
       )
       -- Voluntary opt-out (founding cancel): the owner asked to stop participating,
       -- so search omits the business even though its draw_entry is kept.
@@ -601,7 +603,7 @@ const fetchLocationProfile = async (
 
   const gate = participatingOnly
     ? `AND bl.is_active
-       AND EXISTS (SELECT 1 FROM draw_entry de JOIN draw d ON d.id = de.draw_id WHERE de.business_id = b.id AND d.status = 'Open')
+       AND EXISTS (SELECT 1 FROM draw_entry de JOIN draw d ON d.id = de.draw_id WHERE de.business_id = b.id AND d.status = 'Open' AND de.paused_at IS NULL)
        AND NOT EXISTS (SELECT 1 FROM subscription sp WHERE sp.business_id = b.id AND sp.participation_paused = TRUE)`
     : '';
 
@@ -651,7 +653,7 @@ const fetchLocationProfile = async (
       -- unconditional fetch this tells the client whether to show "Submit a Receipt".
       (
         bl.is_active
-        AND EXISTS (SELECT 1 FROM draw_entry de JOIN draw d ON d.id = de.draw_id WHERE de.business_id = b.id AND d.status = 'Open')
+        AND EXISTS (SELECT 1 FROM draw_entry de JOIN draw d ON d.id = de.draw_id WHERE de.business_id = b.id AND d.status = 'Open' AND de.paused_at IS NULL)
         AND NOT EXISTS (SELECT 1 FROM subscription sp WHERE sp.business_id = b.id AND sp.participation_paused = TRUE)
       ) AS is_participating
     FROM business_location bl

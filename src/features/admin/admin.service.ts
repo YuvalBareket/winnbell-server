@@ -665,7 +665,8 @@ export const getDrawBusinessesService = async (
     pool.query(`
       SELECT
         b.id, b.name, b.sector, b.logo_url,
-        de.fee_at_entry, de.created_at AS joined_at
+        de.fee_at_entry, de.created_at AS joined_at,
+        (de.paused_at IS NOT NULL) AS is_paused
       FROM draw_entry de
       JOIN business b ON b.id = de.business_id
       WHERE de.draw_id = $1 ${whereExtra}
@@ -1808,6 +1809,56 @@ export const removeBusinessFromDrawService = async (drawId: number, businessId: 
     [drawId, businessId],
   );
   invalidatePublicBusinessData();
+};
+
+export const pauseBusinessInDrawService = async (
+  drawId: number,
+  businessId: number,
+  paused: boolean,
+  actorUserId: number,
+): Promise<{ paused: boolean }> => {
+  const pool = getPool();
+
+  // Verify the enrollment exists (404 if not).
+  const entryCheck = await pool.query(
+    `SELECT de.id, d.status FROM draw_entry de JOIN draw d ON d.id = de.draw_id WHERE de.draw_id = $1 AND de.business_id = $2`,
+    [drawId, businessId],
+  );
+  if (!entryCheck.rows[0]) throw Object.assign(new Error('Business is not enrolled in this draw'), { statusCode: 404 });
+
+  const drawStatus = entryCheck.rows[0].status as string;
+  if (drawStatus === 'Closed') throw Object.assign(new Error('Cannot change participation on a closed campaign.'), { statusCode: 400 });
+
+  // The UPDATEs re-check the draw status atomically (FROM draw ... status != 'Closed') so a
+  // draw closing between the SELECT above and this statement can never be mutated - the
+  // pre-check exists only to produce clean 404/400 messages. Idempotent: already-paused is a
+  // no-op (paused_at IS NULL predicate).
+  if (paused) {
+    await pool.query(
+      `UPDATE draw_entry de SET paused_at = NOW(), paused_by_user_id = $3
+       FROM draw d
+       WHERE de.draw_id = $1 AND de.business_id = $2 AND d.id = de.draw_id
+         AND d.status != 'Closed' AND de.paused_at IS NULL`,
+      [drawId, businessId, actorUserId],
+    );
+  } else {
+    await pool.query(
+      `UPDATE draw_entry de SET paused_at = NULL, paused_by_user_id = NULL
+       FROM draw d
+       WHERE de.draw_id = $1 AND de.business_id = $2 AND d.id = de.draw_id
+         AND d.status != 'Closed'`,
+      [drawId, businessId],
+    );
+  }
+
+  invalidatePublicBusinessData();
+  // Report the ACTUAL resulting state (truthful even if a concurrent close made the
+  // guarded UPDATE match zero rows).
+  const state = await pool.query(
+    `SELECT (paused_at IS NOT NULL) AS paused FROM draw_entry WHERE draw_id = $1 AND business_id = $2`,
+    [drawId, businessId],
+  );
+  return { paused: state.rows[0]?.paused === true };
 };
 
 export const getBusinessDetailService = async (businessId: number) => {

@@ -36,6 +36,7 @@ import {
   duplicateDrawService,
   addBusinessToDrawService,
   removeBusinessFromDrawService,
+  pauseBusinessInDrawService,
   getBusinessDetailService,
   getBusinessEntriesService,
   adminImageDecisionService,
@@ -702,6 +703,34 @@ export const removeBusinessFromDraw = async (req: Request, res: Response): Promi
     // Service messages here are admin-facing (e.g. the live-campaign guard) - surface them.
     const msg = err instanceof Error && err.message ? err.message : 'Failed to remove business from draw';
     res.status(400).json({ message: msg });
+  }
+};
+
+export const patchBusinessParticipation = async (req: Request, res: Response): Promise<void> => {
+  const drawId = parseInt(req.params.drawId as string, 10);
+  const businessId = parseInt(req.params.businessId as string, 10);
+  if (!drawId || drawId <= 0 || !businessId || businessId <= 0) {
+    res.status(400).json({ message: 'Invalid IDs' });
+    return;
+  }
+  const { paused } = req.body as { paused?: unknown };
+  if (typeof paused !== 'boolean') {
+    res.status(400).json({ message: 'paused must be a boolean' });
+    return;
+  }
+  const actorUserId = req.user!.id;
+  try {
+    const result = await pauseBusinessInDrawService(drawId, businessId, paused, actorUserId);
+    res.json(result);
+  } catch (err: unknown) {
+    const statusCode = (err as { statusCode?: number }).statusCode;
+    if (statusCode === 404 || statusCode === 400) {
+      res.status(statusCode).json({ message: err instanceof Error ? err.message : 'Failed to update participation' });
+      return;
+    }
+    // Unknown failure: never echo raw error text (could be a pg internal message).
+    console.error('[admin.patchBusinessParticipation]', err);
+    res.status(500).json({ message: 'Failed to update participation' });
   }
 };
 

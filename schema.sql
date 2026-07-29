@@ -313,9 +313,17 @@ CREATE TABLE draw_entry (
   -- Receipt threshold (business.min_transaction_amount) snapshotted at enrolment time, so a draw's
   -- historical "entry minimum" survives later threshold changes. NULL on legacy rows (backfilled).
   min_transaction_at_entry NUMERIC(10, 2) NULL,
+  -- Admin campaign-scoped pause. NULL = active; set to pause the business on the public
+  -- map/search/profile/entry for this draw only. Already-issued tickets are untouched and
+  -- remain eligible to win. Separate from subscription.participation_paused (founding cancel).
+  paused_at           TIMESTAMP NULL,
+  paused_by_user_id   INTEGER NULL REFERENCES "user"(id) ON DELETE SET NULL,
   created_at          TIMESTAMP NOT NULL DEFAULT NOW(),
   UNIQUE (draw_id, business_id)
 );
+
+-- Partial index: fast lookup of paused enrollments (sparse; most rows have paused_at IS NULL).
+CREATE INDEX idx_draw_entry_paused ON draw_entry (draw_id) WHERE paused_at IS NOT NULL;
 
 
 -- ── Tickets ───────────────────────────────────────────────────────────────────
