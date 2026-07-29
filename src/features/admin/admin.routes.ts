@@ -1,5 +1,12 @@
 import { Router } from 'express';
 import * as adminController from './admin.controller.js';
+import {
+  adminGetCampaignList,
+  adminGetCampaignHeader,
+  adminGetCampaignKpis,
+  adminGetCampaignEntries,
+  adminGetBusinessAnalytics,
+} from './adminBusinessView.controller.js';
 import { requireRole } from '../../shared/middleware/auth.middleware.js';
 
 const router = Router();
@@ -14,6 +21,11 @@ router.get('/users', adminController.getUsers);
 router.get('/users/:userId', adminController.getUserDetail);
 router.get('/businesses/:businessId', adminController.getBusinessDetail);
 router.get('/businesses/:businessId/entries', adminController.getBusinessEntries);
+router.get('/businesses/:businessId/campaign/list', adminGetCampaignList);
+router.get('/businesses/:businessId/campaign/header', adminGetCampaignHeader);
+router.get('/businesses/:businessId/campaign/kpis', adminGetCampaignKpis);
+router.get('/businesses/:businessId/campaign/entries', adminGetCampaignEntries);
+router.get('/businesses/:businessId/analytics/:category', adminGetBusinessAnalytics);
 router.patch('/users/:userId/role', adminController.updateUserRole);
 router.patch('/users/:userId/active', adminController.toggleUserActive);
 router.patch('/users/:userId/risk', adminController.setUserRisk);

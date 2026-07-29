@@ -133,19 +133,9 @@ async function ticketSeries(businessId: number, loc: number | null, from: string
 }
 
 // ── 1. OVERVIEW ───────────────────────────────────────────────────────────────
-export const getOverviewAnalytics = async (
-  userId: number, jwtLocationId: number | null | undefined, filterLocationId: number | undefined, p: AnalyticsParams,
+export const getOverviewAnalyticsForScope = async (
+  businessId: number, scopedLocationId: number | null, p: AnalyticsParams,
 ) => {
-  const { businessId, scopedLocationId } = await resolveScope(userId, jwtLocationId, filterLocationId);
-  const empty = {
-    total_participants: 0, total_entries: 0, avg_entries_per_participant: 0,
-    new_participants: 0, returning_participants: 0, new_pct: 0, returning_pct: 0,
-    entry_cap: { used: 0, cap: null as number | null, pct: 0, enrolled: false },
-    draw_capacity: [] as { draw_id: number; label: string; status: string; used: number; cap: number | null; pct: number }[],
-    series: [] as ReturnType<typeof num>[] & unknown[],
-    bucket: 'day' as SeriesBucket,
-  };
-  if (businessId == null) return { ...empty, series: [] };
   const loc = scopedLocationId;
   const pool = getPool();
 
@@ -227,6 +217,23 @@ export const getOverviewAnalytics = async (
   };
 };
 
+export const getOverviewAnalytics = async (
+  userId: number, jwtLocationId: number | null | undefined, filterLocationId: number | undefined, p: AnalyticsParams,
+) => {
+  const { businessId, scopedLocationId } = await resolveScope(userId, jwtLocationId, filterLocationId);
+  if (businessId == null) {
+    return {
+      total_participants: 0, total_entries: 0, avg_entries_per_participant: 0,
+      new_participants: 0, returning_participants: 0, new_pct: 0, returning_pct: 0,
+      entry_cap: { used: 0, cap: null as number | null, pct: 0, enrolled: false },
+      draw_capacity: [] as { draw_id: number; label: string; status: string; used: number; cap: number | null; pct: number }[],
+      series: [] as unknown[],
+      bucket: 'day' as SeriesBucket,
+    };
+  }
+  return getOverviewAnalyticsForScope(businessId, scopedLocationId, p);
+};
+
 // Span of acquisition activity (signups + profile views) in [from,to], for granularity choice.
 async function acqSpanDays(businessId: number, loc: number | null, from: string, to: string): Promise<number> {
   const pool = getPool();
@@ -247,13 +254,9 @@ async function acqSpanDays(businessId: number, loc: number | null, from: string,
 }
 
 // ── 2. ACQUISITION ────────────────────────────────────────────────────────────
-export const getAcquisitionAnalytics = async (
-  userId: number, jwtLocationId: number | null | undefined, filterLocationId: number | undefined, p: AnalyticsParams,
+export const getAcquisitionAnalyticsForScope = async (
+  businessId: number, scopedLocationId: number | null, p: AnalyticsParams,
 ) => {
-  const { businessId, scopedLocationId } = await resolveScope(userId, jwtLocationId, filterLocationId);
-  if (businessId == null) {
-    return { new_users_acquired: 0, business_discovery: 0, profile_views: 0, conversion_pct: 0, acquisitionSeries: [], bucket: 'day' as SeriesBucket };
-  }
   const loc = scopedLocationId;
   const a = [businessId, loc, p.from, p.to] as const;
   const bk = granularityForSpanDays(await acqSpanDays(businessId, loc, p.from, p.to));
@@ -325,14 +328,20 @@ export const getAcquisitionAnalytics = async (
   };
 };
 
-// ── 3. ENGAGEMENT ─────────────────────────────────────────────────────────────
-export const getEngagementAnalytics = async (
+export const getAcquisitionAnalytics = async (
   userId: number, jwtLocationId: number | null | undefined, filterLocationId: number | undefined, p: AnalyticsParams,
 ) => {
   const { businessId, scopedLocationId } = await resolveScope(userId, jwtLocationId, filterLocationId);
   if (businessId == null) {
-    return { repeat_participation_pct: 0, avg_entries_per_user: 0, returning_participant_count: 0, loyal_customers: 0, series: [], bucket: 'day' as SeriesBucket };
+    return { new_users_acquired: 0, business_discovery: 0, profile_views: 0, conversion_pct: 0, acquisitionSeries: [], bucket: 'day' as SeriesBucket };
   }
+  return getAcquisitionAnalyticsForScope(businessId, scopedLocationId, p);
+};
+
+// ── 3. ENGAGEMENT ─────────────────────────────────────────────────────────────
+export const getEngagementAnalyticsForScope = async (
+  businessId: number, scopedLocationId: number | null, p: AnalyticsParams,
+) => {
   const loc = scopedLocationId;
   const pool = getPool();
   const [core, loyal, seriesRes] = await Promise.all([
@@ -359,14 +368,20 @@ export const getEngagementAnalytics = async (
   };
 };
 
-// ── 4. REVENUE IMPACT ─────────────────────────────────────────────────────────
-export const getRevenueAnalytics = async (
+export const getEngagementAnalytics = async (
   userId: number, jwtLocationId: number | null | undefined, filterLocationId: number | undefined, p: AnalyticsParams,
 ) => {
   const { businessId, scopedLocationId } = await resolveScope(userId, jwtLocationId, filterLocationId);
   if (businessId == null) {
-    return { total_qualifying_revenue: 0, threshold: 0, avg_purchase_amount: 0, qualifying_receipts: 0, series: [], bucket: 'day' as SeriesBucket, drawBreakdown: [] };
+    return { repeat_participation_pct: 0, avg_entries_per_user: 0, returning_participant_count: 0, loyal_customers: 0, series: [], bucket: 'day' as SeriesBucket };
   }
+  return getEngagementAnalyticsForScope(businessId, scopedLocationId, p);
+};
+
+// ── 4. REVENUE IMPACT ─────────────────────────────────────────────────────────
+export const getRevenueAnalyticsForScope = async (
+  businessId: number, scopedLocationId: number | null, p: AnalyticsParams,
+) => {
   const loc = scopedLocationId;
   const a = [businessId, loc, p.from, p.to] as const;
   const pool = getPool();
@@ -417,4 +432,14 @@ export const getRevenueAnalytics = async (
     bucket: seriesRes.bucket,
     drawBreakdown,
   };
+};
+
+export const getRevenueAnalytics = async (
+  userId: number, jwtLocationId: number | null | undefined, filterLocationId: number | undefined, p: AnalyticsParams,
+) => {
+  const { businessId, scopedLocationId } = await resolveScope(userId, jwtLocationId, filterLocationId);
+  if (businessId == null) {
+    return { total_qualifying_revenue: 0, threshold: 0, avg_purchase_amount: 0, qualifying_receipts: 0, series: [], bucket: 'day' as SeriesBucket, drawBreakdown: [] };
+  }
+  return getRevenueAnalyticsForScope(businessId, scopedLocationId, p);
 };

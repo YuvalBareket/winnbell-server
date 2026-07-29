@@ -105,13 +105,10 @@ export async function resolveScope(
   return { businessId: row.id, scopedLocationId };
 }
 
-export const listBusinessCampaigns = async (
-  userId: number,
-  jwtLocationId: number | null | undefined,
+export const listBusinessCampaignsForScope = async (
+  businessId: number,
 ): Promise<CampaignListItem[]> => {
   const pool = getPool();
-  const { businessId } = await resolveScope(userId, jwtLocationId);
-  if (businessId == null) return [];
   const res = await pool.query(
     `SELECT DISTINCT d.id AS draw_id, d.name, d.prize_pool, d.start_date, d.draw_date, d.status
      FROM draw d JOIN draw_entry de ON de.draw_id = d.id AND de.business_id = $1
@@ -130,11 +127,20 @@ export const listBusinessCampaigns = async (
   }));
 };
 
-// ── Campaign Dashboard: monitoring header (NOT period-scoped) ──────────────────
-export const getCampaignHeader = async (
+export const listBusinessCampaigns = async (
   userId: number,
   jwtLocationId: number | null | undefined,
-  filterLocationId?: number,
+): Promise<CampaignListItem[]> => {
+  const { businessId } = await resolveScope(userId, jwtLocationId);
+  if (businessId == null) return [];
+  return listBusinessCampaignsForScope(businessId);
+};
+
+// ── Campaign Dashboard: monitoring header (NOT period-scoped) ──────────────────
+
+export const getCampaignHeaderForScope = async (
+  businessId: number,
+  scopedLocationId: number | null,
   drawId?: number,
 ): Promise<CampaignHeader> => {
   const pool = getPool();
@@ -142,8 +148,6 @@ export const getCampaignHeader = async (
     has_campaign: false, status: 'Closed', campaign_name: null, prize_amount: null, start_date: null, draw_date: null,
     days_remaining: null, entries_used: 0, entry_cap: null, cap_reached: false,
   };
-  const { businessId, scopedLocationId } = await resolveScope(userId, jwtLocationId, filterLocationId);
-  if (businessId == null) return empty;
 
   // Resolve the target draw: specific draw if drawId given, else the Open draw.
   let drawRes;
@@ -207,17 +211,30 @@ export const getCampaignHeader = async (
   };
 };
 
-// ── Campaign Dashboard: light KPIs (period-scoped: today / wtd / mtd) ──────────
-export const getCampaignKpis = async (
+export const getCampaignHeader = async (
   userId: number,
   jwtLocationId: number | null | undefined,
-  filterLocationId: number | undefined,
+  filterLocationId?: number,
+  drawId?: number,
+): Promise<CampaignHeader> => {
+  const empty: CampaignHeader = {
+    has_campaign: false, status: 'Closed', campaign_name: null, prize_amount: null, start_date: null, draw_date: null,
+    days_remaining: null, entries_used: 0, entry_cap: null, cap_reached: false,
+  };
+  const { businessId, scopedLocationId } = await resolveScope(userId, jwtLocationId, filterLocationId);
+  if (businessId == null) return empty;
+  return getCampaignHeaderForScope(businessId, scopedLocationId, drawId);
+};
+
+// ── Campaign Dashboard: light KPIs (period-scoped: today / wtd / mtd) ──────────
+
+export const getCampaignKpisForScope = async (
+  businessId: number,
+  scopedLocationId: number | null,
   dateRange: DateRange = 'today',
   drawId?: number,
 ): Promise<CampaignKpis> => {
   const pool = getPool();
-  const { businessId, scopedLocationId } = await resolveScope(userId, jwtLocationId, filterLocationId);
-  if (businessId == null) return { entries: 0, revenue: 0, customers: 0 };
 
   if (drawId != null) {
     const pDraw: unknown[] = [businessId, drawId];
@@ -253,11 +270,23 @@ export const getCampaignKpis = async (
   };
 };
 
-// ── Campaign Dashboard: entries feed (current-campaign scoped, NOT date-scoped) ─
-export const getCampaignEntries = async (
+export const getCampaignKpis = async (
   userId: number,
   jwtLocationId: number | null | undefined,
   filterLocationId: number | undefined,
+  dateRange: DateRange = 'today',
+  drawId?: number,
+): Promise<CampaignKpis> => {
+  const { businessId, scopedLocationId } = await resolveScope(userId, jwtLocationId, filterLocationId);
+  if (businessId == null) return { entries: 0, revenue: 0, customers: 0 };
+  return getCampaignKpisForScope(businessId, scopedLocationId, dateRange, drawId);
+};
+
+// ── Campaign Dashboard: entries feed (current-campaign scoped, NOT date-scoped) ─
+
+export const getCampaignEntriesForScope = async (
+  businessId: number,
+  scopedLocationId: number | null,
   drawId?: number,
   cursor?: string,
   limit = 25,
@@ -266,8 +295,6 @@ export const getCampaignEntries = async (
   range?: DateRange,
 ): Promise<CampaignEntriesResult> => {
   const pool = getPool();
-  const { businessId, scopedLocationId } = await resolveScope(userId, jwtLocationId, filterLocationId);
-  if (businessId == null) return { items: [], next_cursor: null };
 
   let resolvedDrawId: number | undefined;
   if (drawId != null) {
@@ -337,4 +364,18 @@ export const getCampaignEntries = async (
   }));
   const last = items[items.length - 1];
   return { items, next_cursor: hasMore && last ? `${last.created_at}|${last.ticket_id}` : null };
+};
+
+export const getCampaignEntries = async (
+  userId: number,
+  jwtLocationId: number | null | undefined,
+  filterLocationId: number | undefined,
+  drawId?: number,
+  cursor?: string,
+  limit = 25,
+  range?: DateRange,
+): Promise<CampaignEntriesResult> => {
+  const { businessId, scopedLocationId } = await resolveScope(userId, jwtLocationId, filterLocationId);
+  if (businessId == null) return { items: [], next_cursor: null };
+  return getCampaignEntriesForScope(businessId, scopedLocationId, drawId, cursor, limit, range);
 };
