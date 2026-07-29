@@ -42,6 +42,7 @@ import {
   getDrawCandidateService,
   getDrawRejectedWinnersService,
   getDrawAuditLogService,
+  getBusinessHealthSummaryService,
 } from './admin.service.js';
 import { getGrowthAnalyticsService } from './growth.service.js';
 
@@ -51,11 +52,23 @@ export const getDashboardData = async (req: Request, res: Response) => {
     const limit = Math.min(100, Math.max(1, parseInt(req.query.limit as string) || 25));
     const search = (req.query.search as string) || undefined;
     if (search && search.length > 200) { res.status(400).json({ message: 'Search query is too long.' }); return; }
-    const stats = await getBusinessesWithStats({ page, limit, search });
+    // filter is an optional health triage param; invalid values are silently ignored by the service.
+    const filter = typeof req.query.filter === 'string' ? req.query.filter : undefined;
+    const stats = await getBusinessesWithStats({ page, limit, search, filter });
     res.status(200).json(stats);
   } catch (error) {
     console.error('[admin.getDashboardData]', error);
     res.status(500).json({ message: 'Error fetching admin data' });
+  }
+};
+
+export const getBusinessHealthSummary = async (_req: Request, res: Response) => {
+  try {
+    const summary = await getBusinessHealthSummaryService();
+    res.status(200).json(summary);
+  } catch (error) {
+    console.error('[admin.getBusinessHealthSummary]', error);
+    res.status(500).json({ message: 'Failed to fetch business health summary' });
   }
 };
 

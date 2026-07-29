@@ -21,13 +21,234 @@ const logDrawAudit = async (
   );
 };
 
+// ---------------------------------------------------------------------------
+// biz_health CTE
+// ---------------------------------------------------------------------------
+// This literal is the single definition of every health flag threshold.
+// Both getBusinessesWithStats and getBusinessHealthSummaryService embed it
+// verbatim so the thresholds are never duplicated.
+//
+// Scoped to the single open draw (earliest draw_date ASC LIMIT 1 when several
+// exist, which should never happen in practice but is safe-guarded).
+//
+// Cap rule: tickets counted ONLY when is_quarantined = FALSE AND
+//           activated_by_user_id IS NOT NULL (this is the universal cap rule
+//           used everywhere in the codebase — never deviate).
+//
+// total_cap = cap_at_entry * COUNT(active locations).
+// Fallback to subscription.entries_per_location when cap_at_entry is NULL
+// (legacy rows before draw_entry.cap_at_entry was added).
+//
+// Flag rationale:
+//   billing_issue  — subscription failed or incomplete; admin may need to
+//                    contact the owner before they are auto-dropped.
+//   setup_gap      — subscribed but not ready to receive entries; each clause
+//                    catches a distinct incompleteness:
+//                      * no receipt image: customers cannot verify purchases
+//                      * no active location: business is invisible on the map
+//                      * not enrolled in open draw: enrolled check prevents
+//                        false positives for businesses whose plan changed
+//                        mid-campaign and were not re-enrolled.
+//   no_recent_entries — enrolled in the open draw, the campaign has been open
+//                    for >7 days (grace period excludes freshly-opened draws),
+//                    but zero entries in the last 7 days: potentially abandoned
+//                    or the business stopped promoting participation.
+//   low_engagement — enrolled and has entries but the engagement signal is
+//                    weak, suggesting the receipt flow is not converting well:
+//                      * unique_customers <= 2: too few distinct customers
+//                        (could be just the owner testing)
+//                      * repeat_customers = 0 AND unique_customers >= 5:
+//                        five different customers but none returned — no
+//                        loyalty signal at all
+//                      * views_30d >= 10 AND entries_current < 3: the
+//                        location is being discovered on the map but almost
+//                        nobody is completing a receipt entry (funnel drop-off)
+//
+// health:
+//   'at_risk' — billing_issue OR no_recent_entries (revenue / participation risk)
+//   'watch'   — not at_risk, but setup_gap OR low_engagement (growth risk)
+//   'good'    — no flags
+// ---------------------------------------------------------------------------
+// The EXACT eligibility predicate openDrawInTx uses to auto-enroll businesses when a draw
+// opens (alias `s` = subscription). Shared between the real enrollment INSERT and the
+// "next campaign ready" preview below so the preview can never drift from reality.
+const ENROLLMENT_ELIGIBLE_SQL = `s.status IN ('Active', 'Trialing')
+      AND s.current_period_end >= NOW()
+      AND s.skip_next_campaign = FALSE
+      AND s.participation_paused = FALSE`;
+
+const BIZ_HEALTH_CTE = `
+  -- open_draw: resolve the single open draw once; NULL when none is open.
+  open_draw AS (
+    SELECT id, start_date FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1
+  ),
+  -- ticket_agg: flat aggregates per business for the open draw.
+  -- LEFT JOIN so businesses with no tickets still appear (all counts default to 0).
+  ticket_agg AS (
+    SELECT
+      t.business_id,
+      COUNT(*) FILTER (
+        WHERE t.is_quarantined = FALSE AND t.activated_by_user_id IS NOT NULL
+      )::int                                                                       AS entries_current,
+      COUNT(*) FILTER (
+        WHERE t.is_quarantined = FALSE AND t.activated_by_user_id IS NOT NULL
+          AND t.activated_at >= NOW() - INTERVAL '7 days'
+      )::int                                                                       AS entries_7d,
+      COUNT(DISTINCT t.activated_by_user_id) FILTER (
+        WHERE t.is_quarantined = FALSE AND t.activated_by_user_id IS NOT NULL
+      )::int                                                                       AS unique_customers,
+      MAX(t.activated_at) FILTER (
+        WHERE t.is_quarantined = FALSE AND t.activated_by_user_id IS NOT NULL
+      )                                                                            AS last_entry_at
+    FROM ticket t
+    WHERE t.draw_id = (SELECT id FROM open_draw)
+    GROUP BY t.business_id
+  ),
+  -- repeat_agg: count customers with >= 2 entries in the open draw.
+  repeat_agg AS (
+    SELECT
+      t.business_id,
+      COUNT(*) FILTER (WHERE cnt >= 2)::int AS repeat_customers
+    FROM (
+      SELECT t.business_id, t.activated_by_user_id, COUNT(*) AS cnt
+      FROM ticket t
+      WHERE t.draw_id       = (SELECT id FROM open_draw)
+        AND t.is_quarantined = FALSE
+        AND t.activated_by_user_id IS NOT NULL
+      GROUP BY t.business_id, t.activated_by_user_id
+    ) t
+    GROUP BY t.business_id
+  ),
+  -- views_agg: profile-view count per business over the last 30 days.
+  views_agg AS (
+    SELECT
+      bpv.business_id,
+      COUNT(*)::int AS views_30d
+    FROM business_profile_view bpv
+    WHERE bpv.last_viewed_at >= NOW() - INTERVAL '30 days'
+    GROUP BY bpv.business_id
+  ),
+  -- active_loc_agg: count of active locations per business (used in setup_gap and total_cap).
+  active_loc_agg AS (
+    SELECT business_id, COUNT(*)::int AS active_count
+    FROM business_location
+    WHERE is_active = TRUE
+    GROUP BY business_id
+  ),
+  -- biz_health: one row per business with all health fields.
+  biz_health AS (
+    SELECT
+      b.id AS business_id,
+
+      -- Enrollment: TRUE when this business has a draw_entry row for the open draw.
+      (EXISTS (
+        SELECT 1 FROM draw_entry de
+        WHERE de.draw_id = (SELECT id FROM open_draw) AND de.business_id = b.id
+      ))                                                                          AS enrolled,
+
+      -- Entry metrics (default to 0 when no tickets exist yet).
+      COALESCE(ta.entries_current,  0)::int                                       AS entries_current,
+      COALESCE(ta.entries_7d,       0)::int                                       AS entries_7d,
+      COALESCE(ta.unique_customers, 0)::int                                       AS unique_customers,
+      COALESCE(ra.repeat_customers, 0)::int                                       AS repeat_customers,
+      ta.last_entry_at,
+
+      -- Profile views in the last 30 days (0 when none).
+      COALESCE(va.views_30d, 0)::int                                              AS views_30d,
+
+      -- Total capacity: cap_at_entry * active_locations (fallback to entries_per_location).
+      (
+        COALESCE(de.cap_at_entry, s.entries_per_location)
+        * COALESCE(ala.active_count, 0)
+      )::int                                                                       AS total_cap,
+
+      -- next_campaign_ready: will be AUTO-ENROLLED the moment the next campaign opens.
+      -- COALESCE because a business with no subscription row yields NULL, which must read
+      -- as "not ready", never as unknown.
+      COALESCE((${ENROLLMENT_ELIGIBLE_SQL}), FALSE)                               AS next_campaign_ready,
+
+      -- billing_issue: subscription is in a failed or incomplete payment state.
+      -- (un-subscribed businesses never have billing_issue — nothing to fix)
+      (s.status IN ('Past_Due', 'Incomplete'))                                    AS billing_issue,
+
+      -- setup_gap: subscribed but not operationally ready to earn entries.
+      -- Only applies to subscribed businesses (no point flagging unsubscribed ones).
+      (
+        s.status IN ('Active', 'Trialing')
+        AND (
+          -- No receipt image: customers at the counter cannot verify the business's receipts
+          b.receipt_example_image_url IS NULL
+          -- No active location: business is invisible on the map
+          OR COALESCE(ala.active_count, 0) = 0
+          -- Not enrolled in the open draw: subscribed but somehow missed enrollment.
+          -- Guarded on an open draw existing: with no draw open, NOT EXISTS is vacuously
+          -- TRUE and would wrongly flag EVERY subscribed business between campaigns.
+          OR (
+            (SELECT id FROM open_draw) IS NOT NULL
+            AND NOT EXISTS (
+              SELECT 1 FROM draw_entry de2
+              WHERE de2.draw_id = (SELECT id FROM open_draw) AND de2.business_id = b.id
+            )
+          )
+        )
+      )                                                                            AS setup_gap,
+
+      -- no_recent_entries: enrolled, campaign has been open > 7 days (grace period),
+      -- but no entries in the last 7 days — potentially abandoned or under-promoted.
+      (
+        EXISTS (
+          SELECT 1 FROM draw_entry de3
+          WHERE de3.draw_id = (SELECT id FROM open_draw) AND de3.business_id = b.id
+        )
+        AND (SELECT start_date FROM open_draw) <= NOW() - INTERVAL '7 days'
+        AND COALESCE(ta.entries_7d, 0) = 0
+      )                                                                            AS no_recent_entries,
+
+      -- low_engagement: enrolled and has at least one entry but weak engagement signal.
+      (
+        EXISTS (
+          SELECT 1 FROM draw_entry de4
+          WHERE de4.draw_id = (SELECT id FROM open_draw) AND de4.business_id = b.id
+        )
+        AND COALESCE(ta.entries_current, 0) > 0
+        AND (
+          -- Too few distinct customers: could be just the owner/staff testing the flow
+          COALESCE(ta.unique_customers, 0) <= 2
+          -- Five-plus customers but not one returned: zero loyalty signal
+          OR (COALESCE(ra.repeat_customers, 0) = 0 AND COALESCE(ta.unique_customers, 0) >= 5)
+          -- Map discovery without conversion: location is being found but receipt flow drops off
+          OR (COALESCE(va.views_30d, 0) >= 10 AND COALESCE(ta.entries_current, 0) < 3)
+        )
+      )                                                                            AS low_engagement
+
+    FROM business b
+    LEFT JOIN subscription        s   ON s.business_id  = b.id
+    LEFT JOIN draw_entry          de  ON de.business_id = b.id
+                                     AND de.draw_id     = (SELECT id FROM open_draw)
+    LEFT JOIN ticket_agg          ta  ON ta.business_id = b.id
+    LEFT JOIN repeat_agg          ra  ON ra.business_id = b.id
+    LEFT JOIN views_agg           va  ON va.business_id = b.id
+    LEFT JOIN active_loc_agg      ala ON ala.business_id = b.id
+  )
+`;
+
+// Allowed filter values for the businesses list endpoint.
+type BusinessHealthFilter = 'attention' | 'no_recent_entries' | 'low_engagement' | 'billing' | 'setup' | 'next_ready';
+const VALID_HEALTH_FILTERS = new Set<BusinessHealthFilter>(['attention', 'no_recent_entries', 'low_engagement', 'billing', 'setup', 'next_ready']);
+
 export const getBusinessesWithStats = async (params: {
   page: number;
   limit: number;
   search?: string;
+  filter?: string;
 }) => {
   const pool = getPool();
   const { page, limit, search } = params;
+  // Whitelist the filter value — invalid strings are silently ignored (treated as absent)
+  // so a client sending an unknown value never triggers a 400; it just gets unfiltered results.
+  const filter: BusinessHealthFilter | undefined = VALID_HEALTH_FILTERS.has(params.filter as BusinessHealthFilter)
+    ? (params.filter as BusinessHealthFilter)
+    : undefined;
   const offset = (page - 1) * limit;
 
   const conditions: string[] = [];
@@ -40,10 +261,43 @@ export const getBusinessesWithStats = async (params: {
     idx++;
   }
 
+  // When a health filter is active, restrict to businesses that have that flag set.
+  // 'attention' means any flag at all. Pushed into the shared conditions list so the WHERE
+  // clause is always well-formed regardless of whether a search term is present.
+  if (filter) {
+    conditions.push(
+      filter === 'attention'
+        ? `(h.billing_issue OR h.setup_gap OR h.no_recent_entries OR h.low_engagement)`
+        : filter === 'no_recent_entries'
+        ? `h.no_recent_entries`
+        : filter === 'low_engagement'
+        ? `h.low_engagement`
+        : filter === 'billing'
+        ? `h.billing_issue`
+        : filter === 'next_ready'
+        ? `h.next_campaign_ready`
+        : `h.setup_gap`, // 'setup'
+    );
+  }
+
   const where = conditions.length ? `WHERE ${conditions.join(' AND ')}` : '';
+
+  // Default order is b.name ASC.
+  // When a filter is active, sort worst-first (at_risk before watch before good,
+  // then alphabetically within each tier) so the most urgent businesses surface first.
+  // The tier is derived from the CTE's flag booleans here - `health` itself is a SELECT-list
+  // alias (not a CTE column), so ORDER BY cannot reference it as h.health.
+  const orderBy = filter
+    ? `ORDER BY CASE
+         WHEN h.billing_issue OR h.no_recent_entries THEN 0
+         WHEN h.setup_gap OR h.low_engagement        THEN 1
+         ELSE                                             2
+       END ASC, b.name ASC`
+    : `ORDER BY b.name ASC`;
 
   const [rowsRes, countRes] = await Promise.all([
     pool.query(`
+      WITH ${BIZ_HEALTH_CTE}
       SELECT
         b.id,
         b.name,
@@ -56,21 +310,47 @@ export const getBusinessesWithStats = async (params: {
         s.current_period_end,
         s.fee_at_entry,
         COALESCE(loc.location_count, 0) AS location_count,
-        (SELECT COUNT(*)::int FROM ticket WHERE business_id = b.id AND is_quarantined = FALSE AND activated_by_user_id IS NOT NULL) AS total_activated
+        (SELECT COUNT(*)::int FROM ticket WHERE business_id = b.id AND is_quarantined = FALSE AND activated_by_user_id IS NOT NULL) AS total_activated,
+        -- Health fields from the biz_health CTE
+        h.enrolled,
+        h.next_campaign_ready,
+        h.entries_current,
+        h.entries_7d,
+        h.unique_customers,
+        h.repeat_customers,
+        h.last_entry_at,
+        h.views_30d,
+        h.total_cap,
+        -- Collapse boolean flags into a text[] for easy client consumption
+        ARRAY_REMOVE(ARRAY[
+          CASE WHEN h.billing_issue    THEN 'billing_issue'    END,
+          CASE WHEN h.setup_gap        THEN 'setup_gap'        END,
+          CASE WHEN h.no_recent_entries THEN 'no_recent_entries' END,
+          CASE WHEN h.low_engagement   THEN 'low_engagement'   END
+        ], NULL)                                                AS flags,
+        -- Derived health tier
+        CASE
+          WHEN h.billing_issue OR h.no_recent_entries THEN 'at_risk'
+          WHEN h.setup_gap OR h.low_engagement        THEN 'watch'
+          ELSE                                              'good'
+        END                                                     AS health
       FROM business b
       LEFT JOIN "user" u ON b.user_id = u.id
       LEFT JOIN subscription s ON s.business_id = b.id
       LEFT JOIN (
         SELECT business_id, COUNT(*) AS location_count FROM business_location GROUP BY business_id
       ) loc ON loc.business_id = b.id
+      JOIN biz_health h ON h.business_id = b.id
       ${where}
-      ORDER BY b.name ASC
+      ${orderBy}
       LIMIT $${idx} OFFSET $${idx + 1}
     `, [...values, limit, offset]),
     pool.query(`
+      WITH ${BIZ_HEALTH_CTE}
       SELECT COUNT(*) AS total
       FROM business b
       LEFT JOIN "user" u ON b.user_id = u.id
+      JOIN biz_health h ON h.business_id = b.id
       ${where}
     `, values),
   ]);
@@ -81,6 +361,43 @@ export const getBusinessesWithStats = async (params: {
     page,
     limit,
     totalPages: Math.ceil(Number(countRes.rows[0]?.total ?? 0) / limit),
+  };
+};
+
+export const getBusinessHealthSummaryService = async (): Promise<{
+  total: number;
+  attention: number;
+  no_recent_entries: number;
+  low_engagement: number;
+  billing: number;
+  setup: number;
+  next_ready: number;
+}> => {
+  const pool = getPool();
+  const result = await pool.query(`
+    WITH ${BIZ_HEALTH_CTE}
+    SELECT
+      COUNT(*)::int                                                              AS total,
+      COUNT(*) FILTER (
+        WHERE h.billing_issue OR h.setup_gap OR h.no_recent_entries OR h.low_engagement
+      )::int                                                                     AS attention,
+      COUNT(*) FILTER (WHERE h.no_recent_entries)::int                          AS no_recent_entries,
+      COUNT(*) FILTER (WHERE h.low_engagement)::int                             AS low_engagement,
+      COUNT(*) FILTER (WHERE h.billing_issue)::int                              AS billing,
+      COUNT(*) FILTER (WHERE h.setup_gap)::int                                  AS setup,
+      COUNT(*) FILTER (WHERE h.next_campaign_ready)::int                        AS next_ready
+    FROM business b
+    JOIN biz_health h ON h.business_id = b.id
+  `);
+  const row = result.rows[0];
+  return {
+    total:             Number(row?.total             ?? 0),
+    attention:         Number(row?.attention         ?? 0),
+    no_recent_entries: Number(row?.no_recent_entries ?? 0),
+    low_engagement:    Number(row?.low_engagement    ?? 0),
+    billing:           Number(row?.billing           ?? 0),
+    setup:             Number(row?.setup             ?? 0),
+    next_ready:        Number(row?.next_ready        ?? 0),
   };
 };
 
@@ -423,12 +740,11 @@ const openDrawInTx = async (client: import('pg').PoolClient, drawId: number, act
     INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, cap_at_entry, min_transaction_at_entry)
     SELECT d.id, b.id, COALESCE(s.fee_at_entry, 0), s.entries_per_location, b.min_transaction_amount
     FROM draw d
-    JOIN subscription s ON s.status IN ('Active', 'Trialing')
+    -- Eligibility lives in the shared ENROLLMENT_ELIGIBLE_SQL constant so the admin
+    -- "next campaign ready" preview uses the IDENTICAL rule and can never drift.
+    JOIN subscription s ON ${ENROLLMENT_ELIGIBLE_SQL}
     JOIN business b ON b.id = s.business_id
     WHERE d.id = $1
-      AND s.current_period_end >= NOW()
-      AND s.skip_next_campaign = FALSE
-      AND s.participation_paused = FALSE
     ON CONFLICT (draw_id, business_id) DO NOTHING
   `, [drawId]);
   // Opt-outs are one campaign only: consume the flag so the business is back in next time.

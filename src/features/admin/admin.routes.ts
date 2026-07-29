@@ -15,6 +15,10 @@ router.use(requireRole('Admin'));
 
 router.get('/overview', adminController.getOverview);
 router.get('/businesses', adminController.getDashboardData);
+// health-summary MUST be registered before /businesses/:businessId so the literal
+// string 'health-summary' is never captured as a businessId param (Express 5 matches
+// routes in registration order).
+router.get('/businesses/health-summary', adminController.getBusinessHealthSummary);
 router.get('/draws', adminController.getDraws);
 router.get('/draws-all', adminController.getAllDraws);
 router.get('/users', adminController.getUsers);
