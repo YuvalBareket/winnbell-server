@@ -54,7 +54,10 @@ export const getDashboardData = async (req: Request, res: Response) => {
     if (search && search.length > 200) { res.status(400).json({ message: 'Search query is too long.' }); return; }
     // filter is an optional health triage param; invalid values are silently ignored by the service.
     const filter = typeof req.query.filter === 'string' ? req.query.filter : undefined;
-    const stats = await getBusinessesWithStats({ page, limit, search, filter });
+    // excludeDrawId (campaign "add business" search): only accept a positive int, else ignore.
+    const rawExclude = typeof req.query.excludeDrawId === 'string' ? parseInt(req.query.excludeDrawId, 10) : NaN;
+    const excludeDrawId = Number.isInteger(rawExclude) && rawExclude > 0 ? rawExclude : undefined;
+    const stats = await getBusinessesWithStats({ page, limit, search, filter, excludeDrawId });
     res.status(200).json(stats);
   } catch (error) {
     console.error('[admin.getDashboardData]', error);

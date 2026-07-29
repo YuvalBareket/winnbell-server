@@ -241,9 +241,12 @@ export const getBusinessesWithStats = async (params: {
   limit: number;
   search?: string;
   filter?: string;
+  // When set, exclude businesses already enrolled (draw_entry) in this draw. Powers the admin
+  // campaign "add business" search so it only ever surfaces non-participating businesses.
+  excludeDrawId?: number;
 }) => {
   const pool = getPool();
-  const { page, limit, search } = params;
+  const { page, limit, search, excludeDrawId } = params;
   // Whitelist the filter value — invalid strings are silently ignored (treated as absent)
   // so a client sending an unknown value never triggers a 400; it just gets unfiltered results.
   const filter: BusinessHealthFilter | undefined = VALID_HEALTH_FILTERS.has(params.filter as BusinessHealthFilter)
@@ -258,6 +261,14 @@ export const getBusinessesWithStats = async (params: {
   if (search) {
     conditions.push(`(b.name ILIKE $${idx} OR u.full_name ILIKE $${idx} OR u.email ILIKE $${idx})`);
     values.push(`%${search}%`);
+    idx++;
+  }
+
+  // Exclude businesses already participating in the given draw (validated as a positive int
+  // by the caller). Parameterized like every other value - never string-interpolated.
+  if (excludeDrawId != null) {
+    conditions.push(`NOT EXISTS (SELECT 1 FROM draw_entry de_ex WHERE de_ex.business_id = b.id AND de_ex.draw_id = $${idx})`);
+    values.push(excludeDrawId);
     idx++;
   }
 
