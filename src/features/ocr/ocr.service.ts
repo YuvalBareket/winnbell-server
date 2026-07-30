@@ -2,7 +2,6 @@ import type { Pool, PoolClient } from 'pg';
 import { getPool } from '../../shared/db/db.js';
 import { safeRollback } from '../../shared/db/txn.js';
 import { updateUserRiskScore, syncUserQuarantineState } from '../risk/risk.service.js';
-import { TesseractProvider } from './providers/tesseract.provider.js';
 import { GoogleVisionProvider } from './providers/google-vision.provider.js';
 import type { OcrProvider, OcrExpected, OcrValidationResult } from './ocr.types.js';
 import { canonicalizeReceiptIdentifier } from './receiptIdentity.js';
@@ -362,20 +361,12 @@ async function resolveReceiptValidation(
 }
 
 // ─── Provider Factory ─────────────────────────────────────────────────────────
-// Set OCR_PROVIDER=google in .env to use Google Vision (recommended for production).
-// Defaults to tesseract for local dev without credentials.
+// Google Vision is the only supported provider (used by dev/staging/prod: OCR_PROVIDER=google).
+// It enforces a 10MB image cap; the old Tesseract provider (no size cap, unbounded CPU) was
+// removed as a DoS vector.
 
 function getProvider(): OcrProvider {
-  const provider = process.env.OCR_PROVIDER ?? 'tesseract';
-  switch (provider) {
-    case 'google':
-      return new GoogleVisionProvider();
-    case 'tesseract':
-      return new TesseractProvider();
-    default:
-      console.warn(`Unknown OCR_PROVIDER "${provider}", falling back to tesseract`);
-      return new TesseractProvider();
-  }
+  return new GoogleVisionProvider();
 }
 
 // ─── Async Validator ──────────────────────────────────────────────────────────
@@ -523,7 +514,7 @@ export const validateReceiptAsync = (
         pool, ticketId, userId, drawId, businessId, identifier, result, passed, contestProven, riskDelta,
       );
     } catch (err) {
-      // Provider error (network, tesseract crash, etc.) or a resolution that rolled back —
+      // Provider error (network, OCR failure, etc.) or a resolution that rolled back —
       // quarantine pending manual review / retry. Guarded so it can NEVER overwrite a verdict
       // that a concurrent run already committed (a resolved 'passed'/'failed' stays as-is).
       console.error(`[OCR] Validation error for ticket ${ticketId}:`, err);

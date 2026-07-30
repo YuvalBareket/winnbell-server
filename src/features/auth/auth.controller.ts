@@ -35,7 +35,11 @@ export const register = async (
   try {
     const { fullName, email, password, role, inviteToken } = req.body;
 
-    if (!fullName || !email || !password) {
+    // Type guard: a truthy non-string (array/object) would pass a bare presence check and then
+    // throw a 500 deep in registerUser (email.toLowerCase). Reject as a clean 400.
+    if (typeof fullName !== 'string' || !fullName
+      || typeof email !== 'string' || !email
+      || typeof password !== 'string' || !password) {
       res.status(400).json({ message: 'All fields are required' });
       return;
     }
@@ -72,7 +76,9 @@ export const register = async (
 
 export const checkEmail = async (req: Request, res: Response): Promise<void> => {
   const { email } = req.body;
-  if (!email) { res.status(400).json({ message: 'Email required' }); return; }
+  // Must be a string: a truthy non-string (array/object) passes `!email` and validateLengths
+  // (which skips non-strings), then email.toLowerCase() below would throw a 500 instead of a 400.
+  if (typeof email !== 'string' || !email) { res.status(400).json({ message: 'Email required' }); return; }
   const lenErr = validateLengths([['Email', email, 255]]);
   if (lenErr) { res.status(400).json({ message: lenErr }); return; }
   try {
@@ -88,7 +94,9 @@ export const login = async (req: Request, res: Response) => {
   try {
     const { email, password, inviteToken } = req.body;
 
-    if (!email || !password) {
+    // Type guard: a truthy non-string (array/object) would pass a bare presence check and then
+    // throw a 500 deep in loginUser (email.split/.toLowerCase). Reject as a clean 400.
+    if (typeof email !== 'string' || !email || typeof password !== 'string' || !password) {
       res.status(400).json({ message: 'Email and password are required' });
       return;
     }

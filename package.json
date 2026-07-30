@@ -32,7 +32,6 @@
     "pg": "^8.20.0",
     "rate-limit-redis": "^5.0.0",
     "stripe": "^21.0.1",
-    "tesseract.js": "^7.0.0",
     "twilio": "^6.0.2",
     "web-push": "^3.6.7"
   },

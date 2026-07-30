@@ -12,6 +12,10 @@ interface PushKeys {
   auth: string;
 }
 
+// A real person has at most a handful of devices/browsers; 20 is generous headroom for
+// reinstalls and multiple browsers while bounding the table against a scripted client.
+const MAX_SUBSCRIPTIONS_PER_USER = 20;
+
 export const saveSubscription = async (
   userId: number,
   endpoint: string,
@@ -26,6 +30,20 @@ export const saveSubscription = async (
           p256dh  = EXCLUDED.p256dh,
           auth    = EXCLUDED.auth
   `, [userId, endpoint, keys.p256dh, keys.auth]);
+
+  // Per-user cap: keep only the newest rows so a scripted client sending endless distinct
+  // endpoints cannot grow the table without bound (storage DoS). The just-upserted row is
+  // newest, so it is always retained.
+  await pool.query(`
+    DELETE FROM push_subscription
+    WHERE user_id = $1
+      AND id NOT IN (
+        SELECT id FROM push_subscription
+        WHERE user_id = $1
+        ORDER BY created_at DESC, id DESC
+        LIMIT ${MAX_SUBSCRIPTIONS_PER_USER}
+      )
+  `, [userId]);
 };
 
 export const removeSubscription = async (userId: number, endpoint: string): Promise<void> => {

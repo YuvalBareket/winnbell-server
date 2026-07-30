@@ -187,6 +187,19 @@ const adminLimiter = rateLimit({
   message: { message: 'Too many requests, please slow down.' },
 });
 
+// Push-notification subscribe/unsubscribe. Called on page load / permission grant, so a
+// modest per-user cap is plenty; pairs with a per-user row cap in saveSubscription to stop
+// unbounded push_subscription growth from a scripted authenticated client.
+const notificationsLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 60 * RATE_LIMIT_MULTIPLIER,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: express.Request) => req.user?.id?.toString() ?? getClientIpKey(req),
+  store: makeRateLimitStore('notifications'),
+  message: { message: 'Too many requests, please slow down.' },
+});
+
 // Stripe webhook must receive raw body — register BEFORE express.json()
 app.use('/webhooks/stripe', express.raw({ type: 'application/json' }), stripeWebhookRoutes);
 
@@ -252,7 +265,7 @@ app.use('/admin', adminLimiter, adminRoutes);
 app.use('/tickets', ticketsLimiter, ticketsRoutes);
 app.use('/draws', drawsRoutes);
 app.use('/business', businessLimiter, businessRoutes);
-app.use('/notifications', notificationRoutes);
+app.use('/notifications', notificationsLimiter, notificationRoutes);
 app.use('/phone/send-otp', otpLimiter);
 app.use('/phone', phoneRouter);
 app.use('/referral', referralRoutes);

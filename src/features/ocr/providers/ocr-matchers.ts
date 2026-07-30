@@ -1,6 +1,6 @@
-// Shared receipt matching helpers used by all OCR providers.
-// Both TesseractProvider and GoogleVisionProvider import from here so
-// validation logic stays consistent regardless of which provider extracted the text.
+// Shared receipt matching helpers used by the OCR provider(s).
+// Kept separate from the provider so validation logic stays consistent regardless of
+// which provider extracted the text.
 
 // Returns true  → amount found and matches user's claim
 // Returns false → a total amount is visible but doesn't match (user lied) → fail

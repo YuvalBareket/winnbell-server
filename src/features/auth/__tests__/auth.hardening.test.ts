@@ -15,7 +15,7 @@ jest.mock('jose', () => ({ createRemoteJWKSet: jest.fn(), jwtVerify: jest.fn() }
 
 import bcrypt from 'bcryptjs';
 import { loginUser } from '../auth.service';
-import { register } from '../auth.controller';
+import { register, login, checkEmail } from '../auth.controller';
 
 process.env.JWT_SECRET = 'test-secret';
 
@@ -66,5 +66,28 @@ describe('F18 — legacy register minimum password length', () => {
 
     // Not a 400 length rejection — it proceeded and hit the (mocked) service/DB -> 500.
     expect(res.statusCode).not.toBe(400);
+  });
+});
+
+describe('non-string body inputs return 400, not a 500 (type-confusion guard)', () => {
+  test('checkEmail: array email -> 400, never reaches the DB', async () => {
+    const res = makeRes();
+    await checkEmail(makeReq({ email: ['a@b.com'] }), res as never);
+    expect(res.statusCode).toBe(400);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  test('login: object email -> 400, never runs bcrypt/DB', async () => {
+    const res = makeRes();
+    await login(makeReq({ email: {}, password: 'whatever1' }), res as never);
+    expect(res.statusCode).toBe(400);
+    expect(mockQuery).not.toHaveBeenCalled();
+  });
+
+  test('register: array email -> 400 before the service', async () => {
+    const res = makeRes();
+    await register(makeReq({ fullName: 'Test User', email: ['a@b.com'], password: 'longenough1' }), res as never);
+    expect(res.statusCode).toBe(400);
+    expect(mockQuery).not.toHaveBeenCalled();
   });
 });
