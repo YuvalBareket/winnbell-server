@@ -96,6 +96,8 @@ jobs:
           RCLONE_CONFIG_DEST_SECRET_ACCESS_KEY: ${{ secrets.BACKUP_S3_SECRET_ACCESS_KEY }}
           BUCKET: ${{ secrets.BACKUP_S3_BUCKET }}
         run: |
+          # Defensive: strip any whitespace a paste may have smuggled into the secret.
+          BUCKET=$(echo "$BUCKET" | xargs)
           DAY=$(date -u +%F)
           rclone copyto neon-prod.dump.gpg     "dest:$BUCKET/daily/$DAY/neon-prod.dump.gpg"
           rclone copyto supabase-auth.dump.gpg "dest:$BUCKET/daily/$DAY/supabase-auth.dump.gpg"
@@ -132,6 +134,9 @@ jobs:
           SRC_BUCKET: ${{ secrets.APP_R2_BUCKET }}
           BUCKET: ${{ secrets.BACKUP_S3_BUCKET }}
         run: |
+          # Defensive: strip any whitespace a paste may have smuggled into the secrets.
+          BUCKET=$(echo "$BUCKET" | xargs)
+          SRC_BUCKET=$(echo "$SRC_BUCKET" | xargs)
           # Sundays only on the nightly schedule; a manual dispatch with the checkbox forces it.
           if [ "${{ github.event_name }}" = "schedule" ] && [ "$(date -u +%u)" != "7" ]; then
             echo "Not Sunday - skipping receipts mirror."
