@@ -6,7 +6,7 @@ Last updated: 2026-07-31. The backup job itself is `.github/workflows/prod-backu
 
 | What | Source | Schedule | Destination | Retention |
 |---|---|---|---|---|
-| Full app database | Neon prod | nightly 03:00 UTC | backup bucket `daily/` (encrypted) | 35 days |
+| Full app database | Neon prod | nightly 03:00 UTC | backup bucket `daily/` (encrypted) | 14 days |
 | Full app database (monthly) | Neon prod | 1st of month | backup bucket `monthly/` (encrypted) | ~13 months |
 | Auth identities (password hashes, Google links) | Supabase prod, `auth` schema | nightly | same as above | same |
 | Receipt images + legal PDFs | app R2 bucket | Sundays | backup bucket `receipts-mirror/` | forever (copy, never deletes) |

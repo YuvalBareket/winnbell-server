@@ -6,7 +6,7 @@
 # NOT live in the same account as the app bucket.
 #
 # Layout in the backup bucket:
-#   daily/YYYY-MM-DD/neon-prod.dump.gpg          (kept 35 days)
+#   daily/YYYY-MM-DD/neon-prod.dump.gpg          (kept 14 days)
 #   daily/YYYY-MM-DD/supabase-auth.dump.gpg
 #   monthly/YYYY-MM/...                          (kept ~13 months, written on the 1st)
 #   receipts-mirror/...                          (rclone sync of the app R2 bucket, Sundays)
@@ -146,8 +146,9 @@ jobs:
           # Verify today's upload actually landed before pruning anything.
           rclone lsf "dest:$BUCKET/daily/$DAY/" | grep -q neon-prod.dump.gpg
           rclone lsf "dest:$BUCKET/daily/$DAY/" | grep -q supabase-auth.dump.gpg
-          # Retention: ~35 daily, ~13 monthly.
-          rclone delete "dest:$BUCKET/daily"   --min-age 35d || true
+          # Retention: 14 daily (user decision 2026-07-31), ~13 monthly.
+          # min-age 15d so the 14th day is never clipped by the age boundary.
+          rclone delete "dest:$BUCKET/daily"   --min-age 15d || true
           rclone delete "dest:$BUCKET/monthly" --min-age 400d || true
           rclone rmdirs "dest:$BUCKET/daily"   --leave-root || true
           rclone rmdirs "dest:$BUCKET/monthly" --leave-root || true
