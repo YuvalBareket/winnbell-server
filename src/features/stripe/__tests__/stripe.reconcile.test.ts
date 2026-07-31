@@ -35,7 +35,9 @@ const mockQuery = jest.fn();
 jest.mock('../../../shared/db/db.js', () => ({
   getPool: jest.fn().mockReturnValue({
     query: mockQuery,
-    connect: jest.fn(),
+    // recoverBusinessAfterPayment runs its flip + enrollment in a client transaction;
+    // route the client through the same mockQuery so SQL assertions see every statement.
+    connect: jest.fn(async () => ({ query: mockQuery, release: jest.fn() })),
   }),
 }));
 

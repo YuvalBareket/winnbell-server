@@ -33,7 +33,9 @@ const mockQuery = jest.fn();
 jest.mock('../../../shared/db/db.js', () => ({
   getPool: jest.fn().mockReturnValue({
     query: mockQuery,
-    connect: jest.fn(),
+    // recoverBusinessAfterPayment runs its flip + enrollment in a client transaction;
+    // route the client through the same mockQuery so SQL assertions see every statement.
+    connect: jest.fn(async () => ({ query: mockQuery, release: jest.fn() })),
   }),
 }));
 
@@ -217,6 +219,7 @@ describe('handleStripeWebhook — invoice.payment_succeeded', () => {
     mockQuery
       .mockResolvedValueOnce({ rows: [{ event_id: 'evt_recover' }], rowCount: 1 }) // claim
       .mockResolvedValueOnce({ rows: [{ business_id: 42 }], rowCount: 1 })         // SELECT prior
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })                            // BEGIN
       .mockResolvedValueOnce({ rows: [{ business_id: 42 }], rowCount: 1 });        // recovery flip RETURNING → was Past_Due/Incomplete
 
     await handleStripeWebhook(Buffer.from('{}'), 'sig');
@@ -242,6 +245,7 @@ describe('handleStripeWebhook — invoice.payment_succeeded', () => {
     mockQuery
       .mockResolvedValueOnce({ rows: [{ event_id: 'evt_normal' }], rowCount: 1 }) // claim
       .mockResolvedValueOnce({ rows: [{ business_id: 42 }], rowCount: 1 })        // SELECT prior
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })                           // BEGIN
       .mockResolvedValueOnce({ rows: [], rowCount: 0 });                          // recovery flip → no Past_Due/Incomplete row
 
     await handleStripeWebhook(Buffer.from('{}'), 'sig');
@@ -250,6 +254,29 @@ describe('handleStripeWebhook — invoice.payment_succeeded', () => {
       ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO draw_entry'),
     );
     expect(enroll).toBeUndefined();
+  });
+
+  it('rolls back the recovery flip when the enrollment INSERT fails - the row stays Past_Due so the retry re-drives BOTH steps', async () => {
+    mockConstructEvent.mockReturnValue({
+      id: 'evt_txn_crash',
+      type: 'invoice.payment_succeeded',
+      data: { object: { subscription: 'sub_123' } },
+    });
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ event_id: 'evt_txn_crash' }], rowCount: 1 }) // claim
+      .mockResolvedValueOnce({ rows: [{ business_id: 42 }], rowCount: 1 })           // SELECT prior
+      .mockResolvedValueOnce({ rows: [], rowCount: 0 })                              // BEGIN
+      .mockResolvedValueOnce({ rows: [{ business_id: 42 }], rowCount: 1 })           // recovery flip
+      .mockRejectedValueOnce(new Error('connection lost'));                          // enrollment INSERT dies
+
+    await handleStripeWebhook(Buffer.from('{}'), 'sig').catch(() => { /* failure propagates so Stripe retries */ });
+
+    // The flip must NOT survive alone: an Active row with no enrollment is invisible to
+    // every retry path (webhook redelivery and the 6h reconciler both skip Active rows).
+    const rollback = mockQuery.mock.calls.find(([sql]: [string]) => sql === 'ROLLBACK');
+    expect(rollback).toBeDefined();
+    const commit = mockQuery.mock.calls.find(([sql]: [string]) => sql === 'COMMIT');
+    expect(commit).toBeUndefined();
   });
 
   it('ignores settlement invoices entirely (change differences, not campaign payments)', async () => {

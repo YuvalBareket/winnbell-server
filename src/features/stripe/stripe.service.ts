@@ -744,25 +744,46 @@ export const createUpdatePaymentMethodSession = async (userId: number): Promise<
 // invoice.payment_succeeded webhook and the update-payment-method verify path (dev
 // environments without webhook forwarding still recover instantly).
 async function recoverBusinessAfterPayment(pool: Pool, businessId: number): Promise<void> {
-  const flipped = await pool.query(
-    `UPDATE subscription SET status = 'Active', updated_at = NOW()
-     WHERE business_id = $1 AND status IN ('Past_Due', 'Incomplete')
-     RETURNING business_id`,
-    [businessId],
-  );
-  if ((flipped.rowCount ?? 0) === 0) return;
-  await pool.query(`
-    INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, cap_at_entry, min_transaction_at_entry)
-    SELECT d.id, b.id, COALESCE(s.fee_at_entry, 0), s.entries_per_location, b.min_transaction_amount
-    FROM draw d
-    JOIN subscription s ON s.business_id = $1
-    JOIN business b ON b.id = s.business_id
-    WHERE d.status = 'Open'
-      AND s.current_period_end >= NOW()
-      AND s.skip_next_campaign = FALSE
-      AND s.participation_paused = FALSE
-    ON CONFLICT (draw_id, business_id) DO NOTHING
-  `, [businessId]);
+  // The flip and the enrollment MUST commit together. If the flip landed alone (crash
+  // between the two), the row would read Active - a state the webhook retry and the 6h
+  // reconciler both treat as healthy, so the missing enrollment would never be re-driven
+  // and the business would silently sit out a campaign it paid for. Inside one
+  // transaction a crash leaves the row Past_Due/Incomplete, which every retry path
+  // still recognizes as needing recovery. The flip's RETURNING guard stays load-bearing:
+  // it limits enrollment to businesses recovering from a failed state, so routine
+  // renewal payments never enroll a mid-campaign joiner into a draw they did not pay for.
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const flipped = await client.query(
+      `UPDATE subscription SET status = 'Active', updated_at = NOW()
+       WHERE business_id = $1 AND status IN ('Past_Due', 'Incomplete')
+       RETURNING business_id`,
+      [businessId],
+    );
+    if ((flipped.rowCount ?? 0) === 0) {
+      await safeRollback(client);
+      return;
+    }
+    await client.query(`
+      INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, cap_at_entry, min_transaction_at_entry)
+      SELECT d.id, b.id, COALESCE(s.fee_at_entry, 0), s.entries_per_location, b.min_transaction_amount
+      FROM draw d
+      JOIN subscription s ON s.business_id = $1
+      JOIN business b ON b.id = s.business_id
+      WHERE d.status = 'Open'
+        AND s.current_period_end >= NOW()
+        AND s.skip_next_campaign = FALSE
+        AND s.participation_paused = FALSE
+      ON CONFLICT (draw_id, business_id) DO NOTHING
+    `, [businessId]);
+    await client.query('COMMIT');
+  } catch (err: unknown) {
+    await safeRollback(client);
+    throw err;
+  } finally {
+    client.release();
+  }
   invalidatePublicBusinessData();
   console.log(`[Stripe] Business ${businessId} recovered after payment method update`);
 }
