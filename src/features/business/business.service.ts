@@ -227,6 +227,8 @@ export const getMyBusinessData = async (userId: number, managedLocationId?: numb
         -- live, change applies next campaign" warning on CampaignCard (audit P2-10).
         -- participation_paused counts as not participating (voluntary cancel/removal),
         -- same exception every public-facing surface applies.
+        -- DELIBERATELY no admin-campaign-pause check here: that pause is SILENT toward
+        -- the owner (shadow-ban philosophy, pinned by draw-entry-pause.test.ts).
         (EXISTS (
           SELECT 1 FROM draw_entry de JOIN draw d ON d.id = de.draw_id
           WHERE de.business_id = b.id AND d.status = 'Open'

@@ -9,6 +9,7 @@
  * Run: node scripts/seed-ux-personas.cjs   (cwd = server/)
  */
 require('dotenv').config();
+require('./dev-db-guard.cjs').assertDevDb();
 const { Pool } = require('pg');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
