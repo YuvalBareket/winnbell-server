@@ -73,4 +73,4 @@ Use Neon point-in-time restore (console -> Restore) to a branch just before the 
 - The receipts mirror uses `rclone copy`, never `sync --delete`: deletions in the app bucket do NOT propagate, so the mirror also protects against malicious/accidental mass deletion.
 - Backups are encrypted client-side (gpg AES256) before upload - the backup provider never sees plaintext user data.
 - The daily prune only runs after verifying today's upload landed.
-- pg_dump uses the Postgres 17 client (prod Neon is PG17; it can also dump the older Supabase server).
+- pg_dump uses the Postgres 18 client (prod Neon is PG18; a newer client can also dump the older Supabase server, never the reverse).

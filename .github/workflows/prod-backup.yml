@@ -49,28 +49,30 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 120
     steps:
-      - name: Install postgres 17 client + rclone
+      # pg_dump must be AT LEAST as new as the server. Prod Neon is PG18; a newer client
+      # dumps older servers (Supabase) fine, so 18 covers both.
+      - name: Install postgres 18 client + rclone
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq postgresql-common rclone gnupg
           sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
-          sudo apt-get install -y -qq postgresql-client-17
+          sudo apt-get install -y -qq postgresql-client-18
 
       - name: Dump Neon production database
         env:
           NEON_URL: ${{ secrets.NEON_PROD_DATABASE_URL }}
         run: |
-          /usr/lib/postgresql/17/bin/pg_dump "$NEON_URL" -Fc -Z 6 -f neon-prod.dump
+          /usr/lib/postgresql/18/bin/pg_dump "$NEON_URL" -Fc -Z 6 -f neon-prod.dump
           # Integrity sanity: a truncated dump fails to list.
-          /usr/lib/postgresql/17/bin/pg_restore --list neon-prod.dump > /dev/null
+          /usr/lib/postgresql/18/bin/pg_restore --list neon-prod.dump > /dev/null
           ls -la neon-prod.dump
 
       - name: Dump Supabase auth schema (user identities, password hashes, OAuth links)
         env:
           SUPABASE_URL: ${{ secrets.SUPABASE_PROD_DATABASE_URL }}
         run: |
-          /usr/lib/postgresql/17/bin/pg_dump "$SUPABASE_URL" -Fc -Z 6 --schema=auth -f supabase-auth.dump
-          /usr/lib/postgresql/17/bin/pg_restore --list supabase-auth.dump > /dev/null
+          /usr/lib/postgresql/18/bin/pg_dump "$SUPABASE_URL" -Fc -Z 6 --schema=auth -f supabase-auth.dump
+          /usr/lib/postgresql/18/bin/pg_restore --list supabase-auth.dump > /dev/null
           ls -la supabase-auth.dump
 
       - name: Encrypt dumps
