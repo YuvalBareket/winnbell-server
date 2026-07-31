@@ -85,8 +85,12 @@ jobs:
 
       - name: Upload to backup bucket (daily + monthly on the 1st) and prune old backups
         env:
+          # The vault is R2, and R2 needs rclone's Cloudflare profile (region "auto",
+          # R2-specific signing). If the vault ever moves to Backblaze/S3, change the
+          # provider here and in the mirror step accordingly.
           RCLONE_CONFIG_DEST_TYPE: s3
-          RCLONE_CONFIG_DEST_PROVIDER: Other
+          RCLONE_CONFIG_DEST_PROVIDER: Cloudflare
+          RCLONE_CONFIG_DEST_REGION: auto
           RCLONE_CONFIG_DEST_ENDPOINT: ${{ secrets.BACKUP_S3_ENDPOINT }}
           RCLONE_CONFIG_DEST_ACCESS_KEY_ID: ${{ secrets.BACKUP_S3_ACCESS_KEY_ID }}
           RCLONE_CONFIG_DEST_SECRET_ACCESS_KEY: ${{ secrets.BACKUP_S3_SECRET_ACCESS_KEY }}
@@ -115,11 +119,13 @@ jobs:
         env:
           RCLONE_CONFIG_SRC_TYPE: s3
           RCLONE_CONFIG_SRC_PROVIDER: Cloudflare
+          RCLONE_CONFIG_SRC_REGION: auto
           RCLONE_CONFIG_SRC_ENDPOINT: ${{ secrets.APP_R2_ENDPOINT }}
           RCLONE_CONFIG_SRC_ACCESS_KEY_ID: ${{ secrets.APP_R2_ACCESS_KEY_ID }}
           RCLONE_CONFIG_SRC_SECRET_ACCESS_KEY: ${{ secrets.APP_R2_SECRET_ACCESS_KEY }}
           RCLONE_CONFIG_DEST_TYPE: s3
-          RCLONE_CONFIG_DEST_PROVIDER: Other
+          RCLONE_CONFIG_DEST_PROVIDER: Cloudflare
+          RCLONE_CONFIG_DEST_REGION: auto
           RCLONE_CONFIG_DEST_ENDPOINT: ${{ secrets.BACKUP_S3_ENDPOINT }}
           RCLONE_CONFIG_DEST_ACCESS_KEY_ID: ${{ secrets.BACKUP_S3_ACCESS_KEY_ID }}
           RCLONE_CONFIG_DEST_SECRET_ACCESS_KEY: ${{ secrets.BACKUP_S3_SECRET_ACCESS_KEY }}
