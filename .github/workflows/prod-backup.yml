@@ -54,9 +54,12 @@ jobs:
       - name: Install postgres 18 client + rclone
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq postgresql-common rclone gnupg
+          sudo apt-get install -y -qq postgresql-common gnupg unzip
           sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
           sudo apt-get install -y -qq postgresql-client-18
+          # Current rclone (Ubuntu's apt version is years old and predates R2 fixes)
+          curl -fsSL https://rclone.org/install.sh | sudo bash
+          rclone version
 
       - name: Dump Neon production database
         env:
@@ -91,6 +94,10 @@ jobs:
           RCLONE_CONFIG_DEST_TYPE: s3
           RCLONE_CONFIG_DEST_PROVIDER: Cloudflare
           RCLONE_CONFIG_DEST_REGION: auto
+          # Scoped R2 tokens cannot answer rclone's "does the bucket exist" probe; without
+          # this flag rclone falls back to attempting bucket CREATION, gets AccessDenied,
+          # and reports it as an upload failure (verified: the raw S3 PUT is authorized).
+          RCLONE_CONFIG_DEST_NO_CHECK_BUCKET: 'true'
           RCLONE_CONFIG_DEST_ENDPOINT: ${{ secrets.BACKUP_S3_ENDPOINT }}
           RCLONE_CONFIG_DEST_ACCESS_KEY_ID: ${{ secrets.BACKUP_S3_ACCESS_KEY_ID }}
           RCLONE_CONFIG_DEST_SECRET_ACCESS_KEY: ${{ secrets.BACKUP_S3_SECRET_ACCESS_KEY }}
@@ -120,6 +127,7 @@ jobs:
           RCLONE_CONFIG_DEST_TYPE: s3
           RCLONE_CONFIG_DEST_PROVIDER: Cloudflare
           RCLONE_CONFIG_DEST_REGION: auto
+          RCLONE_CONFIG_DEST_NO_CHECK_BUCKET: 'true'
           RCLONE_CONFIG_DEST_ENDPOINT: ${{ secrets.BACKUP_S3_ENDPOINT }}
           RCLONE_CONFIG_DEST_ACCESS_KEY_ID: ${{ secrets.BACKUP_S3_ACCESS_KEY_ID }}
           RCLONE_CONFIG_DEST_SECRET_ACCESS_KEY: ${{ secrets.BACKUP_S3_SECRET_ACCESS_KEY }}
@@ -151,12 +159,14 @@ jobs:
           RCLONE_CONFIG_SRC_TYPE: s3
           RCLONE_CONFIG_SRC_PROVIDER: Cloudflare
           RCLONE_CONFIG_SRC_REGION: auto
+          RCLONE_CONFIG_SRC_NO_CHECK_BUCKET: 'true'
           RCLONE_CONFIG_SRC_ENDPOINT: ${{ secrets.APP_R2_ENDPOINT }}
           RCLONE_CONFIG_SRC_ACCESS_KEY_ID: ${{ secrets.APP_R2_ACCESS_KEY_ID }}
           RCLONE_CONFIG_SRC_SECRET_ACCESS_KEY: ${{ secrets.APP_R2_SECRET_ACCESS_KEY }}
           RCLONE_CONFIG_DEST_TYPE: s3
           RCLONE_CONFIG_DEST_PROVIDER: Cloudflare
           RCLONE_CONFIG_DEST_REGION: auto
+          RCLONE_CONFIG_DEST_NO_CHECK_BUCKET: 'true'
           RCLONE_CONFIG_DEST_ENDPOINT: ${{ secrets.BACKUP_S3_ENDPOINT }}
           RCLONE_CONFIG_DEST_ACCESS_KEY_ID: ${{ secrets.BACKUP_S3_ACCESS_KEY_ID }}
           RCLONE_CONFIG_DEST_SECRET_ACCESS_KEY: ${{ secrets.BACKUP_S3_SECRET_ACCESS_KEY }}
