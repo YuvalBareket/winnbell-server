@@ -1,0 +1,135 @@
+# Production backups - Neon DB (nightly) + Supabase auth (nightly) + R2 receipts mirror (weekly).
+#
+# Everything uploads ENCRYPTED to an OFF-PROVIDER backup bucket (any S3-compatible target:
+# Backblaze B2 or a second Cloudflare account's R2). The whole point is a copy that survives
+# the loss of the primary Neon / Cloudflare / Supabase accounts - so the backup bucket must
+# NOT live in the same account as the app bucket.
+#
+# Layout in the backup bucket:
+#   daily/YYYY-MM-DD/neon-prod.dump.gpg          (kept 35 days)
+#   daily/YYYY-MM-DD/supabase-auth.dump.gpg
+#   monthly/YYYY-MM/...                          (kept ~13 months, written on the 1st)
+#   receipts-mirror/...                          (rclone sync of the app R2 bucket, Sundays)
+#
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   NEON_PROD_DATABASE_URL        - prod Neon connection string
+#   SUPABASE_PROD_DATABASE_URL    - Supabase DIRECT connection string (port 5432, not the
+#                                   transaction pooler - pg_dump needs a session connection)
+#   BACKUP_ENCRYPTION_PASSPHRASE  - gpg symmetric passphrase; ALSO keep an offline copy -
+#                                   without it every backup is unreadable
+#   BACKUP_S3_ENDPOINT            - backup bucket S3 endpoint URL
+#   BACKUP_S3_ACCESS_KEY_ID
+#   BACKUP_S3_SECRET_ACCESS_KEY
+#   BACKUP_S3_BUCKET              - backup bucket name
+#   APP_R2_ENDPOINT               - app R2 endpoint (https://<account-id>.r2.cloudflarestorage.com)
+#   APP_R2_ACCESS_KEY_ID          - use a READ-ONLY R2 token for this
+#   APP_R2_SECRET_ACCESS_KEY
+#   APP_R2_BUCKET                 - the production receipts bucket name
+#
+# Failure alerts: GitHub emails the repo owner when a scheduled workflow fails (keep
+# "Actions" notifications on). Restore procedures: see BACKUP_RUNBOOK.md.
+
+name: prod-backup
+
+on:
+  schedule:
+    - cron: '0 3 * * *'   # nightly 03:00 UTC
+  workflow_dispatch:
+    inputs:
+      force_receipts_sync:
+        description: 'Also run the receipts mirror now (normally Sundays only)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Install postgres 17 client + rclone
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq postgresql-common rclone gnupg
+          sudo /usr/share/postgresql-common/pgdg/apt.postgresql.org.sh -y
+          sudo apt-get install -y -qq postgresql-client-17
+
+      - name: Dump Neon production database
+        env:
+          NEON_URL: ${{ secrets.NEON_PROD_DATABASE_URL }}
+        run: |
+          /usr/lib/postgresql/17/bin/pg_dump "$NEON_URL" -Fc -Z 6 -f neon-prod.dump
+          # Integrity sanity: a truncated dump fails to list.
+          /usr/lib/postgresql/17/bin/pg_restore --list neon-prod.dump > /dev/null
+          ls -la neon-prod.dump
+
+      - name: Dump Supabase auth schema (user identities, password hashes, OAuth links)
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_PROD_DATABASE_URL }}
+        run: |
+          /usr/lib/postgresql/17/bin/pg_dump "$SUPABASE_URL" -Fc -Z 6 --schema=auth -f supabase-auth.dump
+          /usr/lib/postgresql/17/bin/pg_restore --list supabase-auth.dump > /dev/null
+          ls -la supabase-auth.dump
+
+      - name: Encrypt dumps
+        env:
+          PASSPHRASE: ${{ secrets.BACKUP_ENCRYPTION_PASSPHRASE }}
+        run: |
+          gpg --batch --yes --symmetric --cipher-algo AES256 --passphrase "$PASSPHRASE" neon-prod.dump
+          gpg --batch --yes --symmetric --cipher-algo AES256 --passphrase "$PASSPHRASE" supabase-auth.dump
+          rm neon-prod.dump supabase-auth.dump
+
+      - name: Upload to backup bucket (daily + monthly on the 1st) and prune old backups
+        env:
+          RCLONE_CONFIG_DEST_TYPE: s3
+          RCLONE_CONFIG_DEST_PROVIDER: Other
+          RCLONE_CONFIG_DEST_ENDPOINT: ${{ secrets.BACKUP_S3_ENDPOINT }}
+          RCLONE_CONFIG_DEST_ACCESS_KEY_ID: ${{ secrets.BACKUP_S3_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_DEST_SECRET_ACCESS_KEY: ${{ secrets.BACKUP_S3_SECRET_ACCESS_KEY }}
+          BUCKET: ${{ secrets.BACKUP_S3_BUCKET }}
+        run: |
+          DAY=$(date -u +%F)
+          rclone copyto neon-prod.dump.gpg     "dest:$BUCKET/daily/$DAY/neon-prod.dump.gpg"
+          rclone copyto supabase-auth.dump.gpg "dest:$BUCKET/daily/$DAY/supabase-auth.dump.gpg"
+          if [ "$(date -u +%d)" = "01" ]; then
+            MONTH=$(date -u +%Y-%m)
+            rclone copyto neon-prod.dump.gpg     "dest:$BUCKET/monthly/$MONTH/neon-prod.dump.gpg"
+            rclone copyto supabase-auth.dump.gpg "dest:$BUCKET/monthly/$MONTH/supabase-auth.dump.gpg"
+          fi
+          # Verify today's upload actually landed before pruning anything.
+          rclone lsf "dest:$BUCKET/daily/$DAY/" | grep -q neon-prod.dump.gpg
+          rclone lsf "dest:$BUCKET/daily/$DAY/" | grep -q supabase-auth.dump.gpg
+          # Retention: ~35 daily, ~13 monthly.
+          rclone delete "dest:$BUCKET/daily"   --min-age 35d || true
+          rclone delete "dest:$BUCKET/monthly" --min-age 400d || true
+          rclone rmdirs "dest:$BUCKET/daily"   --leave-root || true
+          rclone rmdirs "dest:$BUCKET/monthly" --leave-root || true
+          echo "Backup complete for $DAY"
+
+      - name: Mirror R2 receipts bucket (Sundays, or when forced)
+        if: ${{ github.event.inputs.force_receipts_sync == 'true' || github.event_name == 'schedule' }}
+        env:
+          RCLONE_CONFIG_SRC_TYPE: s3
+          RCLONE_CONFIG_SRC_PROVIDER: Cloudflare
+          RCLONE_CONFIG_SRC_ENDPOINT: ${{ secrets.APP_R2_ENDPOINT }}
+          RCLONE_CONFIG_SRC_ACCESS_KEY_ID: ${{ secrets.APP_R2_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_SRC_SECRET_ACCESS_KEY: ${{ secrets.APP_R2_SECRET_ACCESS_KEY }}
+          RCLONE_CONFIG_DEST_TYPE: s3
+          RCLONE_CONFIG_DEST_PROVIDER: Other
+          RCLONE_CONFIG_DEST_ENDPOINT: ${{ secrets.BACKUP_S3_ENDPOINT }}
+          RCLONE_CONFIG_DEST_ACCESS_KEY_ID: ${{ secrets.BACKUP_S3_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_DEST_SECRET_ACCESS_KEY: ${{ secrets.BACKUP_S3_SECRET_ACCESS_KEY }}
+          SRC_BUCKET: ${{ secrets.APP_R2_BUCKET }}
+          BUCKET: ${{ secrets.BACKUP_S3_BUCKET }}
+        run: |
+          # Sundays only on the nightly schedule; a manual dispatch with the checkbox forces it.
+          if [ "${{ github.event_name }}" = "schedule" ] && [ "$(date -u +%u)" != "7" ]; then
+            echo "Not Sunday - skipping receipts mirror."
+            exit 0
+          fi
+          # copy (not sync --delete): objects deleted in the app bucket SURVIVE in the mirror,
+          # so an attacker or accident emptying the app bucket cannot empty the mirror.
+          rclone copy "src:$SRC_BUCKET" "dest:$BUCKET/receipts-mirror" --transfers 16 --checkers 32
+          echo "Receipts mirror complete."
