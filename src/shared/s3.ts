@@ -1,5 +1,6 @@
-import { S3Client, PutObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
+import { NodeHttpHandler } from '@smithy/node-http-handler';
 
 // Cloudflare R2 is S3-compatible — only difference is the endpoint and public URL format.
 // Required env vars:
@@ -13,6 +14,58 @@ const ALLOWED_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
 // Hard server-side cap. Client-side compression produces files well under this.
 export const MAX_UPLOAD_BYTES = 10 * 1024 * 1024; // 10 MB
 let s3Singleton: S3Client | null = null;
+
+const getClient = (): S3Client => {
+  const { R2_ACCESS_KEY_ID, R2_SECRET_ACCESS_KEY, R2_ACCOUNT_ID } = process.env;
+  if (!R2_ACCESS_KEY_ID || !R2_SECRET_ACCESS_KEY || !R2_ACCOUNT_ID) {
+    throw new Error('R2_NOT_CONFIGURED');
+  }
+  if (!s3Singleton) {
+    s3Singleton = new S3Client({
+      region: 'auto',
+      endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
+      credentials: {
+        accessKeyId: R2_ACCESS_KEY_ID,
+        secretAccessKey: R2_SECRET_ACCESS_KEY,
+      },
+      // The AWS SDK default is NO timeout. A stalled R2 connection would otherwise hang
+      // any awaited upload forever - including the legal snapshot inside the admin's
+      // close-campaign request, which must never hang on storage.
+      requestHandler: new NodeHttpHandler({ connectionTimeout: 5_000, requestTimeout: 15_000 }),
+    });
+  }
+  return s3Singleton;
+};
+
+// Direct server-side upload (no presigning) - used for server-generated artifacts like
+// the legal Official Rules snapshot PDFs. Not exposed to user input; callers control the key.
+export const uploadObject = async (key: string, body: Buffer, contentType: string): Promise<void> => {
+  const { R2_BUCKET } = process.env;
+  if (!R2_BUCKET) throw new Error('R2_NOT_CONFIGURED');
+  await getClient().send(new PutObjectCommand({
+    Bucket: R2_BUCKET,
+    Key: key,
+    Body: body,
+    ContentType: contentType,
+  }));
+};
+
+export const objectExists = async (key: string): Promise<boolean> => {
+  const { R2_BUCKET } = process.env;
+  if (!R2_BUCKET) throw new Error('R2_NOT_CONFIGURED');
+  try {
+    await getClient().send(new HeadObjectCommand({ Bucket: R2_BUCKET, Key: key }));
+    return true;
+  } catch (err: unknown) {
+    // ONLY a definite 404 means "missing". Any other failure (transient 5xx, network,
+    // credentials) must propagate: callers use this to protect archived legal records
+    // from overwrite, and "I could not check" must never be read as "safe to overwrite".
+    const name = (err as { name?: string })?.name;
+    const status = (err as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode;
+    if (name === 'NotFound' || name === 'NoSuchKey' || status === 404) return false;
+    throw err;
+  }
+};
 
 export const getPresignedUploadUrl = async (
   contentType: string,
@@ -40,17 +93,7 @@ export const getPresignedUploadUrl = async (
     throw new Error('INVALID_CONTENT_LENGTH');
   }
 
-  if (!s3Singleton) {
-    s3Singleton = new S3Client({
-      region: 'auto',
-      endpoint: `https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com`,
-      credentials: {
-        accessKeyId: R2_ACCESS_KEY_ID,
-        secretAccessKey: R2_SECRET_ACCESS_KEY,
-      },
-    });
-  }
-  const client = s3Singleton;
+  const client = getClient();
 
   const ext = contentType.split('/')[1];
   const filename = `${crypto.randomUUID()}.${ext}`;

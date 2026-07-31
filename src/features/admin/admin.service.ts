@@ -4,6 +4,7 @@ import { OPEN_DRAW_ID_SUBQUERY } from '../../shared/db/queries.js';
 import { getPlatformSettings, invalidatePlatformSettings, invalidatePublicBusinessData, invalidateUserAuth } from '../../shared/cache/cache.js';
 import { lastDayOfMonthNyMidnightUtc, nextCampaignOpensNy, drawDateFromString, drawStartDateFromString, nyMidnightFromString } from '../../shared/dates.js';
 import { sendFoundingFinalCampaignEmail } from '../../shared/email/email.service.js';
+import { snapshotOfficialRulesForDraw } from '../../shared/legal/officialRulesSnapshot.js';
 import { decayAllUserRiskScores } from '../risk/risk.service.js';
 
 const logDrawAudit = async (
@@ -899,6 +900,12 @@ export const closeDrawService = async (drawId: number, actorUserId: number | nul
   } finally {
     client.release();
   }
+  // Legal archive: snapshot the Official Rules that governed the just-closed campaign
+  // (name, dates, prize, jurisdictions in force) as a PDF in R2. Deliberately OUTSIDE the
+  // try/catch and after the release: it runs only when the close committed, it never
+  // throws (full internal catch + CRITICAL log), and even a latent bug in it could not
+  // trigger safeRollback on a committed transaction or turn a successful close into a 500.
+  await snapshotOfficialRulesForDraw(drawId);
 };
 
 export const reopenDrawService = async (drawId: number, actorUserId: number | null): Promise<void> => {

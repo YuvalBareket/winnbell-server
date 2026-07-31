@@ -55,6 +55,7 @@ router.patch('/draws/:drawId/businesses/:businessId/participation', adminControl
 router.get('/draws/:drawId/candidate', adminController.getDrawCandidate);
 router.get('/draws/:drawId/rejected-winners', adminController.getDrawRejectedWinners);
 router.get('/draws/:drawId/audit-log', adminController.getDrawAuditLog);
+router.get('/draws/:drawId/rules-pdf', adminController.downloadDrawRulesPdf);
 router.get('/settings', adminController.getPlatformSettings);
 router.patch('/settings', adminController.updatePlatformSettings);
 

@@ -47,6 +47,43 @@ import {
   getUserAnalyticsSummaryService,
 } from './admin.service.js';
 import { getGrowthAnalyticsService } from './growth.service.js';
+import { generateOfficialRulesPdfForDraw } from '../../shared/legal/officialRulesSnapshot.js';
+import { uploadObject, objectExists } from '../../shared/s3.js';
+
+// On-demand download of the Official Rules PDF for a draw - same generator the
+// close-time R2 archive uses. Every download is ALSO saved to R2 under the campaign
+// month-year key, EXCEPT it never overwrites a Closed campaign's close-time snapshot
+// (that is the legal record); for a Closed draw it only backfills a missing archive.
+export const downloadDrawRulesPdf = async (req: Request, res: Response) => {
+  const drawId = parseInt(req.params.drawId as string, 10);
+  if (isNaN(drawId)) {
+    res.status(400).json({ message: 'Invalid drawId' });
+    return;
+  }
+  try {
+    const { pdf, draw, key, filename } = await generateOfficialRulesPdfForDraw(drawId, 'Generated from the Winnbell admin');
+    try {
+      const isClosed = (draw.status ?? '').toUpperCase() === 'CLOSED';
+      if (!isClosed || !(await objectExists(key))) {
+        await uploadObject(key, pdf, 'application/pdf');
+        console.log(`[LegalSnapshot] Admin download saved Official Rules for draw ${draw.id} -> r2:${key}`);
+      }
+    } catch (r2Err: unknown) {
+      // The admin still gets their file; the archive copy just failed - log loudly.
+      console.error('[LegalSnapshot] CRITICAL: admin-download R2 save failed:', r2Err instanceof Error ? r2Err.message : r2Err);
+    }
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+    res.send(pdf);
+  } catch (error) {
+    if (error instanceof Error && error.message === 'DRAW_NOT_FOUND') {
+      res.status(404).json({ message: 'Draw not found' });
+      return;
+    }
+    console.error('Rules PDF generation error:', error instanceof Error ? error.message : error);
+    res.status(500).json({ message: 'Failed to generate rules PDF' });
+  }
+};
 
 export const getDashboardData = async (req: Request, res: Response) => {
   try {
