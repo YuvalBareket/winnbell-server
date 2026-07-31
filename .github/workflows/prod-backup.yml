@@ -83,6 +83,35 @@ jobs:
           gpg --batch --yes --symmetric --cipher-algo AES256 --passphrase "$PASSPHRASE" supabase-auth.dump
           rm neon-prod.dump supabase-auth.dump
 
+      # Pinpoints credential problems without exposing secrets: prints only short
+      # fragments (enough to compare against the Cloudflare dashboard) and runs an
+      # explicit read test + write test against the vault bucket.
+      - name: Diagnose vault access
+        env:
+          RCLONE_CONFIG_DEST_TYPE: s3
+          RCLONE_CONFIG_DEST_PROVIDER: Cloudflare
+          RCLONE_CONFIG_DEST_REGION: auto
+          RCLONE_CONFIG_DEST_ENDPOINT: ${{ secrets.BACKUP_S3_ENDPOINT }}
+          RCLONE_CONFIG_DEST_ACCESS_KEY_ID: ${{ secrets.BACKUP_S3_ACCESS_KEY_ID }}
+          RCLONE_CONFIG_DEST_SECRET_ACCESS_KEY: ${{ secrets.BACKUP_S3_SECRET_ACCESS_KEY }}
+          BUCKET: ${{ secrets.BACKUP_S3_BUCKET }}
+        run: |
+          BUCKET=$(echo "$BUCKET" | xargs)
+          EP=$(echo "$RCLONE_CONFIG_DEST_ENDPOINT" | xargs)
+          KEY=$(echo "$RCLONE_CONFIG_DEST_ACCESS_KEY_ID" | xargs)
+          echo "endpoint account id starts with: $(echo "$EP" | sed -E 's#https?://##' | cut -c1-6)"
+          echo "access key id starts with:       $(echo "$KEY" | cut -c1-5)"
+          echo "--- READ test (list the vault bucket) ---"
+          rclone lsf "dest:$BUCKET" --max-depth 1 && echo "READ: OK" || echo "READ: FAILED"
+          echo "--- WRITE test (tiny probe object) ---"
+          echo probe > probe.txt
+          if rclone copyto probe.txt "dest:$BUCKET/probe-delete-me.txt"; then
+            echo "WRITE: OK"
+            rclone deletefile "dest:$BUCKET/probe-delete-me.txt" || true
+          else
+            echo "WRITE: FAILED"
+          fi
+
       - name: Upload to backup bucket (daily + monthly on the 1st) and prune old backups
         env:
           # The vault is R2, and R2 needs rclone's Cloudflare profile (region "auto",
