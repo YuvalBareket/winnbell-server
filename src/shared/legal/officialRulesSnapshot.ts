@@ -1,7 +1,7 @@
 import PDFDocument from 'pdfkit';
 import { getPool } from '../db/db.js';
 import { getPlatformSettings } from '../cache/cache.js';
-import { uploadObject } from '../s3.js';
+import { uploadObject, getObject } from '../s3.js';
 import { OFFICIAL_RULES_TEMPLATE } from './officialRulesTemplate.js';
 
 // ─── Official Rules archive snapshot ──────────────────────────────────────────
@@ -196,6 +196,46 @@ export const generateOfficialRulesPdfForDraw = async (
   );
   const { key, filename } = rulesArchiveNames(draw);
   return { pdf, draw, key, filename };
+};
+
+// ─── Admin retrieval: THE version that governed the draw ──────────────────────
+// For a CLOSED draw the archived close-time PDF is the legal record - the template
+// or the jurisdictions setting may have changed since, so regenerating would NOT
+// reproduce what participants actually saw. Serve the archive byte-exact; only if
+// it is missing (close-time upload failed) generate fresh and backfill it.
+// Open/Upcoming draws always generate fresh (their rules are still live/changing).
+export const getRulesPdfForAdmin = async (
+  drawId: number,
+): Promise<{ pdf: Buffer; filename: string; source: 'archive' | 'generated' }> => {
+  const pool = getPool();
+  const { rows } = await pool.query(
+    `SELECT id, name, draw_date, status FROM draw WHERE id = $1`,
+    [drawId],
+  );
+  const draw = rows[0] as (SnapshotDraw & { status: string }) | undefined;
+  if (!draw) throw new Error('DRAW_NOT_FOUND');
+
+  const { key, filename } = rulesArchiveNames(draw);
+
+  if (draw.status.toUpperCase() === 'CLOSED') {
+    const archived = await getObject(key);
+    if (archived) return { pdf: archived, filename, source: 'archive' };
+    // Archive missing (close-time upload failed): regenerate AND backfill the archive.
+    const { pdf } = await generateOfficialRulesPdfForDraw(drawId, 'Archived by Winnbell (backfilled on admin download)');
+    await uploadObject(key, pdf, 'application/pdf');
+    console.log(`[LegalSnapshot] Backfilled missing archive for closed draw ${draw.id} -> r2:${key}`);
+    return { pdf, filename, source: 'generated' };
+  }
+
+  // Open/Upcoming: fresh render of the live rules; save the working copy.
+  const { pdf } = await generateOfficialRulesPdfForDraw(drawId, 'Generated from the Winnbell admin');
+  try {
+    await uploadObject(key, pdf, 'application/pdf');
+  } catch (r2Err: unknown) {
+    // The admin still gets the file; only the working-copy save failed.
+    console.error('[LegalSnapshot] admin-download R2 save failed:', r2Err instanceof Error ? r2Err.message : r2Err);
+  }
+  return { pdf, filename, source: 'generated' };
 };
 
 // ─── Entry point: archive the rules of a just-closed draw ─────────────────────

@@ -1,4 +1,4 @@
-import { S3Client, PutObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, HeadObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { NodeHttpHandler } from '@smithy/node-http-handler';
 
@@ -48,6 +48,23 @@ export const uploadObject = async (key: string, body: Buffer, contentType: strin
     Body: body,
     ContentType: contentType,
   }));
+};
+
+// Fetch an object's bytes. Returns null on a definite 404; any other failure throws
+// (same "could not check is not missing" rule as objectExists).
+export const getObject = async (key: string): Promise<Buffer | null> => {
+  const { R2_BUCKET } = process.env;
+  if (!R2_BUCKET) throw new Error('R2_NOT_CONFIGURED');
+  try {
+    const res = await getClient().send(new GetObjectCommand({ Bucket: R2_BUCKET, Key: key }));
+    const bytes = await res.Body?.transformToByteArray();
+    return bytes ? Buffer.from(bytes) : null;
+  } catch (err: unknown) {
+    const name = (err as { name?: string })?.name;
+    const status = (err as { $metadata?: { httpStatusCode?: number } })?.$metadata?.httpStatusCode;
+    if (name === 'NoSuchKey' || name === 'NotFound' || status === 404) return null;
+    throw err;
+  }
 };
 
 export const objectExists = async (key: string): Promise<boolean> => {
