@@ -37,7 +37,7 @@ jest.mock('../../../shared/db/db.js', () => ({
   }),
 }));
 
-import { registerUser, loginUser, syncExternalUser } from '../auth.service';
+import { registerUser, loginUser, syncExternalUser, signupEmailBlockReason } from '../auth.service';
 import { invalidatePlatformSettings } from '../../../shared/cache/cache.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
@@ -129,6 +129,74 @@ describe('registerUser — disposable email rejection', () => {
     );
     const res = await registerUser('Outlook User', 'user@outlook.com', 'password123', 'User');
     expect(res.user.email).toBe('user@outlook.com');
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// 1b. Signup-email policy — plus-alias blocking (STRICT_SIGNUP_EMAILS, prod only)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('signup-email policy — plus-alias blocking in real production only', () => {
+  // Strict mode = NODE_ENV=production AND no DEMO_USER_ENABLED (Render staging also
+  // runs NODE_ENV=production but carries the demo flag). Uses existing env vars only.
+  const originalNodeEnv = process.env.NODE_ENV;
+  const originalDemo = process.env.DEMO_USER_ENABLED;
+  const setEnv = (name: string, value: string | undefined) => {
+    if (value === undefined) delete process.env[name];
+    else process.env[name] = value;
+  };
+  const enterProd = () => { setEnv('NODE_ENV', 'production'); setEnv('DEMO_USER_ENABLED', undefined); };
+  afterEach(() => {
+    setEnv('NODE_ENV', originalNodeEnv);
+    setEnv('DEMO_USER_ENABLED', originalDemo);
+  });
+
+  it('signupEmailBlockReason: alias rejected on prod, allowed on dev and on staging (demo flag)', () => {
+    setEnv('NODE_ENV', undefined); // local dev
+    expect(signupEmailBlockReason('user+alias@gmail.com')).toBeNull();
+
+    setEnv('NODE_ENV', 'production'); // Render staging: production + demo flag
+    setEnv('DEMO_USER_ENABLED', 'true');
+    expect(signupEmailBlockReason('user+alias@gmail.com')).toBeNull();
+
+    enterProd(); // real production
+    expect(signupEmailBlockReason('user+alias@gmail.com')).toMatch(/alias/i);
+    expect(signupEmailBlockReason('user@gmail.com')).toBeNull();
+    // Disposable stays blocked regardless of environment
+    expect(signupEmailBlockReason('x@mailinator.com')).toMatch(/disposable/i);
+  });
+
+  it('registerUser: rejects a plus-alias before touching the DB on prod', async () => {
+    enterProd();
+    await expect(
+      registerUser('Alias Farmer', 'farm+1@gmail.com', 'password123', 'User'),
+    ).rejects.toThrow(/alias/i);
+    expect(mockClientQuery).not.toHaveBeenCalled();
+  });
+
+  it('syncExternalUser: rejects a NEW plus-alias signup with EMAIL_NOT_ALLOWED on prod', async () => {
+    enterProd();
+    // pool #1 = existence check → no account = new signup, policy applies
+    setupPoolQueries({ rows: [] });
+    await expect(
+      syncExternalUser('ext-alias', 'farm+2@gmail.com', 'Alias Farmer', { ip: '8.8.8.8' }),
+    ).rejects.toThrow('EMAIL_NOT_ALLOWED');
+  });
+
+  it('syncExternalUser: an EXISTING plus-alias account still signs in on prod', async () => {
+    enterProd();
+    // pool #1 = existence check → account exists, policy skipped (no lockout)
+    setupPoolQueries({ rows: [{ 1: 1 }] });
+    setupClientQueries(
+      { rows: [] }, // BEGIN
+      { rows: [] }, // deletedCheck
+      { rows: [{ id: 7, role: 'User', fullName: 'Old Alias', email: 'old+user@gmail.com' }] },
+      { rows: [] }, // user_acquisition INSERT
+      { rows: [] }, // business_location check
+      { rows: [] }, // COMMIT
+    );
+    const res = await syncExternalUser('ext-old-alias', 'old+user@gmail.com', 'Old Alias', { ip: '8.8.8.8' });
+    expect(res.user.email).toBe('old+user@gmail.com');
   });
 });
 

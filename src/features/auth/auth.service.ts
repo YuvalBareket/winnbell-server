@@ -185,6 +185,28 @@ const isDisposableEmail = (email: string): boolean => {
   return domain ? DISPOSABLE_EMAIL_DOMAINS.has(domain) : false;
 };
 
+// Signup-email policy, applied to NEW accounts only (existing users always keep
+// signing in). Disposable domains are always rejected. Plus-aliases (a '+' in the
+// local part, e.g. name+anything@gmail.com) are rejected ONLY in real production:
+// one mailbox must not mint unlimited accounts to farm welcome/referral/AMOE entries.
+// "Real production" is derived from EXISTING env vars (no new flag, per user):
+// Render sets NODE_ENV=production on BOTH prod and staging, and staging is the one
+// carrying DEMO_USER_ENABLED (see shared/demo.ts) - so prod = production AND no demo
+// flag. Dev and staging keep aliases - every test persona and the staging demo
+// account depend on them.
+const isStrictSignupEnv = (): boolean =>
+  process.env.NODE_ENV === 'production' && process.env.DEMO_USER_ENABLED !== 'true';
+
+export const signupEmailBlockReason = (email: string): string | null => {
+  if (isDisposableEmail(email)) {
+    return 'Registration with disposable email addresses is not allowed.';
+  }
+  if (isStrictSignupEnv() && (email.split('@')[0] ?? '').includes('+')) {
+    return 'Email aliases are not supported. Please use your primary email address.';
+  }
+  return null;
+};
+
 interface ManagerInvitePayload {
   type: 'MANAGER_INVITE';
   locationId: number;
@@ -200,8 +222,9 @@ export const registerUser = async (
   registrationIp?: string,
 ) => {
   email = email.toLowerCase().trim(); // schema email is case-sensitive UNIQUE — always store normalized
-  if (isDisposableEmail(email)) {
-    throw new Error('Registration with disposable email addresses is not allowed.');
+  const emailBlock = signupEmailBlockReason(email);
+  if (emailBlock) {
+    throw new Error(emailBlock);
   }
 
   const pool = getPool();
@@ -511,6 +534,10 @@ export const syncExternalUser = async (
     );
     const isExistingUser = existingCheck.rows.length > 0;
     if (!isExistingUser) {
+      // Signup-email policy (disposable always; plus-aliases in strict/prod mode).
+      // The register form already blocks these at /auth/check-email; this is the
+      // enforcement backstop and also covers the Google OAuth signup path.
+      if (signupEmailBlockReason(email)) throw new Error('EMAIL_NOT_ALLOWED');
       const region = await evaluateRegionRestriction(metadata.ip);
       if (region.blocked) throw new Error('REGION_RESTRICTED');
       detectedState = region.state ?? region.country;

@@ -82,6 +82,10 @@ export const checkEmail = async (req: Request, res: Response): Promise<void> => 
   const lenErr = validateLengths([['Email', email, 255]]);
   if (lenErr) { res.status(400).json({ message: lenErr }); return; }
   try {
+    // Signup-email policy runs here FIRST so the register form can explain the
+    // rejection before the user ever reaches Supabase signup / email verification.
+    const blockReason = authService.signupEmailBlockReason(email.toLowerCase().trim());
+    if (blockReason) { res.json({ exists: false, blocked: true, message: blockReason }); return; }
     const pool = getPool();
     const result = await pool.query(`SELECT id FROM "user" WHERE email = $1`, [email.toLowerCase().trim()]);
     res.json({ exists: result.rows.length > 0 });
@@ -280,6 +284,10 @@ export const syncUser = async (req: Request, res: Response): Promise<void> => {
     }
     if (err instanceof Error && err.message === 'ACCOUNT_DELETED') {
       res.status(403).json({ message: 'ACCOUNT_DELETED' });
+      return;
+    }
+    if (err instanceof Error && err.message === 'EMAIL_NOT_ALLOWED') {
+      res.status(403).json({ message: 'EMAIL_NOT_ALLOWED' });
       return;
     }
     // syncExternalUser tolerates invite-token problems internally (it never
