@@ -41,15 +41,22 @@ export const getGrowthAnalyticsService = async () => {
     fraud,
     geoState,
     geoCity,
+    investorActivation,
+    investorViral,
+    investorBizFunnel,
+    investorPrevCampaign,
   ] = await Promise.all([
     // ── §3 user counts + growth base ───────────────────────────────────────────
+    // Growth %s use ROLLING 30-day windows, not calendar months: on the 1st of a month
+    // "this month vs last month" is ~0 vs a full month and always reads -100%.
     pool.query(`
       SELECT
         COUNT(*) FILTER (WHERE role = 'User')                                                   AS total_users,
         COUNT(*) FILTER (WHERE role = 'User' AND created_at >= DATE_TRUNC('month', NOW()))       AS new_this_month,
+        COUNT(*) FILTER (WHERE role = 'User' AND created_at >= NOW() - INTERVAL '30 days')       AS new_30d,
         COUNT(*) FILTER (WHERE role = 'User'
-                          AND created_at >= DATE_TRUNC('month', NOW()) - INTERVAL '1 month'
-                          AND created_at <  DATE_TRUNC('month', NOW()))                          AS new_last_month
+                          AND created_at >= NOW() - INTERVAL '60 days'
+                          AND created_at <  NOW() - INTERVAL '30 days')                          AS new_prev_30d
       FROM "user"
     `),
 
@@ -63,21 +70,24 @@ export const getGrowthAnalyticsService = async () => {
       WHERE is_quarantined = FALSE AND activated_by_user_id IS NOT NULL
     `),
 
-    // ── §1 business growth ─────────────────────────────────────────────────────
+    // ── §1 business growth (growth %s on rolling 30-day windows, see §3 note) ──
     pool.query(`
       SELECT
         (SELECT COUNT(*) FROM business)                                                                       AS total_businesses,
         (SELECT COUNT(*) FROM business WHERE created_at >= DATE_TRUNC('month', NOW()))                        AS new_businesses_this_month,
+        (SELECT COUNT(*) FROM business WHERE created_at >= NOW() - INTERVAL '30 days')                        AS new_businesses_30d,
         (SELECT COUNT(*) FROM business
-           WHERE created_at >= DATE_TRUNC('month', NOW()) - INTERVAL '1 month'
-             AND created_at <  DATE_TRUNC('month', NOW()))                                                    AS new_businesses_last_month,
+           WHERE created_at >= NOW() - INTERVAL '60 days'
+             AND created_at <  NOW() - INTERVAL '30 days')                                                    AS new_businesses_prev_30d,
         (SELECT COUNT(DISTINCT business_id) FROM subscription WHERE status IN ('Active','Trialing'))          AS paying_businesses,
         (SELECT COUNT(*) FROM subscription
            WHERE status IN ('Active','Trialing') AND created_at >= DATE_TRUNC('month', NOW()))                AS new_paying_this_month,
         (SELECT COUNT(*) FROM subscription
+           WHERE status IN ('Active','Trialing') AND created_at >= NOW() - INTERVAL '30 days')                AS new_paying_30d,
+        (SELECT COUNT(*) FROM subscription
            WHERE status IN ('Active','Trialing')
-             AND created_at >= DATE_TRUNC('month', NOW()) - INTERVAL '1 month'
-             AND created_at <  DATE_TRUNC('month', NOW()))                                                    AS new_paying_last_month
+             AND created_at >= NOW() - INTERVAL '60 days'
+             AND created_at <  NOW() - INTERVAL '30 days')                                                    AS new_paying_prev_30d
     `),
 
     pool.query(`SELECT COUNT(*) AS founding_members FROM founding_member`),
@@ -132,7 +142,7 @@ export const getGrowthAnalyticsService = async () => {
                COUNT(*) FILTER (WHERE entry_source = 'receipt') AS purchase_entries
         FROM ticket
         WHERE is_quarantined = FALSE AND activated_by_user_id IS NOT NULL
-          AND created_at >= DATE_TRUNC('month', NOW())
+          AND created_at >= NOW() - INTERVAL '30 days'
         GROUP BY activated_by_user_id
       )
       SELECT
@@ -205,12 +215,96 @@ export const getGrowthAnalyticsService = async () => {
       FROM "user" WHERE role = 'User' AND city IS NOT NULL
       GROUP BY city ORDER BY count DESC LIMIT 15
     `),
+
+    // ── §investor activation: users created in last 90d AND at least 7d ago ─────
+    pool.query(`
+      WITH eligible AS (
+        SELECT id AS uid, created_at
+        FROM "user"
+        WHERE role = 'User'
+          AND created_at >= NOW() - INTERVAL '90 days'
+          AND created_at <= NOW() - INTERVAL '7 days'
+      ),
+      first_ticket AS (
+        SELECT t.activated_by_user_id AS uid,
+               MIN(t.activated_at)    AS first_activated_at
+        FROM ticket t
+        JOIN eligible e ON e.uid = t.activated_by_user_id
+        WHERE t.is_quarantined = FALSE
+          AND t.activated_at IS NOT NULL
+          -- Data-quality guard: ignore activity timestamped before the signup itself
+          -- (impossible in prod; time-traveling seed data would poison the median)
+          AND t.activated_at >= e.created_at
+        GROUP BY t.activated_by_user_id
+      )
+      SELECT
+        COUNT(e.uid)                                                              AS eligible_count,
+        COUNT(ft.uid)
+          FILTER (WHERE ft.first_activated_at <= e.created_at + INTERVAL '7 days') AS activated_7d_count,
+        PERCENTILE_CONT(0.5) WITHIN GROUP (
+          ORDER BY EXTRACT(EPOCH FROM (ft.first_activated_at - e.created_at)) / 86400.0
+        )                                                                         AS median_days_to_first_entry
+      FROM eligible e
+      LEFT JOIN first_ticket ft ON ft.uid = e.uid
+    `),
+
+    // ── §investor viral: referred signups + k-factor + referred activated pct ───
+    pool.query(`
+      WITH referred AS (
+        SELECT ua.user_id
+        FROM user_acquisition ua
+        WHERE ua.source = 'referral'
+      ),
+      referred_activated AS (
+        SELECT DISTINCT t.activated_by_user_id AS uid
+        FROM ticket t
+        JOIN referred r ON r.user_id = t.activated_by_user_id
+        WHERE t.is_quarantined = FALSE
+      )
+      SELECT
+        (SELECT COUNT(*) FROM referred)                     AS referred_signups,
+        (SELECT COUNT(*) FROM "user" WHERE role = 'User')  AS total_users_for_k,
+        (SELECT COUNT(*) FROM referred_activated)           AS referred_activated_count,
+        (SELECT COUNT(*) FROM referred)                     AS referred_total
+    `),
+
+    // ── §investor businessFunnel: conversion + median days to paying ─────────────
+    pool.query(`
+      WITH paying_subs AS (
+        SELECT DISTINCT ON (s.business_id)
+          s.business_id,
+          s.created_at AS sub_created_at,
+          b.created_at AS biz_created_at
+        FROM subscription s
+        JOIN business b ON b.id = s.business_id
+        WHERE s.status IN ('Active','Trialing')
+        ORDER BY s.business_id, s.created_at ASC
+      )
+      SELECT
+        (SELECT COUNT(*) FROM business)                             AS total_businesses,
+        COUNT(*)                                                    AS paying_businesses,
+        PERCENTILE_CONT(0.5) WITHIN GROUP (
+          ORDER BY EXTRACT(EPOCH FROM (sub_created_at - biz_created_at)) / 86400.0
+        )                                                           AS median_days_to_paying
+      FROM paying_subs
+    `),
+
+    // ── §investor revenueMoM: previous CLOSED draw collected revenue ──────────────
+    pool.query(`
+      WITH last_closed AS (
+        SELECT id FROM draw WHERE status = 'Closed' ORDER BY draw_date DESC LIMIT 1
+      )
+      SELECT COALESCE(SUM(de.fee_at_entry), 0) AS prev_campaign_revenue
+      FROM draw_entry de
+      JOIN last_closed lc ON lc.id = de.draw_id
+    `),
   ]);
 
   // ── assemble ────────────────────────────────────────────────────────────────
   const totalUsers = n(userCore.rows[0].total_users);
   const newUsers = n(userCore.rows[0].new_this_month);
-  const newUsersPrev = n(userCore.rows[0].new_last_month);
+  const newUsers30d = n(userCore.rows[0].new_30d);
+  const newUsersPrev30d = n(userCore.rows[0].new_prev_30d);
   const mau = n(activity.rows[0].mau);
   const wau = n(activity.rows[0].wau);
   const dau = n(activity.rows[0].dau);
@@ -218,9 +312,11 @@ export const getGrowthAnalyticsService = async () => {
   const totalBiz = n(bizCore.rows[0].total_businesses);
   const payingBiz = n(bizCore.rows[0].paying_businesses);
   const newPaying = n(bizCore.rows[0].new_paying_this_month);
-  const newPayingPrev = n(bizCore.rows[0].new_paying_last_month);
+  const newPaying30d = n(bizCore.rows[0].new_paying_30d);
+  const newPayingPrev30d = n(bizCore.rows[0].new_paying_prev_30d);
   const newBiz = n(bizCore.rows[0].new_businesses_this_month);
-  const newBizPrev = n(bizCore.rows[0].new_businesses_last_month);
+  const newBiz30d = n(bizCore.rows[0].new_businesses_30d);
+  const newBizPrev30d = n(bizCore.rows[0].new_businesses_prev_30d);
 
   const acquisitionRows = acquisition.rows.map((r) => ({ source: r.source as string, count: n(r.count) }));
   const acquisitionTotal = acquisitionRows.reduce((a, b) => a + b.count, 0);
@@ -241,6 +337,43 @@ export const getGrowthAnalyticsService = async () => {
 
   const elig = cohorts.rows[0];
 
+  // ── investor section ────────────────────────────────────────────────────────
+  const actRow = investorActivation.rows[0];
+  const eligibleCount = n(actRow.eligible_count);
+  const activated7d = n(actRow.activated_7d_count);
+  const medianDaysRaw = actRow.median_days_to_first_entry !== null ? Number(actRow.median_days_to_first_entry) : null;
+  const medianDaysToEntry = medianDaysRaw !== null && !isNaN(medianDaysRaw)
+    ? Math.round(medianDaysRaw * 10) / 10
+    : null;
+
+  const virRow = investorViral.rows[0];
+  const referredSignups = n(virRow.referred_signups);
+  const totalUsersForK = n(virRow.total_users_for_k);
+  const referredActivatedCount = n(virRow.referred_activated_count);
+  const referredTotal = n(virRow.referred_total);
+  const kFactor = totalUsersForK > 0
+    ? Math.round((referredSignups / totalUsersForK) * 1000) / 1000
+    : 0;
+  const referredActivatedPct = referredTotal > 0
+    ? Math.round((referredActivatedCount / referredTotal) * 1000) / 10
+    : 0;
+
+  const bizFunRow = investorBizFunnel.rows[0];
+  const totalBizFunnel = n(bizFunRow.total_businesses);
+  const payingBizFunnel = n(bizFunRow.paying_businesses);
+  const medianDaysToPayingRaw = bizFunRow.median_days_to_paying !== null ? Number(bizFunRow.median_days_to_paying) : null;
+  const medianDaysToPaying = medianDaysToPayingRaw !== null && !isNaN(medianDaysToPayingRaw)
+    ? Math.round(medianDaysToPayingRaw * 10) / 10
+    : null;
+  const signupToPayingPct = totalBizFunnel > 0
+    ? Math.round((payingBizFunnel / totalBizFunnel) * 1000) / 10
+    : 0;
+
+  const prevCampaignRevenue = Number(investorPrevCampaign.rows[0]?.prev_campaign_revenue) || 0;
+  const revMoMGrowthPct = prevCampaignRevenue > 0
+    ? Math.round(((mrr - prevCampaignRevenue) / prevCampaignRevenue) * 1000) / 10
+    : null;
+
   return {
     northStar: {
       paying_businesses: payingBiz,
@@ -249,8 +382,8 @@ export const getGrowthAnalyticsService = async () => {
       mau,
       mrr,
       business_churn_pct: churnRate,
-      user_growth_pct: growthRate(newUsers, newUsersPrev),
-      paying_business_growth_pct: growthRate(newPaying, newPayingPrev),
+      user_growth_pct: growthRate(newUsers30d, newUsersPrev30d),
+      paying_business_growth_pct: growthRate(newPaying30d, newPayingPrev30d),
       avg_entries_per_active_user: Number(eng.avg_entries) || 0,
       pct_businesses_acquired_organically: null, // needs §2 business acquisition source (deferred)
       pct_users_acquired_organically: pct(organicUsers, acquisitionTotal),
@@ -261,13 +394,13 @@ export const getGrowthAnalyticsService = async () => {
       founding_members: n(founding.rows[0].founding_members),
       new_businesses_this_month: newBiz,
       new_paying_this_month: newPaying,
-      business_growth_pct: growthRate(newBiz, newBizPrev),
-      paying_business_growth_pct: growthRate(newPaying, newPayingPrev),
+      business_growth_pct: growthRate(newBiz30d, newBizPrev30d),
+      paying_business_growth_pct: growthRate(newPaying30d, newPayingPrev30d),
     },
     userGrowth: {
       total_users: totalUsers,
       new_this_month: newUsers,
-      user_growth_pct: growthRate(newUsers, newUsersPrev),
+      user_growth_pct: growthRate(newUsers30d, newUsersPrev30d),
       mau, wau, dau,
       mau_over_total_pct: pct(mau, totalUsers),
       wau_over_mau_pct: pct(wau, mau),
@@ -333,6 +466,30 @@ export const getGrowthAnalyticsService = async () => {
     geo: {
       by_state: geoState.rows.map((r) => ({ state: r.state as string, count: n(r.count) })),
       by_city: geoCity.rows.map((r) => ({ city: r.city as string, count: n(r.count) })),
+    },
+    investor: {
+      revenueMoM: {
+        mrr,
+        prev_campaign_revenue: prevCampaignRevenue,
+        growth_pct: revMoMGrowthPct,
+      },
+      activation: {
+        eligible_count: eligibleCount,
+        activated_7d_count: activated7d,
+        activated_7d_pct: eligibleCount > 0 ? Math.round((activated7d / eligibleCount) * 1000) / 10 : 0,
+        median_days_to_first_entry: medianDaysToEntry,
+      },
+      viral: {
+        referred_signups: referredSignups,
+        k_factor: kFactor,
+        referred_activated_pct: referredActivatedPct,
+      },
+      businessFunnel: {
+        total_businesses: totalBizFunnel,
+        paying_businesses: payingBizFunnel,
+        signup_to_paying_pct: signupToPayingPct,
+        median_days_to_paying: medianDaysToPaying,
+      },
     },
   };
 };
