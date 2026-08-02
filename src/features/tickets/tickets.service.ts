@@ -1,6 +1,7 @@
 import { getPool, PoolClient } from '../../shared/db/db.js';
 import { safeRollback } from '../../shared/db/txn.js';
 import { OPEN_DRAW_ID_SUBQUERY, getOpenDrawId } from '../../shared/db/queries.js';
+import { AGE_RESTRICTED_SECTOR, isAtLeast21 } from '../../shared/ageRestriction.js';
 import crypto from 'crypto';
 import { invalidatePublicLocation } from '../../shared/cache/cache.js';
 import {
@@ -350,7 +351,7 @@ export const submitReceiptEntryService = async (
     const preflightRes = await client.query(
       `WITH
         biz AS (
-          SELECT b.id AS business_id, b.name AS business_name, b.min_transaction_amount
+          SELECT b.id AS business_id, b.name AS business_name, b.sector, b.min_transaction_amount
           FROM business_location bl
           JOIN business b ON bl.business_id = b.id
           WHERE bl.id = $2 AND bl.is_active = true
@@ -380,6 +381,8 @@ export const submitReceiptEntryService = async (
         (SELECT risk_last_decayed_at             FROM "user" WHERE id = $1)  AS risk_last_decayed_at,
         (SELECT business_id                      FROM biz)                   AS business_id,
         (SELECT business_name                    FROM biz)                   AS business_name,
+        (SELECT sector                           FROM biz)                   AS business_sector,
+        (SELECT date_of_birth                    FROM "user" WHERE id = $1)  AS date_of_birth,
         (SELECT min_transaction_amount           FROM biz)                   AS min_transaction_amount,
         (SELECT draw_id                          FROM od)                    AS draw_id,
         (SELECT draw_start_date                  FROM od)                    AS draw_start_date,
@@ -422,6 +425,11 @@ export const submitReceiptEntryService = async (
     }
     if (pf.has_conflict) {
       throw new Error('Business owners and managers cannot submit entries for their own business.');
+    }
+    // Age gate (lawyer-mandated): entries at tobacco/liquor-sector businesses require 21+.
+    // requireProfileComplete guarantees date_of_birth is set before this service runs.
+    if (pf.business_sector === AGE_RESTRICTED_SECTOR && !isAtLeast21(pf.date_of_birth)) {
+      throw new Error('Entries at this business are limited to participants aged 21 and older.');
     }
     if (!pf.draw_id) {
       throw new Error('No active campaign found.');
