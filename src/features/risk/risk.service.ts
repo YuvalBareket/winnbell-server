@@ -54,7 +54,7 @@ export interface PreFetchedUserRisk {
  *   - Sequential identifier guessing       +4
  *   - Threshold probing (amount swap)      +4
  *   - Amount >3× business 30-day average   +2
- *   - Typed >5 chars in <800 ms            +3
+ *   - Typed >5 chars in <700 ms            +3
  */
 export const evaluateUserRisk = async (
   userId: number,
@@ -317,7 +317,7 @@ export const evaluateUserRisk = async (
       context.receiptInputMethod === 'typed' &&
       receiptIdentifier.length > 5 &&
       context.typingDurationMs !== undefined &&
-      context.typingDurationMs < 800
+      context.typingDurationMs < 700
     ) {
       delta += 3;
       flags.push('suspiciously_fast_input');

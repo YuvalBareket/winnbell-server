@@ -390,7 +390,7 @@ describe('evaluateUserRisk — no context provided', () => {
 // 9. Suspicious fast typing — suspiciously_fast_input flag
 // ─────────────────────────────────────────────────────────────────────────────
 describe('Suspiciously fast typing — suspiciously_fast_input flag', () => {
-  test('fires when identifier > 4 chars, method is typed, and typingDurationMs < 600', async () => {
+  test('fires when identifier > 5 chars, method is typed, and typingDurationMs < 700', async () => {
     setupQueries([
       { rows: [{ risk_score: 0, risk_last_flagged_at: null }] },
       { rows: [cleanCteRow(0, 0, [], 30, { v24h_distinct: 0 })] },
