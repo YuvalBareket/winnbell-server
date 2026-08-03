@@ -1056,8 +1056,20 @@ export const resetDemoUserService = async (
   const client = await pool.connect();
   try {
     await client.query('BEGIN');
-    // Entries (anchor + siblings all carry activated_by_user_id); FKs to ticket.id are SET NULL /
-    // CASCADE, so this also clears any winner pointer or audit rows referencing them.
+    // Drawing records (draw_winner_order / draw_rejected_winner) reference ticket.id with ON
+    // DELETE RESTRICT - a deliberate legal-retention guard, since nothing in production ever
+    // deletes tickets. This staging-only reset is the one legitimate ticket-deleting path, so
+    // it must clear its own references first or the DELETE below would be refused.
+    await client.query(
+      `DELETE FROM draw_winner_order WHERE ticket_id IN (SELECT id FROM ticket WHERE activated_by_user_id = $1)`,
+      [userId],
+    );
+    await client.query(
+      `DELETE FROM draw_rejected_winner WHERE ticket_id IN (SELECT id FROM ticket WHERE activated_by_user_id = $1)`,
+      [userId],
+    );
+    // Entries (anchor + siblings all carry activated_by_user_id); remaining FKs to ticket.id
+    // are SET NULL / CASCADE, so this also clears any winner pointer referencing them.
     const del = await client.query('DELETE FROM ticket WHERE activated_by_user_id = $1', [userId]);
     await client.query('DELETE FROM free_ticket_usage WHERE user_id = $1', [userId]);
     await client.query('DELETE FROM receipt_threshold_attempt WHERE user_id = $1', [userId]);

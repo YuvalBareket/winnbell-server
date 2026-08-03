@@ -260,12 +260,21 @@ describe('SQL source contracts — paused_at placement', () => {
     expect(bizCte).toMatch(/de\.paused_at IS NULL/);
   });
 
-  test('winner pick SELECT (ORDER BY random()) does NOT reference paused_at', () => {
+  test('winner order generation (ORDER BY random()) does NOT reference paused_at', () => {
     const src = readSrc('features/admin/admin.service.ts');
     const randomIdx = src.indexOf('ORDER BY random()');
     expect(randomIdx).toBeGreaterThan(-1);
+    // The order-generation INSERT..SELECT is the ~2000 chars preceding the ORDER BY.
+    const orderGen = src.slice(Math.max(0, randomIdx - 2000), randomIdx + 40);
+    expect(orderGen).not.toMatch(/paused_at/);
+  });
+
+  test('winner pick SELECT (ORDER BY dwo.position) does NOT reference paused_at', () => {
+    const src = readSrc('features/admin/admin.service.ts');
+    const pickIdx = src.indexOf('ORDER BY dwo.position');
+    expect(pickIdx).toBeGreaterThan(-1);
     // The winner-selection statement is the ~2000 chars preceding the ORDER BY.
-    const winnerSelect = src.slice(Math.max(0, randomIdx - 2000), randomIdx + 40);
+    const winnerSelect = src.slice(Math.max(0, pickIdx - 2000), pickIdx + 40);
     expect(winnerSelect).not.toMatch(/paused_at/);
   });
 

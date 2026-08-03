@@ -18,6 +18,7 @@ import {
   getAllDrawsService,
   getBusinessesWithStats,
   pickDrawWinnerService,
+  extendDrawWinnerOrderService,
   confirmWinnerService,
   getAdminOverviewService,
   getAllUsersService,
@@ -42,6 +43,7 @@ import {
   adminImageDecisionService,
   getDrawCandidateService,
   getDrawRejectedWinnersService,
+  getDrawWinnerOrderService,
   getDrawAuditLogService,
   getBusinessHealthSummaryService,
   getUserAnalyticsSummaryService,
@@ -448,6 +450,23 @@ export const pickWinner = async (req: Request, res: Response) => {
   }
 };
 
+// Admin-approved continuation of the drawing: appends the next randomly drawn batch once
+// the current list is exhausted and promotes its top entry to candidate. Never automatic.
+export const extendDrawWinnerOrder = async (req: Request, res: Response): Promise<void> => {
+  const drawId = parseInt(req.params.drawId as string, 10);
+  if (isNaN(drawId)) {
+    res.status(400).json({ message: 'Invalid drawId' });
+    return;
+  }
+  try {
+    const winner = await extendDrawWinnerOrderService(drawId, req.user!.id);
+    res.status(200).json(winner);
+  } catch (error) {
+    const message = error instanceof Error && error.message ? error.message : 'Failed to draw more entries';
+    res.status(400).json({ message });
+  }
+};
+
 export const confirmWinner = async (req: Request, res: Response): Promise<void> => {
   const drawId = parseInt(req.params.drawId as string, 10);
   if (isNaN(drawId)) {
@@ -793,6 +812,17 @@ export const getDrawRejectedWinners = async (req: Request, res: Response) => {
     res.json(rejected);
   } catch (error) {
     res.status(500).json({ message: 'Failed to fetch rejected winners' });
+  }
+};
+
+export const getDrawWinnerOrder = async (req: Request, res: Response) => {
+  const drawId = parseInt(req.params.drawId as string, 10);
+  if (isNaN(drawId)) { res.status(400).json({ message: 'Invalid drawId' }); return; }
+  try {
+    const order = await getDrawWinnerOrderService(drawId);
+    res.json(order);
+  } catch (error) {
+    res.status(500).json({ message: 'Failed to fetch draw order' });
   }
 };
 

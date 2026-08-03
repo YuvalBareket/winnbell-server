@@ -46,6 +46,7 @@ router.post('/draws/:drawId/duplicate', adminController.duplicateDraw);
 router.post('/draws/:drawId/open', adminController.openDraw);
 router.post('/draws/:drawId/close', adminController.closeDraw);
 router.post('/draws/:drawId/pick-winner', adminController.pickWinner);
+router.post('/draws/:drawId/extend-order', adminController.extendDrawWinnerOrder);
 router.post('/draws/:drawId/confirm-winner', adminController.confirmWinner);
 router.post('/draws/:drawId/reopen', adminController.reopenDraw);
 router.get('/draws/:drawId/businesses', adminController.getDrawBusinesses);
@@ -54,6 +55,7 @@ router.delete('/draws/:drawId/businesses/:businessId', adminController.removeBus
 router.patch('/draws/:drawId/businesses/:businessId/participation', adminController.patchBusinessParticipation);
 router.get('/draws/:drawId/candidate', adminController.getDrawCandidate);
 router.get('/draws/:drawId/rejected-winners', adminController.getDrawRejectedWinners);
+router.get('/draws/:drawId/winner-order', adminController.getDrawWinnerOrder);
 router.get('/draws/:drawId/audit-log', adminController.getDrawAuditLog);
 router.get('/draws/:drawId/rules-pdf', adminController.downloadDrawRulesPdf);
 router.get('/settings', adminController.getPlatformSettings);

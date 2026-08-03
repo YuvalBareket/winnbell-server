@@ -43,7 +43,7 @@ jest.mock('../../../shared/email/email.service.js', () => ({
   sendFoundingFinalCampaignEmail: (...args: unknown[]) => mockSendFoundingFinalCampaignEmail(...args),
 }));
 
-import { createDrawService, openDrawService, closeDrawService, confirmWinnerService, removeBusinessFromDrawService, duplicateDrawService, adminImageDecisionService } from '../admin.service';
+import { createDrawService, openDrawService, closeDrawService, pickDrawWinnerService, extendDrawWinnerOrderService, confirmWinnerService, getDrawWinnerOrderService, removeBusinessFromDrawService, duplicateDrawService, adminImageDecisionService } from '../admin.service';
 
 // ─────────────────────────────────────────────
 // Helpers
@@ -615,6 +615,327 @@ describe('confirmWinnerService — eligibility re-check', () => {
       { rows: [] },
     );
     await expect(confirmWinnerService(1, 1)).rejects.toThrow('WINNER_NO_LONGER_ELIGIBLE');
+  });
+});
+
+// ─────────────────────────────────────────────
+// pickDrawWinnerService — frozen selection order
+// ─────────────────────────────────────────────
+describe('pickDrawWinnerService — frozen selection order', () => {
+  const CLOSED_DRAW = { id: 1, status: 'Closed', prize_pool: 1000, winner_user_id: null, winner_ticket_id: null, winner_confirmed: false };
+  const WINNER_ROW = {
+    ticket_id: 9, code: 'WIN123', activated_by_user_id: 5,
+    receipt_identifier: 'R-1', transaction_amount: 25, transaction_date: '2026-07-10',
+    receipt_image_url: null, entry_source: 'receipt', image_validation_status: 'passed',
+    full_name: 'Jane Doe', email: 'jane@test.com', risk_score: 3,
+    business_name: 'Cafe', location_name: 'Main St',
+    queue_position: 1, queue_total: 3,
+  };
+
+  test('first pick generates the reachable prefix once, then takes the top entry by position', async () => {
+    setupClientQueries(
+      { rows: [] },                             // BEGIN
+      { rows: [CLOSED_DRAW] },                  // draw FOR UPDATE
+      { rows: [] },                             // SET LOCAL statement_timeout
+      { rows: [] },                             // order-exists probe: empty -> generate
+      { rows: [{ eligible: 40, stored: 3 }] },  // one-statement shuffle+insert+counts
+      { rows: [] },                             // audit: winner_order_generated
+      { rows: [WINNER_ROW] },                   // pick SELECT (top of order)
+      { rows: [] },                             // UPDATE draw winner
+      { rows: [] },                             // audit: winner_picked
+      { rows: [] },                             // COMMIT
+    );
+
+    const result = await pickDrawWinnerService(1, false, undefined, 1) as { queuePosition: number; queueTotal: number };
+    expect(result.queuePosition).toBe(1);
+    expect(result.queueTotal).toBe(3);
+
+    const calls = mockClientQuery.mock.calls.map(([sql]: [string]) => sql).filter((s: unknown) => typeof s === 'string');
+    const genSql = calls.find((s: string) => s.includes('INSERT INTO draw_winner_order'));
+    expect(genSql).toBeDefined();
+    // The ranking is drawn once, uniformly at random, at generation time only...
+    expect(genSql).toMatch(/row_number\(\) OVER \(ORDER BY random\(\)\)/);
+    // ...and evaluated exactly once: the cutoff and the insert must see the SAME shuffle.
+    expect(genSql).toMatch(/WITH ranked AS MATERIALIZED/);
+    // ...and only a bounded prefix is stored: min-70 floor, auto-valid cutoff, batch cap.
+    expect(genSql).toMatch(/LEAST\(/);
+    expect(genSql).toMatch(/GREATEST\(/);
+    expect(genSql).toMatch(/position <= \(SELECT cut FROM cutoff\)/);
+    const pickSql = calls.find((s: string) => s.includes('ORDER BY dwo.position'));
+    expect(pickSql).toBeDefined();
+    // The pick itself never re-rolls.
+    expect(pickSql).not.toMatch(/ORDER BY random/);
+    // The single statement reports both counts from the SAME shuffled snapshot - the
+    // audited numbers can never disagree with the stored ranking.
+    expect(genSql).toMatch(/RETURNING 1/);
+    expect(genSql).toMatch(/COUNT\(\*\)::int FROM ranked/);
+    const auditGen = mockClientQuery.mock.calls.find(
+      ([sql, params]: [string, unknown[]]) => typeof sql === 'string' && sql.includes('draw_audit_log') && Array.isArray(params) && params.includes('winner_order_generated'),
+    );
+    expect(auditGen).toBeDefined();
+    expect(auditGen![1][3]).toContain('"entry_count":3');
+    expect(auditGen![1][3]).toContain('"eligible_count":40');
+    // The record itself states the methodology.
+    expect(auditGen![1][3]).toContain('"method":"uniform_random_full_shuffle_bounded_prefix"');
+  });
+
+  test('exhausted list COMMITS the rejection and returns exhausted - never extends automatically', async () => {
+    const withCandidate = { ...CLOSED_DRAW, winner_user_id: 7, winner_ticket_id: 8 };
+    setupClientQueries(
+      { rows: [] },                // BEGIN
+      { rows: [withCandidate] },   // draw FOR UPDATE
+      { rows: [] },                // UPDATE draw clear winner
+      { rows: [] },                // UPDATE ticket quarantine
+      { rows: [] },                // INSERT draw_rejected_winner
+      { rows: [] },                // audit: winner_rejected
+      { rows: [] },                // SET LOCAL
+      { rows: [{ exists: 1 }] },   // order-exists probe: found
+      { rows: [] },                // pick SELECT: list exhausted
+      { rows: [{ total: 5 }] },    // stored-order COUNT for the exhausted response
+      { rows: [] },                // COMMIT
+    );
+
+    const result = await pickDrawWinnerService(1, false, 'final candidate is fraudulent', 1);
+    expect(result).toEqual({ exhausted: true, queueTotal: 5 });
+
+    // The rejection is durably recorded - the transaction COMMITS, it does not roll back.
+    const committed = mockClientQuery.mock.calls.some(([sql]: [string]) => sql === 'COMMIT');
+    expect(committed).toBe(true);
+    const rejected = mockClientQuery.mock.calls.some(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO draw_rejected_winner'),
+    );
+    expect(rejected).toBe(true);
+    // And the list is NEVER extended without explicit admin approval.
+    const extendedSql = mockClientQuery.mock.calls.some(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO draw_winner_order'),
+    );
+    expect(extendedSql).toBe(false);
+  });
+});
+
+// ─────────────────────────────────────────────
+// extendDrawWinnerOrderService — admin-approved list continuation
+// ─────────────────────────────────────────────
+describe('extendDrawWinnerOrderService — admin-approved continuation', () => {
+  const EXHAUSTED_DRAW = { id: 1, status: 'Closed', prize_pool: 1000, winner_ticket_id: null, winner_confirmed: false };
+  const NEXT_WINNER = {
+    ticket_id: 99, code: 'EXT99999', activated_by_user_id: 12,
+    receipt_identifier: 'R-9', transaction_amount: 15, transaction_date: '2026-07-20',
+    receipt_image_url: null, entry_source: 'receipt', image_validation_status: 'passed',
+    full_name: 'Next Candidate', email: 'next@test.com', risk_score: 2,
+    business_name: 'Cafe', location_name: 'Main St',
+    queue_position: 6, queue_total: 7,
+  };
+
+  test('appends the next batch (audited with pool size) and promotes its top entry', async () => {
+    setupClientQueries(
+      { rows: [] },                             // BEGIN
+      { rows: [EXHAUSTED_DRAW] },               // draw FOR UPDATE
+      { rows: [] },                             // SET LOCAL
+      { rows: [{ exists: 1 }] },                // order-exists probe: found
+      { rows: [] },                             // exhaustion guard pick: empty (truly exhausted)
+      { rows: [{ eligible: 50, stored: 2 }] },  // one-statement draw+append+counts
+      { rows: [] },                             // audit: winner_order_extended
+      { rows: [NEXT_WINNER] },                  // pick SELECT (top of new batch)
+      { rows: [] },                             // UPDATE draw winner
+      { rows: [] },                             // audit: winner_picked
+      { rows: [] },                             // COMMIT
+    );
+
+    const result = await extendDrawWinnerOrderService(1, 1);
+    expect(result.queuePosition).toBe(6);
+    expect(result.queueTotal).toBe(7);
+
+    const calls = mockClientQuery.mock.calls.map(([sql]: [string]) => sql).filter((s: unknown) => typeof s === 'string');
+    const extSql = calls.find((s: string) => s.includes('INSERT INTO draw_winner_order'));
+    expect(extSql).toBeDefined();
+    // Append-only: excludes tickets already in the order and continues after the max position.
+    expect(extSql).toMatch(/NOT EXISTS[\s\S]*draw_winner_order/);
+    expect(extSql).toMatch(/MAX\(position\)/);
+    // Single-evaluation guarantee, same as generation.
+    expect(extSql).toMatch(/WITH ranked AS MATERIALIZED/);
+    const auditExt = mockClientQuery.mock.calls.find(
+      ([sql, params]: [string, unknown[]]) => typeof sql === 'string' && sql.includes('draw_audit_log') && Array.isArray(params) && params.includes('winner_order_extended'),
+    );
+    expect(auditExt).toBeDefined();
+    expect(auditExt![1][3]).toContain('"entry_count":2');
+    expect(auditExt![1][3]).toContain('"eligible_count":50');
+    expect(auditExt![1][3]).toContain('"method":"uniform_random_continuation_remaining_entries"');
+  });
+
+  test('refuses to extend while the current list still has an eligible entry', async () => {
+    setupClientQueries(
+      { rows: [] },                                              // BEGIN
+      { rows: [{ ...EXHAUSTED_DRAW, winner_ticket_id: 8 }] },    // draw FOR UPDATE (candidate present)
+      { rows: [] },                                              // SET LOCAL
+      { rows: [{ exists: 1 }] },                                 // order-exists probe: found
+      { rows: [NEXT_WINNER] },                                   // exhaustion guard pick: still eligible
+    );
+    await expect(extendDrawWinnerOrderService(1, 1)).rejects.toThrow('still has an eligible entry');
+    const extendedSql = mockClientQuery.mock.calls.some(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO draw_winner_order'),
+    );
+    expect(extendedSql).toBe(false);
+  });
+
+  test('throws when no eligible entries remain to draw', async () => {
+    setupClientQueries(
+      { rows: [] },                             // BEGIN
+      { rows: [EXHAUSTED_DRAW] },               // draw FOR UPDATE
+      { rows: [] },                             // SET LOCAL
+      { rows: [{ exists: 1 }] },                // order-exists probe: found
+      { rows: [] },                             // exhaustion guard pick: empty
+      { rows: [{ eligible: 0, stored: 0 }] },   // one-statement draw: nothing left
+    );
+    await expect(extendDrawWinnerOrderService(1, 1)).rejects.toThrow('No eligible entries remain');
+  });
+
+  test('throws when no list has been drawn yet', async () => {
+    setupClientQueries(
+      { rows: [] },                // BEGIN
+      { rows: [EXHAUSTED_DRAW] },  // draw FOR UPDATE
+      { rows: [] },                // SET LOCAL
+      { rows: [] },                // order-exists probe: no list
+    );
+    await expect(extendDrawWinnerOrderService(1, 1)).rejects.toThrow('No list has been drawn');
+  });
+});
+
+// ─────────────────────────────────────────────
+// pickDrawWinnerService — walk semantics
+// ─────────────────────────────────────────────
+describe('pickDrawWinnerService — walk semantics', () => {
+  const CLOSED_DRAW = { id: 1, status: 'Closed', prize_pool: 1000, winner_user_id: null, winner_ticket_id: null, winner_confirmed: false };
+  const WINNER_ROW = {
+    ticket_id: 9, code: 'WIN123', activated_by_user_id: 5,
+    receipt_identifier: 'R-1', transaction_amount: 25, transaction_date: '2026-07-10',
+    receipt_image_url: null, entry_source: 'receipt', image_validation_status: 'passed',
+    full_name: 'Jane Doe', email: 'jane@test.com', risk_score: 3,
+    business_name: 'Cafe', location_name: 'Main St',
+    queue_position: 1, queue_total: 3,
+  };
+
+  test('when the order already exists it is NEVER regenerated', async () => {
+    setupClientQueries(
+      { rows: [] },                                        // BEGIN
+      { rows: [CLOSED_DRAW] },                             // draw FOR UPDATE
+      { rows: [] },                                        // SET LOCAL
+      { rows: [{ exists: 1 }] },                           // order-exists probe: found
+      { rows: [{ ...WINNER_ROW, queue_position: 2 }] },    // pick SELECT (next eligible in order)
+      { rows: [] },                                        // UPDATE draw winner
+      { rows: [] },                                        // audit: winner_picked
+      { rows: [] },                                        // COMMIT
+    );
+
+    const result = await pickDrawWinnerService(1, false, undefined, 1) as { queuePosition: number };
+    expect(result.queuePosition).toBe(2);
+
+    const regen = mockClientQuery.mock.calls.some(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO draw_winner_order'),
+    );
+    expect(regen).toBe(false);
+  });
+
+  test('rejecting the current candidate requires a reason and advances within the SAME order', async () => {
+    const withCandidate = { ...CLOSED_DRAW, winner_user_id: 7, winner_ticket_id: 8 };
+    setupClientQueries(
+      { rows: [] },                                        // BEGIN
+      { rows: [withCandidate] },                           // draw FOR UPDATE
+      { rows: [] },                                        // UPDATE draw clear winner
+      { rows: [] },                                        // UPDATE ticket quarantine
+      { rows: [] },                                        // INSERT draw_rejected_winner
+      { rows: [] },                                        // audit: winner_rejected
+      { rows: [] },                                        // SET LOCAL
+      { rows: [{ exists: 1 }] },                           // order-exists probe: found
+      { rows: [{ ...WINNER_ROW, queue_position: 2 }] },    // pick SELECT (next in order)
+      { rows: [] },                                        // UPDATE draw winner
+      { rows: [] },                                        // audit: winner_picked
+      { rows: [] },                                        // COMMIT
+    );
+
+    const result = await pickDrawWinnerService(1, false, 'ineligible receipt', 1) as { queuePosition: number };
+    expect(result.queuePosition).toBe(2);
+
+    const rejected = mockClientQuery.mock.calls.some(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO draw_rejected_winner'),
+    );
+    expect(rejected).toBe(true);
+    const regen = mockClientQuery.mock.calls.some(
+      ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO draw_winner_order'),
+    );
+    expect(regen).toBe(false);
+  });
+
+  test('rejecting without a reason throws before touching the order', async () => {
+    const withCandidate = { ...CLOSED_DRAW, winner_user_id: 7, winner_ticket_id: 8 };
+    setupClientQueries(
+      { rows: [] },              // BEGIN
+      { rows: [withCandidate] }, // draw FOR UPDATE
+      { rows: [] },
+    );
+    await expect(pickDrawWinnerService(1, false, undefined, 1)).rejects.toThrow('A reason is required');
+  });
+});
+
+// ─────────────────────────────────────────────
+// getDrawWinnerOrderService — locked rows reveal nothing
+// ─────────────────────────────────────────────
+describe('getDrawWinnerOrderService — order board masking', () => {
+  test('resolved rows carry identity; locked rows expose ONLY their position', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ winner_ticket_id: 22, winner_confirmed: false }] })  // draw
+      .mockResolvedValueOnce({ rows: [{ total: 40 }] })                                       // count
+      .mockResolvedValueOnce({ rows: [                                                        // bounded order rows
+        { position: 1, ticket_id: 11, code: 'AAA11111', entry_source: 'receipt', full_name: 'Rejected Guy', email: 'rej@test.com', risk_score: 5, rejected_reason: 'fake receipt', rejected_at: '2026-08-01T00:00:00Z' },
+        { position: 2, ticket_id: 22, code: 'BBB22222', entry_source: 'free', full_name: 'Jane Doe', email: 'jane@test.com', risk_score: 1, rejected_reason: null, rejected_at: null },
+        { position: 3, ticket_id: 33, code: 'CCC33333', entry_source: 'receipt', full_name: 'Hidden Person', email: 'hidden@test.com', risk_score: 0, rejected_reason: null, rejected_at: null },
+      ] });
+
+    const res = await getDrawWinnerOrderService(1);
+    expect(res.total).toBe(40);
+    expect(res.winnerConfirmed).toBe(false);
+    expect(res.entries[0]).toMatchObject({ position: 1, status: 'rejected', userName: 'Rejected Guy', rejectedReason: 'fake receipt' });
+    expect(res.entries[1]).toMatchObject({ position: 2, status: 'current', ticketCode: 'BBB22222' });
+    // Locked rows carry code + source but must NEVER leak identity ahead of validation.
+    expect(res.entries[2]).toEqual({ position: 3, status: 'locked', ticketCode: 'CCC33333', entrySource: 'receipt' });
+    // 40 total, current at position 2 -> 38 locked; 1 included in the window -> 37 remain.
+    expect(res.lockedRemaining).toBe(37);
+  });
+
+  test('board shows locked rows past an auto-valid entry (min-prefix design, no display cutoff)', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ winner_ticket_id: 11, winner_confirmed: false }] })
+      .mockResolvedValueOnce({ rows: [{ total: 40 }] })
+      .mockResolvedValueOnce({ rows: [
+        { position: 1, ticket_id: 11, code: 'AAA11111', entry_source: 'receipt', full_name: 'Jane Doe', email: 'jane@test.com', risk_score: 1, rejected_reason: null, rejected_at: null },
+        { position: 2, ticket_id: 22, code: 'BBB22222', entry_source: 'receipt', full_name: 'B', email: 'b@test.com', risk_score: 0, rejected_reason: null, rejected_at: null },
+        { position: 3, ticket_id: 33, code: 'CCC33333', entry_source: 'free', full_name: 'C', email: 'c@test.com', risk_score: 0, rejected_reason: null, rejected_at: null },
+        { position: 4, ticket_id: 44, code: 'DDD44444', entry_source: 'receipt', full_name: 'D', email: 'd@test.com', risk_score: 0, rejected_reason: null, rejected_at: null },
+      ] });
+
+    const res = await getDrawWinnerOrderService(1);
+    // The stored prefix carries at least 70 positions regardless of auto-valid entries, so
+    // the board lists everything stored - including rows past the weekly entry at position 3.
+    expect(res.entries.map(e => e.position)).toEqual([1, 2, 3, 4]);
+    // Locked rows still carry code + source only, auto-valid or not.
+    expect(res.entries[2]).toEqual({ position: 3, status: 'locked', ticketCode: 'CCC33333', entrySource: 'free' });
+    expect(res.entries[3]).toEqual({ position: 4, status: 'locked', ticketCode: 'DDD44444', entrySource: 'receipt' });
+    // 39 locked total (current at 1), 3 included -> 36 beyond the window.
+    expect(res.lockedRemaining).toBe(36);
+  });
+
+  test('confirmed winner reports status confirmed', async () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [{ winner_ticket_id: 22, winner_confirmed: true }] })
+      .mockResolvedValueOnce({ rows: [{ total: 2 }] })
+      .mockResolvedValueOnce({ rows: [
+        { position: 1, ticket_id: 11, code: 'AAA11111', entry_source: 'receipt', full_name: 'Rejected Guy', email: 'rej@test.com', risk_score: 5, rejected_reason: 'fake', rejected_at: '2026-08-01T00:00:00Z' },
+        { position: 2, ticket_id: 22, code: 'BBB22222', entry_source: 'free', full_name: 'Jane Doe', email: 'jane@test.com', risk_score: 1, rejected_reason: null, rejected_at: null },
+      ] });
+
+    const res = await getDrawWinnerOrderService(1);
+    expect(res.entries[1]).toMatchObject({ position: 2, status: 'confirmed' });
+    expect(res.lockedRemaining).toBe(0);
   });
 });
 

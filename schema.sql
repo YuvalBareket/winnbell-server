@@ -782,7 +782,10 @@ CREATE INDEX IF NOT EXISTS idx_draw_audit_log_draw ON draw_audit_log (draw_id, c
 CREATE TABLE IF NOT EXISTS draw_rejected_winner (
   id              SERIAL PRIMARY KEY,
   draw_id         INTEGER NOT NULL REFERENCES draw(id) ON DELETE CASCADE,
-  ticket_id       BIGINT NOT NULL REFERENCES ticket(id) ON DELETE CASCADE,
+  -- RESTRICT (legal retention): a disqualification record must be indestructible - deleting
+  -- a ticket that carries one is refused by the DB itself. Nothing in production deletes
+  -- tickets; the staging-only demo reset clears its own references first.
+  ticket_id       BIGINT NOT NULL REFERENCES ticket(id) ON DELETE RESTRICT,
   -- Nullable: the audit row must survive even if the user account is hard-deleted (SET NULL).
   user_id         INTEGER NULL REFERENCES "user"(id) ON DELETE SET NULL,
   -- Which admin performed the rejection (NULL only if that admin account is later deleted).
@@ -796,6 +799,29 @@ CREATE TABLE IF NOT EXISTS draw_rejected_winner (
   UNIQUE (draw_id, ticket_id)
 );
 CREATE INDEX IF NOT EXISTS idx_draw_rejected_draw ON draw_rejected_winner (draw_id, rejected_at DESC);
+
+-- ── draw_winner_order ───────────────────────────────────────────────────────
+-- Frozen selection order for a closed draw. At the first winner pick, every eligible
+-- ticket is ranked in one uniform random shuffle (row_number over ORDER BY random()),
+-- but only a bounded prefix is stored: at least WINNER_ORDER_MIN (70) positions, then
+-- up to the first auto-valid entry (weekly/promo/referral - nothing to verify), capped
+-- at WINNER_ORDER_BATCH (200); constants in admin.service.ts. Every pick walks the list
+-- top-down and takes the first entry still eligible and not rejected. Stored positions
+-- are never reshuffled; if the prefix is ever exhausted the next pick APPENDS a new
+-- randomly drawn batch (lazy continuation of the same fair shuffle - statistically
+-- identical to materializing the full permutation). Reopening a draw deletes its rows
+-- (new entries invalidate the frozen membership). Generation, extension, and clearing
+-- are all recorded in draw_audit_log (generation also logs the full eligible pool size).
+CREATE TABLE IF NOT EXISTS draw_winner_order (
+  draw_id    INTEGER NOT NULL REFERENCES draw(id) ON DELETE CASCADE,
+  -- RESTRICT (legal retention): the drawn ranking is evidence - deleting a ticket that holds
+  -- a position is refused by the DB itself (see draw_rejected_winner for the rationale).
+  ticket_id  BIGINT NOT NULL REFERENCES ticket(id) ON DELETE RESTRICT,
+  position   INTEGER NOT NULL,
+  created_at TIMESTAMP NOT NULL DEFAULT NOW(),
+  PRIMARY KEY (draw_id, position),
+  UNIQUE (draw_id, ticket_id)
+);
 
 -- ── user_acquisition (how each user arrived — 1:1 with "user", written once at signup) ────────
 -- Single home for acquisition attribution + the referral reward state (the referral bonus grant

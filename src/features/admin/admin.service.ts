@@ -7,6 +7,101 @@ import { sendFoundingFinalCampaignEmail } from '../../shared/email/email.service
 import { snapshotOfficialRulesForDraw } from '../../shared/legal/officialRulesSnapshot.js';
 import { decayAllUserRiskScores } from '../risk/risk.service.js';
 
+// Entry sources that need no receipt verification. Winner validation is expected to end at
+// the first one it reaches, so the stored selection order stops at the first auto-valid
+// entry - but never before WINNER_ORDER_MIN positions are stored.
+export const AUTO_VALID_SOURCES = ['free', 'promo', 'referral'];
+// How many positions each generation/extension of the selection order draws at most. The
+// stored order is a bounded prefix of a full fair shuffle: batches are drawn lazily
+// (uniformly, without replacement) instead of materializing a row per entry, which is
+// statistically identical to ranking the whole pool and matches the Official Rules
+// alternate-selection clause (alternates drawn at random from the remaining entries).
+const WINNER_ORDER_BATCH = 200;
+// Floor: every draw stores at least this many positions (when the pool has that many),
+// regardless of auto-valid entries landing earlier in the order.
+const WINNER_ORDER_MIN = 70;
+
+// Selects the current top of the drawn list: the lowest stored position whose ticket is
+// still eligible and not rejected. Shared by pickDrawWinnerService and the admin-approved
+// list extension (extendDrawWinnerOrderService).
+const WINNER_PICK_SQL = `
+  SELECT
+    t.id AS ticket_id,
+    t.code,
+    t.activated_by_user_id,
+    t.receipt_identifier,
+    t.transaction_amount,
+    t.transaction_date,
+    t.receipt_image_url,
+    t.entry_source,
+    t.image_validation_status,
+    u.full_name,
+    u.email,
+    u.risk_score,
+    b.name AS business_name,
+    bl.name AS location_name,
+    dwo.position AS queue_position,
+    (SELECT COUNT(*)::int FROM draw_winner_order o WHERE o.draw_id = $1) AS queue_total
+  FROM draw_winner_order dwo
+  JOIN ticket t ON t.id = dwo.ticket_id
+  JOIN "user" u ON t.activated_by_user_id = u.id AND u.risk_score < 20 AND u.is_active = TRUE
+  LEFT JOIN business b ON t.business_id = b.id
+  LEFT JOIN business_location bl ON t.location_id = bl.id
+  WHERE dwo.draw_id = $1
+    AND t.status = 'Activated'
+    AND t.is_quarantined = FALSE
+    AND NOT EXISTS (
+      SELECT 1 FROM draw_rejected_winner drw
+      WHERE drw.draw_id = dwo.draw_id AND drw.ticket_id = t.id
+    )
+  ORDER BY dwo.position
+  LIMIT 1
+`;
+
+export type PickedWinner = {
+  winnerId: number;
+  winnerName: string;
+  winnerEmail: string;
+  ticketCode: string;
+  businessName: string | null;
+  locationName: string | null;
+  prizePool: number;
+  receiptIdentifier: string | null;
+  transactionAmount: number | null;
+  transactionDate: string | null;
+  receiptImageUrl: string | null;
+  entrySource: string | null;
+  imageValidationStatus: string | null;
+  riskScore: number;
+  queuePosition: number;
+  queueTotal: number;
+};
+
+// Returned when the stored list has no eligible entry left. The rejection that led here (if
+// any) is COMMITTED - never rolled back - and the admin must explicitly draw the next batch
+// via extendDrawWinnerOrderService before a new candidate can exist.
+export type PickExhausted = { exhausted: true; queueTotal: number };
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const mapPickedWinnerRow = (winner: any, prizePool: number): PickedWinner => ({
+  winnerId: winner.activated_by_user_id,
+  winnerName: winner.full_name,
+  winnerEmail: winner.email,
+  ticketCode: winner.code,
+  businessName: winner.business_name,
+  locationName: winner.location_name,
+  prizePool,
+  receiptIdentifier: winner.receipt_identifier ?? null,
+  transactionAmount: winner.transaction_amount ? parseFloat(winner.transaction_amount) : null,
+  transactionDate: winner.transaction_date ?? null,
+  receiptImageUrl: winner.receipt_image_url ?? null,
+  entrySource: winner.entry_source ?? null,
+  imageValidationStatus: winner.image_validation_status ?? null,
+  riskScore: winner.risk_score ?? 0,
+  queuePosition: winner.queue_position,
+  queueTotal: winner.queue_total,
+});
+
 const logDrawAudit = async (
   client: import('pg').PoolClient,
   drawId: number,
@@ -942,6 +1037,15 @@ export const reopenDrawService = async (drawId: number, actorUserId: number | nu
       await logDrawAudit(client, row.id, 'reverted_to_upcoming', actorUserId, { reason: 'reopen_swap', reopened_draw_id: drawId });
     }
 
+    // A reopened draw accepts new entries again, which invalidates the frozen selection
+    // order snapshotted at the first pick. Wipe it so the next close+pick generates a fresh
+    // permutation, and audit-log the wipe so the trail shows the order was cleared here,
+    // never silently reshuffled.
+    const clearedOrder = await client.query(`DELETE FROM draw_winner_order WHERE draw_id = $1`, [drawId]);
+    if ((clearedOrder.rowCount ?? 0) > 0) {
+      await logDrawAudit(client, drawId, 'winner_order_cleared', actorUserId, { entry_count: clearedOrder.rowCount });
+    }
+
     await client.query(
       `UPDATE draw
        SET status = 'Open',
@@ -965,22 +1069,7 @@ export const reopenDrawService = async (drawId: number, actorUserId: number | nu
   }
 };
 
-export const pickDrawWinnerService = async (drawId: number, applyPenalty: boolean, reason: string | undefined, actorUserId: number | null): Promise<{
-  winnerId: number;
-  winnerName: string;
-  winnerEmail: string;
-  ticketCode: string;
-  businessName: string | null;
-  locationName: string | null;
-  prizePool: number;
-  receiptIdentifier: string | null;
-  transactionAmount: number | null;
-  transactionDate: string | null;
-  receiptImageUrl: string | null;
-  entrySource: string | null;
-  imageValidationStatus: string | null;
-  riskScore: number;
-}> => {
+export const pickDrawWinnerService = async (drawId: number, applyPenalty: boolean, reason: string | undefined, actorUserId: number | null): Promise<PickedWinner | PickExhausted> => {
   const pool = getPool();
   const client = await pool.connect();
   try {
@@ -1031,45 +1120,96 @@ export const pickDrawWinnerService = async (drawId: number, applyPenalty: boolea
       await logDrawAudit(client, drawId, 'winner_rejected', actorUserId, { ticket_id: prevTicketId, user_id: prevUserId, penalty, reason: disqualifyReason });
     }
 
-    // Winner selection scans this draw's eligible tickets once (ORDER BY random() LIMIT 1 is a
-    // single O(n) pass keeping the lowest random value, not a full sort). At a very large draw
-    // this can exceed the pool's default 10s statement_timeout, so raise it for THIS transaction
-    // only (SET LOCAL reverts at COMMIT/ROLLBACK). This is a once-a-month admin operation and a
-    // plain SELECT does not block normal user traffic, so a slower run is acceptable.
+    // The selection order is FROZEN per closed draw: the first pick snapshots every ticket
+    // eligible at that moment into draw_winner_order as one random permutation, and every
+    // pick (including this one) takes the topmost entry of that list that is still eligible
+    // and not rejected. The list is never reshuffled, so rejecting a candidate can only
+    // advance to the next pre-drawn entry, never re-roll the draw. Generating the permutation
+    // is a full sort of the eligible set; at a very large draw this can exceed the pool's
+    // default 10s statement_timeout, so raise it for THIS transaction only (SET LOCAL reverts
+    // at COMMIT/ROLLBACK). This is a once-a-month admin operation and does not block normal
+    // user traffic, so a slower run is acceptable.
     await client.query(`SET LOCAL statement_timeout = '60s'`);
 
-    const ticketResult = await client.query(`
-      SELECT
-        t.id AS ticket_id,
-        t.code,
-        t.activated_by_user_id,
-        t.receipt_identifier,
-        t.transaction_amount,
-        t.transaction_date,
-        t.receipt_image_url,
-        t.entry_source,
-        t.image_validation_status,
-        u.full_name,
-        u.email,
-        u.risk_score,
-        b.name AS business_name,
-        bl.name AS location_name
-      FROM ticket t
-      JOIN "user" u ON t.activated_by_user_id = u.id AND u.risk_score < 20 AND u.is_active = TRUE
-      LEFT JOIN business b ON t.business_id = b.id
-      LEFT JOIN business_location bl ON t.location_id = bl.id
-      WHERE t.draw_id = $1
-        AND t.status = 'Activated'
-        AND t.is_quarantined = FALSE
-        AND NOT EXISTS (
-          SELECT 1 FROM draw_rejected_winner drw
-          WHERE drw.draw_id = t.draw_id AND drw.ticket_id = t.id
+    // The draw row is locked FOR UPDATE above, so concurrent picks cannot both generate.
+    // Generation ranks EVERY eligible ticket with one uniform shuffle, but stores only the
+    // reachable prefix: positions up to the first auto-valid entry (validation can never
+    // walk past it), capped at WINNER_ORDER_BATCH. The audit row records both the stored
+    // count and the size of the full pool the ranking was drawn from.
+    const orderExists = await client.query(
+      `SELECT 1 FROM draw_winner_order WHERE draw_id = $1 LIMIT 1`,
+      [drawId],
+    );
+    if (orderExists.rows.length === 0) {
+      // ONE statement performs the shuffle, stores the prefix, and reports both counts, so
+      // the audited eligible_count is derived from the exact snapshot that was shuffled -
+      // it can never disagree with the stored ranking (a separate COUNT could drift if a
+      // background quarantine landed between the two statements).
+      const generated = await client.query(`
+        -- MATERIALIZED: ranked is referenced multiple times (cutoff + insert + count) and
+        -- MUST be evaluated exactly once - a re-evaluation would produce a second, different
+        -- shuffle and apply one permutation's cutoff to another. PostgreSQL already
+        -- guarantees this for a multi-referenced CTE containing a volatile function, but the
+        -- fairness of the draw must not hinge on an optimizer rule, so it is stated explicitly.
+        WITH ranked AS MATERIALIZED (
+          SELECT t.id AS ticket_id, t.entry_source,
+                 row_number() OVER (ORDER BY random()) AS position
+          FROM ticket t
+          JOIN "user" u ON t.activated_by_user_id = u.id AND u.risk_score < 20 AND u.is_active = TRUE
+          WHERE t.draw_id = $1
+            AND t.status = 'Activated'
+            AND t.is_quarantined = FALSE
+            AND NOT EXISTS (
+              SELECT 1 FROM draw_rejected_winner drw
+              WHERE drw.draw_id = t.draw_id AND drw.ticket_id = t.id
+            )
+        ),
+        cutoff AS (
+          SELECT LEAST(
+            GREATEST(COALESCE((SELECT MIN(position) FROM ranked WHERE entry_source::text = ANY($2)), $3), $4),
+            $3
+          ) AS cut
+        ),
+        ins AS (
+          INSERT INTO draw_winner_order (draw_id, ticket_id, position)
+          SELECT $1, ticket_id, position FROM ranked WHERE position <= (SELECT cut FROM cutoff)
+          RETURNING 1
         )
-      ORDER BY random()
-      LIMIT 1
-    `, [drawId]);
+        SELECT
+          (SELECT COUNT(*)::int FROM ranked) AS eligible,
+          (SELECT COUNT(*)::int FROM ins) AS stored
+      `, [drawId, AUTO_VALID_SOURCES, WINNER_ORDER_BATCH, WINNER_ORDER_MIN]);
+      await logDrawAudit(client, drawId, 'winner_order_generated', actorUserId, {
+        entry_count: generated.rows[0].stored,
+        eligible_count: generated.rows[0].eligible,
+        method: 'uniform_random_full_shuffle_bounded_prefix',
+      });
+    }
 
-    if (ticketResult.rows.length === 0) throw new Error('No eligible tickets remaining in this draw');
+    const ticketResult = await client.query(WINNER_PICK_SQL, [drawId]);
+
+    if (ticketResult.rows.length === 0) {
+      // The stored list is exhausted: every drawn position is rejected or no longer eligible.
+      // COMMIT here so the rejection above (if any) is durably recorded - the admin's
+      // documented reason must never be lost to a rollback. The draw is left with NO
+      // candidate; drawing the next batch is a separate, explicitly admin-approved action
+      // (extendDrawWinnerOrderService), never automatic.
+      const totalRes = await client.query(
+        `SELECT COUNT(*)::int AS total FROM draw_winner_order WHERE draw_id = $1`,
+        [drawId],
+      );
+      await client.query('COMMIT');
+      invalidatePublicBusinessData();
+      if (applyPenalty && prevTicketId !== null && prevUserId !== null) {
+        try {
+          const { syncUserQuarantineState } = await import('../risk/risk.service.js');
+          await syncUserQuarantineState(prevUserId, drawId);
+        } catch (err) {
+          console.error('[pickDrawWinnerService] syncUserQuarantineState failed:', err);
+        }
+      }
+      return { exhausted: true, queueTotal: totalRes.rows[0].total };
+    }
 
     const winner = ticketResult.rows[0];
     const winnerId: number = winner.activated_by_user_id;
@@ -1094,22 +1234,115 @@ export const pickDrawWinnerService = async (drawId: number, applyPenalty: boolea
       }
     }
 
-    return {
-      winnerId,
-      winnerName: winner.full_name,
-      winnerEmail: winner.email,
-      ticketCode: winner.code,
-      businessName: winner.business_name,
-      locationName: winner.location_name,
-      prizePool,
-      receiptIdentifier: winner.receipt_identifier ?? null,
-      transactionAmount: winner.transaction_amount ? parseFloat(winner.transaction_amount) : null,
-      transactionDate: winner.transaction_date ?? null,
-      receiptImageUrl: winner.receipt_image_url ?? null,
-      entrySource: winner.entry_source ?? null,
-      imageValidationStatus: winner.image_validation_status ?? null,
-      riskScore: winner.risk_score ?? 0,
-    };
+    return mapPickedWinnerRow(winner, prizePool);
+  } catch (err) {
+    await safeRollback(client);
+    throw err;
+  } finally {
+    client.release();
+  }
+};
+
+// Admin-approved continuation of the drawing. Only callable once the stored list is truly
+// exhausted (every drawn position rejected or no longer eligible): appends the NEXT randomly
+// drawn batch after the current max position - same uniform shuffle and cutoff rules as
+// generation, existing rows never touched - and promotes the top of the new batch to
+// candidate. This is never triggered automatically; the button click IS the admin approval,
+// and both the extension (with pool size) and the pick are audit-logged.
+export const extendDrawWinnerOrderService = async (drawId: number, actorUserId: number | null): Promise<PickedWinner> => {
+  const pool = getPool();
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const check = await client.query(
+      `SELECT id, status, prize_pool, winner_ticket_id, winner_confirmed
+       FROM draw WHERE id = $1 FOR UPDATE`,
+      [drawId],
+    );
+    if (check.rows.length === 0) throw new Error('Draw not found');
+    if (check.rows[0].status.toUpperCase() !== 'CLOSED') throw new Error('Draw is not Closed');
+    if (check.rows[0].winner_confirmed === true) throw new Error('Winner has already been confirmed for this draw');
+    const prizePool: number = check.rows[0].prize_pool;
+
+    await client.query(`SET LOCAL statement_timeout = '60s'`);
+
+    const orderExists = await client.query(
+      `SELECT 1 FROM draw_winner_order WHERE draw_id = $1 LIMIT 1`,
+      [drawId],
+    );
+    if (orderExists.rows.length === 0) throw new Error('No list has been drawn for this draw yet. Use Pick Winner first.');
+
+    // Guard: the current list must be truly exhausted. If any stored position is still
+    // eligible (including the current candidate), extending would let an admin grow the pool
+    // of alternates while a decision is pending - refuse.
+    const stillEligible = await client.query(WINNER_PICK_SQL, [drawId]);
+    if (stillEligible.rows.length > 0) throw new Error('The current list still has an eligible entry to review.');
+
+    // ONE statement draws the batch, appends it, and reports both counts from the exact
+    // snapshot that was shuffled (mirrors generation - the audited remaining-pool size can
+    // never disagree with the drawn batch).
+    const extended = await client.query(`
+      -- MATERIALIZED: same single-evaluation guarantee as generation (cutoff + insert +
+      -- count must see the SAME shuffle); stated explicitly rather than relying on the
+      -- optimizer rule.
+      WITH ranked AS MATERIALIZED (
+        SELECT t.id AS ticket_id, t.entry_source,
+               row_number() OVER (ORDER BY random()) AS rn
+        FROM ticket t
+        JOIN "user" u ON t.activated_by_user_id = u.id AND u.risk_score < 20 AND u.is_active = TRUE
+        WHERE t.draw_id = $1
+          AND t.status = 'Activated'
+          AND t.is_quarantined = FALSE
+          AND NOT EXISTS (
+            SELECT 1 FROM draw_rejected_winner drw
+            WHERE drw.draw_id = t.draw_id AND drw.ticket_id = t.id
+          )
+          AND NOT EXISTS (
+            SELECT 1 FROM draw_winner_order dwo
+            WHERE dwo.draw_id = $1 AND dwo.ticket_id = t.id
+          )
+      ),
+      cutoff AS (
+        SELECT LEAST(
+          GREATEST(COALESCE((SELECT MIN(rn) FROM ranked WHERE entry_source::text = ANY($2)), $3), $4),
+          $3
+        ) AS cut
+      ),
+      offset_base AS (
+        SELECT COALESCE(MAX(position), 0) AS base FROM draw_winner_order WHERE draw_id = $1
+      ),
+      ins AS (
+        INSERT INTO draw_winner_order (draw_id, ticket_id, position)
+        SELECT $1, ticket_id, (SELECT base FROM offset_base) + rn
+        FROM ranked WHERE rn <= (SELECT cut FROM cutoff)
+        RETURNING 1
+      )
+      SELECT
+        (SELECT COUNT(*)::int FROM ranked) AS eligible,
+        (SELECT COUNT(*)::int FROM ins) AS stored
+    `, [drawId, AUTO_VALID_SOURCES, WINNER_ORDER_BATCH, WINNER_ORDER_MIN]);
+    if (extended.rows[0].stored === 0) throw new Error('No eligible entries remain in this draw');
+    await logDrawAudit(client, drawId, 'winner_order_extended', actorUserId, {
+      entry_count: extended.rows[0].stored,
+      eligible_count: extended.rows[0].eligible,
+      method: 'uniform_random_continuation_remaining_entries',
+    });
+
+    const ticketResult = await client.query(WINNER_PICK_SQL, [drawId]);
+    if (ticketResult.rows.length === 0) throw new Error('No eligible entries remain in this draw');
+
+    const winner = ticketResult.rows[0];
+    await client.query(
+      `UPDATE draw SET winner_user_id = $1, winner_ticket_id = $2 WHERE id = $3`,
+      [winner.activated_by_user_id, winner.ticket_id, drawId],
+    );
+    await logDrawAudit(client, drawId, 'winner_picked', actorUserId, { ticket_id: winner.ticket_id, user_id: winner.activated_by_user_id });
+
+    await client.query('COMMIT');
+    invalidatePublicBusinessData();
+
+    return mapPickedWinnerRow(winner, prizePool);
   } catch (err) {
     await safeRollback(client);
     throw err;
@@ -2264,6 +2497,8 @@ export const getDrawCandidateService = async (drawId: number) => {
       t.receipt_image_url, t.entry_source, t.image_validation_status,
       u.full_name, u.email, u.risk_score,
       b.name AS business_name, bl.name AS location_name,
+      dwo.position AS queue_position,
+      (SELECT COUNT(*)::int FROM draw_winner_order o WHERE o.draw_id = d.id) AS queue_total,
       conf.created_at AS confirmed_at, conf.actor_user_id AS confirmed_by_id,
       cu.full_name AS confirmed_by_name, cu.email AS confirmed_by_email
     FROM draw d
@@ -2271,6 +2506,7 @@ export const getDrawCandidateService = async (drawId: number) => {
     LEFT JOIN "user" u ON u.id = d.winner_user_id
     LEFT JOIN business b ON b.id = t.business_id
     LEFT JOIN business_location bl ON bl.id = t.location_id
+    LEFT JOIN draw_winner_order dwo ON dwo.draw_id = d.id AND dwo.ticket_id = d.winner_ticket_id
     -- Who confirmed the winner and when, from the append-only audit log (there is at most one
     -- 'winner_confirmed' row per draw). actor is NULL for confirmations recorded before actor
     -- tracking existed; created_at is always present.
@@ -2304,12 +2540,99 @@ export const getDrawCandidateService = async (drawId: number) => {
     entrySource: row.entry_source ?? null,
     imageValidationStatus: row.image_validation_status ?? null,
     riskScore: row.risk_score ?? 0,
+    // Where this candidate sits in the frozen selection order. Null for draws whose winner
+    // was picked before the order existed (legacy confirmed draws).
+    queuePosition: row.queue_position ?? null,
+    queueTotal: row.queue_position != null ? row.queue_total : null,
     // Confirmation trail (present once winnerConfirmed is true). confirmedByName is null for
     // winners confirmed before actor tracking existed; confirmedAt is always available.
     confirmedAt: row.confirmed_at ?? null,
     confirmedById: row.confirmed_by_id ?? null,
     confirmedByName: row.confirmed_by_name ?? null,
     confirmedByEmail: row.confirmed_by_email ?? null,
+  };
+};
+
+// How many locked rows the board response may carry at most.
+const LOCKED_WINDOW = 150;
+
+// The draw-order board for the review dialog: every stored position with its resolution
+// state. Locked rows (not yet reached by validation) reveal their ticket code and entry
+// source but NEVER identity (name/email/risk), so the admin cannot research an entrant
+// before their entry becomes the top candidate. The payload is bounded by the stored-prefix
+// size (WINNER_ORDER_MIN..WINNER_ORDER_BATCH rows) and the LOCKED_WINDOW display cap, with
+// lockedRemaining carrying the count of stored rows beyond the window.
+export const getDrawWinnerOrderService = async (drawId: number) => {
+  const pool = getPool();
+  const drawRes = await pool.query(
+    `SELECT winner_ticket_id, winner_confirmed FROM draw WHERE id = $1`,
+    [drawId],
+  );
+  if (drawRes.rows.length === 0) throw new Error('Draw not found');
+  const currentTicketId: number | null = drawRes.rows[0].winner_ticket_id;
+  const winnerConfirmed: boolean = drawRes.rows[0].winner_confirmed === true;
+
+  const totalRes = await pool.query(
+    `SELECT COUNT(*)::int AS total FROM draw_winner_order WHERE draw_id = $1`,
+    [drawId],
+  );
+  const total: number = totalRes.rows[0].total;
+
+  // Rejections only ever hit the current top candidate, so every rejected/skipped row sits
+  // at or before the current position; the OR clause is a safety net for odd legacy states.
+  const result = await pool.query(`
+    SELECT dwo.position, dwo.ticket_id,
+      t.code, t.entry_source,
+      u.full_name, u.email, u.risk_score,
+      drw.reason AS rejected_reason, drw.rejected_at
+    FROM draw_winner_order dwo
+    JOIN ticket t ON t.id = dwo.ticket_id
+    LEFT JOIN "user" u ON u.id = t.activated_by_user_id
+    LEFT JOIN draw_rejected_winner drw ON drw.draw_id = dwo.draw_id AND drw.ticket_id = dwo.ticket_id
+    WHERE dwo.draw_id = $1
+      AND (
+        dwo.position <= COALESCE((SELECT dwo2.position FROM draw_winner_order dwo2 WHERE dwo2.draw_id = $1 AND dwo2.ticket_id = $2), 0) + $3
+        OR drw.id IS NOT NULL
+      )
+    ORDER BY dwo.position
+  `, [drawId, currentTicketId, LOCKED_WINDOW]);
+
+  const currentRow = currentTicketId != null
+    ? result.rows.find(r => Number(r.ticket_id) === Number(currentTicketId))
+    : undefined;
+  const currentPos: number | null = currentRow ? currentRow.position : null;
+
+  const entries = result.rows.map(r => {
+    const isRejected = r.rejected_at != null;
+    let status: 'rejected' | 'current' | 'confirmed' | 'skipped' | 'locked';
+    if (isRejected) status = 'rejected';
+    else if (currentPos != null && r.position === currentPos) status = winnerConfirmed ? 'confirmed' : 'current';
+    else if (currentPos != null && r.position < currentPos) status = 'skipped';
+    else status = 'locked';
+
+    if (status === 'locked') {
+      return { position: r.position, status, ticketCode: r.code, entrySource: r.entry_source };
+    }
+    return {
+      position: r.position,
+      status,
+      ticketCode: r.code,
+      userName: r.full_name,
+      userEmail: r.email,
+      entrySource: r.entry_source,
+      riskScore: r.risk_score ?? 0,
+      rejectedReason: r.rejected_reason ?? null,
+      rejectedAt: r.rejected_at ?? null,
+    };
+  });
+
+  const includedLocked = entries.filter(e => e.status === 'locked').length;
+  const lockedTotal = currentPos != null ? total - currentPos : total;
+  return {
+    total,
+    winnerConfirmed,
+    entries,
+    lockedRemaining: Math.max(0, lockedTotal - includedLocked),
   };
 };
 
@@ -2366,7 +2689,10 @@ export const getDrawAuditLogService = async (drawId: number) => {
      FROM draw_audit_log dal
      LEFT JOIN "user" au ON au.id = dal.actor_user_id
      WHERE dal.draw_id = $1
-     ORDER BY dal.created_at DESC LIMIT 200`,
+     -- 2000 is a runaway backstop, not pagination: a draw's full trail must always fit in
+     -- one response (a real draw produces a few dozen events at most), so the on-screen log
+     -- is never a truncated version of the legal record.
+     ORDER BY dal.created_at DESC LIMIT 2000`,
     [drawId],
   );
   return result.rows;
