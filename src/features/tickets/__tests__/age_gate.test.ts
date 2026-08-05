@@ -38,7 +38,9 @@ jest.mock('../../ocr/ocr.service.js', () => ({
 }));
 
 import { submitReceiptEntryService } from '../tickets.service';
-import { isAtLeast21, AGE_RESTRICTED_SECTOR } from '../../../shared/ageRestriction';
+import { isAtLeast21, AGE_RESTRICTED_SECTORS } from '../../../shared/ageRestriction';
+
+const AGE_RESTRICTED_SECTOR = AGE_RESTRICTED_SECTORS[0]; // 'Liquor' — representative restricted sector
 
 const BASE_INPUT = {
   locationId: 10,
@@ -121,6 +123,20 @@ describe('21+ gate at age-restricted (Liquor) businesses', () => {
 
   test('allows a 25-year-old at a Liquor-sector business', async () => {
     setupClientQueries(...buildClientResponses({ sector: AGE_RESTRICTED_SECTOR, dateOfBirth: dobYearsAgo(25) }));
+
+    const result = await submitReceiptEntryService(1, BASE_INPUT);
+    expect(result.tickets).toHaveLength(1);
+  });
+
+  test('blocks a 19-year-old at a Pub-sector business (Pub is age-restricted like Liquor)', async () => {
+    setupClientQueries(...buildClientResponses({ sector: 'Pub', dateOfBirth: dobYearsAgo(19) }));
+
+    await expect(submitReceiptEntryService(1, BASE_INPUT))
+      .rejects.toThrow('aged 21 and older');
+  });
+
+  test('allows a 25-year-old at a Pub-sector business', async () => {
+    setupClientQueries(...buildClientResponses({ sector: 'Pub', dateOfBirth: dobYearsAgo(25) }));
 
     const result = await submitReceiptEntryService(1, BASE_INPUT);
     expect(result.tickets).toHaveLength(1);

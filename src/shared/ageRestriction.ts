@@ -1,8 +1,13 @@
-// Single source of truth for the tobacco/liquor 21+ entry restriction (lawyer-mandated).
-// The client mirrors AGE_RESTRICTED_SECTOR in client/src/shared/constants/entries.ts.
+// Single source of truth for the 21+ entry restriction (lawyer-mandated). Applies to
+// alcohol/tobacco venues: liquor/tobacco shops and pubs.
+// The client mirrors AGE_RESTRICTED_SECTORS in client/src/shared/constants/entries.ts.
 
-/** Business sector whose entries are restricted to participants aged 21+ (tobacco & liquor). */
-export const AGE_RESTRICTED_SECTOR = 'Liquor';
+/** Business sectors whose entries are restricted to participants aged 21+. */
+export const AGE_RESTRICTED_SECTORS = ['Liquor', 'Pub'] as const;
+
+/** True when a business sector requires the 21+ gate. */
+export const isAgeRestrictedSector = (sector: string | null | undefined): boolean =>
+  !!sector && (AGE_RESTRICTED_SECTORS as readonly string[]).includes(sector);
 
 /** Minimum age required to earn entries at an age-restricted business. */
 export const AGE_RESTRICTED_MIN_AGE = 21;

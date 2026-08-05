@@ -1,7 +1,7 @@
 import { getPool, PoolClient } from '../../shared/db/db.js';
 import { safeRollback } from '../../shared/db/txn.js';
 import { OPEN_DRAW_ID_SUBQUERY, getOpenDrawId } from '../../shared/db/queries.js';
-import { AGE_RESTRICTED_SECTOR, isAtLeast21 } from '../../shared/ageRestriction.js';
+import { isAgeRestrictedSector, isAtLeast21 } from '../../shared/ageRestriction.js';
 import crypto from 'crypto';
 import { invalidatePublicLocation } from '../../shared/cache/cache.js';
 import {
@@ -426,9 +426,9 @@ export const submitReceiptEntryService = async (
     if (pf.has_conflict) {
       throw new Error('Business owners and managers cannot submit entries for their own business.');
     }
-    // Age gate (lawyer-mandated): entries at tobacco/liquor-sector businesses require 21+.
-    // requireProfileComplete guarantees date_of_birth is set before this service runs.
-    if (pf.business_sector === AGE_RESTRICTED_SECTOR && !isAtLeast21(pf.date_of_birth)) {
+    // Age gate (lawyer-mandated): entries at alcohol/tobacco-sector businesses (liquor, pub)
+    // require 21+. requireProfileComplete guarantees date_of_birth is set before this runs.
+    if (isAgeRestrictedSector(pf.business_sector) && !isAtLeast21(pf.date_of_birth)) {
       throw new Error('Entries at this business are limited to participants aged 21 and older.');
     }
     if (!pf.draw_id) {
