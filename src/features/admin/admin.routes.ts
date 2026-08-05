@@ -58,6 +58,7 @@ router.get('/draws/:drawId/rejected-winners', adminController.getDrawRejectedWin
 router.get('/draws/:drawId/winner-order', adminController.getDrawWinnerOrder);
 router.get('/draws/:drawId/audit-log', adminController.getDrawAuditLog);
 router.get('/draws/:drawId/rules-pdf', adminController.downloadDrawRulesPdf);
+router.get('/locations-map', adminController.getAdminMapLocations);
 router.get('/settings', adminController.getPlatformSettings);
 router.patch('/settings', adminController.updatePlatformSettings);
 

@@ -1481,7 +1481,20 @@ export const getAdminOverviewService = async () => {
   const pool = getPool();
 
   const [usersRes, bizRes, subRes, drawRes, ticketRes, flaggedRes] = await Promise.all([
-    pool.query(`SELECT COUNT(*) AS total_users, SUM(CASE WHEN role='Business' THEN 1 ELSE 0 END) AS business_users, SUM(CASE WHEN role='User' THEN 1 ELSE 0 END) AS regular_users FROM "user" WHERE role != 'Admin'`),
+    // total_users = CONSUMERS ONLY (role 'User') - the headline metric, consistent with the
+    // Growth dashboard and investor metrics. Business/manager accounts are staff/owner
+    // plumbing and are broken out separately so the caption always adds up.
+    // MANAGER MODELING: location managers are role='Business' accounts that own NO business
+    // row (linked via business_location.manager_user_id; the 'Manager' enum value is unused
+    // by the app). Owner vs manager therefore splits on business ownership, which keeps
+    // business_users + manager_users exactly equal to the Business-role total.
+    pool.query(`
+      SELECT
+        SUM(CASE WHEN u.role='User' THEN 1 ELSE 0 END) AS total_users,
+        SUM(CASE WHEN u.role='User' THEN 1 ELSE 0 END) AS regular_users,
+        SUM(CASE WHEN u.role='Business' AND EXISTS (SELECT 1 FROM business b WHERE b.user_id = u.id) THEN 1 ELSE 0 END) AS business_users,
+        SUM(CASE WHEN u.role='Manager' OR (u.role='Business' AND NOT EXISTS (SELECT 1 FROM business b WHERE b.user_id = u.id)) THEN 1 ELSE 0 END) AS manager_users
+      FROM "user" u WHERE u.role != 'Admin'`),
     pool.query(`SELECT COUNT(DISTINCT b.id) AS total, COUNT(DISTINCT s.business_id) AS active FROM business b LEFT JOIN subscription s ON s.business_id = b.id AND s.status IN ('Active', 'Trialing')`),
     pool.query(`SELECT COUNT(*) AS active_subs, COALESCE(SUM(fee_at_entry), 0) AS total_fees FROM subscription WHERE status = 'Active'`),
     pool.query(`SELECT id, name, prize_pool, draw_date FROM draw WHERE status = 'Open' ORDER BY draw_date ASC LIMIT 1`),
@@ -1551,6 +1564,7 @@ export const getUserAnalyticsSummaryService = async (): Promise<{
   total: number;
   users: number;
   businesses: number;
+  managers: number;
   high_risk: number;
   medium_risk: number;
   suspended: number;
@@ -1563,7 +1577,10 @@ export const getUserAnalyticsSummaryService = async (): Promise<{
     SELECT
       COUNT(*)::int                                                                AS total,
       COUNT(*) FILTER (WHERE u.role = 'User')::int                               AS users,
-      COUNT(*) FILTER (WHERE u.role = 'Business')::int                           AS businesses,
+      -- Owner vs manager splits on business OWNERSHIP: managers are Business-role accounts
+      -- with no business row (the 'Manager' enum value is unused by the app).
+      COUNT(*) FILTER (WHERE u.role = 'Business' AND EXISTS (SELECT 1 FROM business b WHERE b.user_id = u.id))::int AS businesses,
+      COUNT(*) FILTER (WHERE u.role = 'Manager' OR (u.role = 'Business' AND NOT EXISTS (SELECT 1 FROM business b WHERE b.user_id = u.id)))::int AS managers,
       COUNT(*) FILTER (WHERE ${USER_SEGMENT_PREDICATES.high_risk})::int          AS high_risk,
       COUNT(*) FILTER (WHERE ${USER_SEGMENT_PREDICATES.medium_risk})::int        AS medium_risk,
       COUNT(*) FILTER (WHERE ${USER_SEGMENT_PREDICATES.suspended})::int          AS suspended,
@@ -1578,6 +1595,7 @@ export const getUserAnalyticsSummaryService = async (): Promise<{
     total:       Number(row?.total       ?? 0),
     users:       Number(row?.users       ?? 0),
     businesses:  Number(row?.businesses  ?? 0),
+    managers:    Number(row?.managers    ?? 0),
     high_risk:   Number(row?.high_risk   ?? 0),
     medium_risk: Number(row?.medium_risk ?? 0),
     suspended:   Number(row?.suspended   ?? 0),
@@ -1616,9 +1634,18 @@ export const getAllUsersService = async (params: {
   }
   if (role) {
     const normalizedRole = role.charAt(0).toUpperCase() + role.slice(1).toLowerCase();
-    conditions.push(`u.role = $${idx}`);
-    values.push(normalizedRole);
-    idx++;
+    // Owner vs manager splits on business OWNERSHIP (the 'Manager' enum value is unused by
+    // the app - managers are Business-role accounts with no business row). Self-contained
+    // EXISTS subqueries: this WHERE is shared with the COUNT query, which has no LATERAL b.
+    if (normalizedRole === 'Manager') {
+      conditions.push(`(u.role = 'Manager' OR (u.role = 'Business' AND NOT EXISTS (SELECT 1 FROM business b2 WHERE b2.user_id = u.id)))`);
+    } else if (normalizedRole === 'Business') {
+      conditions.push(`(u.role = 'Business' AND EXISTS (SELECT 1 FROM business b2 WHERE b2.user_id = u.id))`);
+    } else {
+      conditions.push(`u.role = $${idx}`);
+      values.push(normalizedRole);
+      idx++;
+    }
   }
   if (riskLevel === 'high') {
     conditions.push(`u.risk_score >= 20`);
@@ -2486,6 +2513,53 @@ export const adminImageDecisionService = async (
   } finally {
     client.release();
   }
+};
+
+// Admin map: every location in the viewport with oversight state the PUBLIC map hides
+// (inactive locations, paused enrollments, unsubscribed businesses). Same hard map budget
+// as the public endpoint: never more than 30 rows per response, nearest-to-center first.
+export const getAdminMapLocationsService = async (
+  minLat: number, maxLat: number, minLng: number, maxLng: number,
+) => {
+  const pool = getPool();
+  const centerLat = (minLat + maxLat) / 2;
+  const centerLng = (minLng + maxLng) / 2;
+  const result = await pool.query(`
+    SELECT
+      loc.id AS location_id,
+      loc.name AS location_name,
+      loc.address,
+      loc.latitude,
+      loc.longitude,
+      loc.is_active AS location_active,
+      b.id AS business_id,
+      b.name AS business_name,
+      b.sector,
+      b.logo_url,
+      s.status AS subscription_status,
+      EXISTS (
+        SELECT 1 FROM draw_entry de JOIN draw d ON d.id = de.draw_id
+        WHERE de.business_id = b.id AND d.status = 'Open' AND de.paused_at IS NULL
+      ) AS is_participating,
+      EXISTS (
+        SELECT 1 FROM draw_entry de JOIN draw d ON d.id = de.draw_id
+        WHERE de.business_id = b.id AND d.status = 'Open' AND de.paused_at IS NOT NULL
+      ) AS is_paused,
+      (
+        SELECT COUNT(*)::int FROM ticket t
+        WHERE t.business_id = b.id AND t.location_id = loc.id
+          AND t.draw_id = ${OPEN_DRAW_ID_SUBQUERY}
+          AND t.is_quarantined = FALSE AND t.activated_by_user_id IS NOT NULL
+      ) AS entries_current
+    FROM business_location loc
+    JOIN business b ON b.id = loc.business_id
+    LEFT JOIN subscription s ON s.business_id = b.id
+    WHERE loc.latitude BETWEEN $1 AND $2
+      AND loc.longitude BETWEEN $3 AND $4
+    ORDER BY ((loc.latitude - $5) * (loc.latitude - $5) + (loc.longitude - $6) * (loc.longitude - $6)) ASC
+    LIMIT 30
+  `, [minLat, maxLat, minLng, maxLng, centerLat, centerLng]);
+  return result.rows;
 };
 
 export const getDrawCandidateService = async (drawId: number) => {

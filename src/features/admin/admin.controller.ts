@@ -44,6 +44,7 @@ import {
   getDrawCandidateService,
   getDrawRejectedWinnersService,
   getDrawWinnerOrderService,
+  getAdminMapLocationsService,
   getDrawAuditLogService,
   getBusinessHealthSummaryService,
   getUserAnalyticsSummaryService,
@@ -790,6 +791,32 @@ export const patchBusinessParticipation = async (req: Request, res: Response): P
     // Unknown failure: never echo raw error text (could be a pg internal message).
     console.error('[admin.patchBusinessParticipation]', err);
     res.status(500).json({ message: 'Failed to update participation' });
+  }
+};
+
+// Admin map: viewport-bounded, hard-capped at 30 rows (project map budget applies to every
+// map endpoint, admin included).
+export const getAdminMapLocations = async (req: Request, res: Response): Promise<void> => {
+  const minLat = parseFloat(req.query.minLat as string);
+  const maxLat = parseFloat(req.query.maxLat as string);
+  const minLng = parseFloat(req.query.minLng as string);
+  const maxLng = parseFloat(req.query.maxLng as string);
+  // Finite, on-globe, non-inverted: rejects NaN/Infinity and degenerate ranges up front
+  // instead of silently returning empty results.
+  if (
+    ![minLat, maxLat, minLng, maxLng].every(Number.isFinite) ||
+    minLat < -90 || maxLat > 90 || minLng < -180 || maxLng > 180 ||
+    minLat > maxLat || minLng > maxLng
+  ) {
+    res.status(400).json({ message: 'Invalid viewport bounds' });
+    return;
+  }
+  try {
+    const locations = await getAdminMapLocationsService(minLat, maxLat, minLng, maxLng);
+    res.json(locations);
+  } catch (error) {
+    console.error('[admin.getAdminMapLocations]', error);
+    res.status(500).json({ message: 'Failed to fetch map locations' });
   }
 };
 

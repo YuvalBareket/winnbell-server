@@ -92,12 +92,13 @@ beforeEach(() => {
 // getUserAnalyticsSummaryService — shape
 // ─────────────────────────────────────────────
 describe('getUserAnalyticsSummaryService — response shape', () => {
-  test('returns all nine numeric fields when the DB returns a row', async () => {
+  test('returns all ten numeric fields when the DB returns a row', async () => {
     mockQuery.mockResolvedValueOnce({
       rows: [{
         total:       100,
-        users:        80,
+        users:        75,
         businesses:   20,
+        managers:      5,
         high_risk:     5,
         medium_risk:   8,
         suspended:     2,
@@ -111,8 +112,9 @@ describe('getUserAnalyticsSummaryService — response shape', () => {
 
     expect(result).toEqual({
       total:       100,
-      users:        80,
+      users:        75,
       businesses:   20,
+      managers:      5,
       high_risk:     5,
       medium_risk:   8,
       suspended:     2,
@@ -130,6 +132,7 @@ describe('getUserAnalyticsSummaryService — response shape', () => {
     expect(result.total).toBe(0);
     expect(result.users).toBe(0);
     expect(result.businesses).toBe(0);
+    expect(result.managers).toBe(0);
     expect(result.high_risk).toBe(0);
     expect(result.medium_risk).toBe(0);
     expect(result.suspended).toBe(0);
@@ -430,6 +433,24 @@ describe('getAllUsersService — segment composes with other filters', () => {
     // role filter ($n parameterized) AND segment literal both present
     expect(sql).toMatch(/u\.role = \$\d/);
     expect(sql).toMatch(/u\.role = 'User' AND u\.is_phone_verified = FALSE/);
+  });
+
+  test('role=manager maps to Business-role accounts WITHOUT an owned business (Manager enum unused)', async () => {
+    setupTwoQueries([]);
+
+    await getAllUsersService({ page: 1, limit: 25, role: 'manager' });
+
+    const [sql] = mockQuery.mock.calls[0] as [string];
+    expect(sql).toMatch(/u\.role = 'Manager' OR \(u\.role = 'Business' AND NOT EXISTS/);
+  });
+
+  test('role=business scopes to business OWNERS only (managers excluded)', async () => {
+    setupTwoQueries([]);
+
+    await getAllUsersService({ page: 1, limit: 25, role: 'business' });
+
+    const [sql] = mockQuery.mock.calls[0] as [string];
+    expect(sql).toMatch(/u\.role = 'Business' AND EXISTS \(SELECT 1 FROM business b2/);
   });
 });
 
