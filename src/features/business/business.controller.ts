@@ -30,8 +30,8 @@ import { validateLengths } from '../../shared/validation.js';
 // Mirrors the business.sector CHECK constraint in schema.sql. 'Free' is excluded from
 // self-service registration (the client never offers it), so setup/update reject it too.
 const REGISTRATION_SECTORS = [
-  'Food', 'Coffee', 'Bakery', 'IceCream', 'Grocery', 'Liquor', 'Pub', 'Retail',
-  'Fashion', 'Electronics', 'Books', 'Flowers', 'Pets', 'Beauty', 'Health',
+  'Food', 'Coffee', 'Bakery', 'IceCream', 'Juice', 'Grocery', 'Liquor', 'Pub', 'Vape',
+  'Retail', 'Fashion', 'Electronics', 'Books', 'Flowers', 'Pets', 'Beauty', 'Health',
   'Gym', 'Auto', 'Entertainment', 'Education', 'Service', 'Other',
 ];
 

@@ -1,9 +1,12 @@
-// Single source of truth for the 21+ entry restriction (lawyer-mandated). Applies to
-// alcohol/tobacco venues: liquor/tobacco shops and pubs.
+// Single source of truth for the 21+ entry restriction. Applies to alcohol/tobacco
+// venues: liquor/tobacco shops, pubs, and smoke/vape shops.
 // The client mirrors AGE_RESTRICTED_SECTORS in client/src/shared/constants/entries.ts.
 
-/** Business sectors whose entries are restricted to participants aged 21+. */
-export const AGE_RESTRICTED_SECTORS = ['Liquor', 'Pub'] as const;
+/** Business sectors whose entries are restricted to participants aged 21+.
+ *  Liquor/Pub gating is lawyer-mandated. Vape added because federal Tobacco 21
+ *  (Dec 2019) sets 21 as the minimum purchase age for ALL tobacco and vaping
+ *  products nationwide - same gate as liquor. */
+export const AGE_RESTRICTED_SECTORS = ['Liquor', 'Pub', 'Vape'] as const;
 
 /** True when a business sector requires the 21+ gate. */
 export const isAgeRestrictedSector = (sector: string | null | undefined): boolean =>

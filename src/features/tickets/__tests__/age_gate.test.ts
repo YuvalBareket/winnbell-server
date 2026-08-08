@@ -142,6 +142,20 @@ describe('21+ gate at age-restricted (Liquor) businesses', () => {
     expect(result.tickets).toHaveLength(1);
   });
 
+  test('blocks a 19-year-old at a Vape-sector business (federal Tobacco 21)', async () => {
+    setupClientQueries(...buildClientResponses({ sector: 'Vape', dateOfBirth: dobYearsAgo(19) }));
+
+    await expect(submitReceiptEntryService(1, BASE_INPUT))
+      .rejects.toThrow('aged 21 and older');
+  });
+
+  test('allows a 25-year-old at a Vape-sector business', async () => {
+    setupClientQueries(...buildClientResponses({ sector: 'Vape', dateOfBirth: dobYearsAgo(25) }));
+
+    const result = await submitReceiptEntryService(1, BASE_INPUT);
+    expect(result.tickets).toHaveLength(1);
+  });
+
   test('allows a 19-year-old at a non-restricted (Food) business', async () => {
     setupClientQueries(...buildClientResponses({ sector: 'Food', dateOfBirth: dobYearsAgo(19) }));
 
