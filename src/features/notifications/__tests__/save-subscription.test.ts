@@ -21,7 +21,8 @@ jest.mock('web-push', () => ({
   default: { setVapidDetails: jest.fn(), sendNotification: jest.fn() },
 }));
 
-import { saveSubscription } from '../notifications.service';
+import { saveSubscription, sendToAdmins } from '../notifications.service';
+import webpush from 'web-push';
 
 beforeEach(() => {
   jest.clearAllMocks();
@@ -53,5 +54,32 @@ describe('saveSubscription - per-user row cap', () => {
     // The only interpolated value is the constant cap; everything user-derived is a $ param.
     expect(deleteSql).toMatch(/LIMIT 20/);
     expect(deleteSql).not.toMatch(/push\.example/);
+  });
+});
+
+describe('sendToAdmins - admin-only ops alerts', () => {
+  test('targets ONLY Admin-role subscriptions and pushes to each device', async () => {
+    mockQuery.mockResolvedValueOnce({
+      rows: [
+        { endpoint: 'https://push.example/admin-phone', p256dh: 'k1', auth: 'a1' },
+        { endpoint: 'https://push.example/admin-desktop', p256dh: 'k2', auth: 'a2' },
+      ],
+    });
+    (webpush.sendNotification as jest.Mock).mockResolvedValue({});
+
+    await sendToAdmins({ title: 'New business registered', body: 'Cafe X just joined', url: '/admin/businesses' });
+
+    const [selectSql] = mockQuery.mock.calls[0] as [string];
+    expect(selectSql).toMatch(/JOIN "user" u ON u\.id = ps\.user_id/);
+    expect(selectSql).toMatch(/u\.role = 'Admin'/);
+    expect(webpush.sendNotification).toHaveBeenCalledTimes(2);
+  });
+
+  test('no admin subscriptions = clean no-op (no push attempts)', async () => {
+    mockQuery.mockResolvedValueOnce({ rows: [] });
+
+    await sendToAdmins({ title: 't', body: 'b' });
+
+    expect(webpush.sendNotification).not.toHaveBeenCalled();
   });
 });

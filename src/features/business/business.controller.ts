@@ -234,6 +234,23 @@ export const setupBusiness = async (req: AuthRequest, res: Response): Promise<vo
       message: 'Business profile and locations created successfully',
       businessId: result.businessId,
     });
+
+    // Ops alert: push "a business just registered" to the admin's subscribed devices.
+    // Fire-and-forget AFTER the response - a push failure must never affect registration.
+    // Dynamic import keeps web-push (which configures VAPID keys at module load) out of
+    // this module's static graph, so controller unit tests need no extra stubbing.
+    void (async () => {
+      try {
+        const { sendToAdmins } = await import('../notifications/notifications.service.js');
+        await sendToAdmins({
+          title: 'New business registered',
+          body: `${String(businessName).trim()} (${businessSector}) just joined Winnbell`,
+          url: '/admin/businesses',
+        });
+      } catch (err) {
+        console.error('[setupBusiness] admin push alert failed:', err);
+      }
+    })();
   } catch (error: unknown) {
     // One user = one business. The explicit guard throws BUSINESS_ALREADY_EXISTS; the
     // UNIQUE(business.user_id) constraint is the race-safe backstop (Postgres code 23505).

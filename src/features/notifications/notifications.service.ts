@@ -110,6 +110,21 @@ export const sendToUser = async (userId: number, payload: NotificationPayload): 
   await sendBatch(result.rows, payload);
 };
 
+// Internal ops alert: deliver to every ADMIN device that enabled notifications (the same
+// bell toggle as users - the admin subscribes their own phone/desktop once). Admin count
+// is tiny and per-user subscriptions are capped, so no batching/pagination needed.
+export const sendToAdmins = async (payload: NotificationPayload): Promise<void> => {
+  const pool = getPool();
+  const result = await pool.query(
+    `SELECT ps.endpoint, ps.p256dh, ps.auth
+     FROM push_subscription ps
+     JOIN "user" u ON u.id = ps.user_id
+     WHERE u.role = 'Admin'`,
+  );
+  if (result.rows.length === 0) return;
+  await sendBatch(result.rows, payload);
+};
+
 export const sendToAll = async (payload: NotificationPayload): Promise<void> => {
   const pool = getPool();
   const BATCH_SIZE = 500;
