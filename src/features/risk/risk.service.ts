@@ -30,6 +30,9 @@ export interface RiskContext {
   isDuplicateQuarantinedCrossUser?: boolean;
   typingDurationMs?: number;
   receiptInputMethod?: 'typed' | 'pasted';
+  /** Submitter's IP resolved to a US state outside allowed_states (requireEntryRegion).
+   *  Soft signal only — carrier IPs misresolve states, so it scores but never blocks. */
+  isOutOfRegion?: boolean;
 }
 
 /** Pass pre-fetched user risk data to skip the initial SELECT in evaluateUserRisk. */
@@ -55,6 +58,7 @@ export interface PreFetchedUserRisk {
  *   - Threshold probing (amount swap)      +4
  *   - Amount >3× business 30-day average   +2
  *   - Typed >5 chars in <700 ms            +3
+ *   - IP state outside allowed_states      +2
  */
 export const evaluateUserRisk = async (
   userId: number,
@@ -310,6 +314,14 @@ export const evaluateUserRisk = async (
     ) {
       delta += 2;
       flags.push('amount_outlier');
+    }
+
+    // Signal: entry submitted from an IP outside the allowed states. Kept small (+2):
+    // carrier IPs misresolve states often enough that this alone must never quarantine —
+    // it only compounds with genuine fraud signals.
+    if (context.isOutOfRegion) {
+      delta += 2;
+      flags.push('out_of_region_entry');
     }
 
     // Signal 4: suspiciously fast typing

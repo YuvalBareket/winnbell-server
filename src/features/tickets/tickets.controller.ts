@@ -51,7 +51,7 @@ export const getStatus = async (req: AuthRequest, res: Response) => {
 export const activate = async (req: AuthRequest, res: Response) => {
   try {
     const userId = req.user!.id;
-    const result = await ticketService.activateFreeTicket(userId, getClientIp(req));
+    const result = await ticketService.activateFreeTicket(userId, getClientIp(req), res.locals.entryRegion);
     res.status(201).json(result);
   } catch (error: unknown) {
     // Surface the service's curated, user-facing reason (weekly limit, no open campaign,
@@ -128,6 +128,8 @@ export const submitReceiptEntry = async (req: AuthRequest, res: Response) => {
       typingDurationMs: typingDurationMs !== undefined ? Number(typingDurationMs) : undefined,
       receiptInputMethod: receiptInputMethod === 'pasted' ? 'pasted' : receiptInputMethod === 'typed' ? 'typed' : undefined,
       submitterIp: getClientIp(req),
+      submitterState: res.locals.entryRegion?.state ?? null,
+      isOutOfRegion: res.locals.entryRegion?.outOfRegion === true,
     });
 
     const firstTicket = result.tickets[0];
@@ -187,7 +189,7 @@ export const activatePromotional = async (req: AuthRequest, res: Response) => {
     const codeErr = validateLength('Promo code', code, 100);
     if (codeErr) { res.status(400).json({ message: codeErr }); return; }
 
-    const result = await ticketService.activatePromotionalEntry(userId, code);
+    const result = await ticketService.activatePromotionalEntry(userId, code, res.locals.entryRegion);
     res.status(201).json({ success: true, ...result });
   } catch (error: unknown) {
     // Surface the service's curated, user-facing message (invalid code, max uses, one-per-campaign, cap).

@@ -1510,3 +1510,45 @@ describe('Score level boundaries — exact threshold crossing', () => {
     expect(result.level).toBe('high');
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Out-of-region entry — out_of_region_entry flag (soft signal, +2)
+// ─────────────────────────────────────────────────────────────────────────────
+describe('Out-of-region entry — out_of_region_entry flag', () => {
+  test('adds +2 and the flag when isOutOfRegion is set on an otherwise clean entry', async () => {
+    setupQueries([
+      { rows: [{ risk_score: 0, risk_last_flagged_at: null }] },
+      { rows: [cleanCteRow(0, 0, [], 30, { v24h_distinct: 0 })] },
+    ]);
+
+    const result = await evaluateUserRisk(950, {
+      businessId: 80,
+      receiptIdentifier: 'REGION-1',
+      transactionAmount: 30,
+      isDuplicateCrossUser: false,
+      isOutOfRegion: true,
+    });
+
+    expect(result.flags).toContain('out_of_region_entry');
+    expect(result.delta).toBe(2);
+    // +2 alone must never quarantine — it stays comfortably in the low band.
+    expect(result.level).toBe('low');
+  });
+
+  test('no flag or delta when isOutOfRegion is false/omitted', async () => {
+    setupQueries([
+      { rows: [{ risk_score: 0, risk_last_flagged_at: null }] },
+      { rows: [cleanCteRow(0, 0, [], 30, { v24h_distinct: 0 })] },
+    ]);
+
+    const result = await evaluateUserRisk(951, {
+      businessId: 80,
+      receiptIdentifier: 'REGION-2',
+      transactionAmount: 30,
+      isDuplicateCrossUser: false,
+    });
+
+    expect(result.flags).not.toContain('out_of_region_entry');
+    expect(result.delta).toBe(0);
+  });
+});

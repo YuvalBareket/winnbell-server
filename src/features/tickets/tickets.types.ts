@@ -41,4 +41,8 @@ export interface ReceiptEntryInput {
   typingDurationMs?: number;
   receiptInputMethod?: 'typed' | 'pasted';
   submitterIp?: string; // Captured server-side for fraud ring detection
+  // IP-derived US state at submission (requireEntryRegion middleware). Null = unknown.
+  submitterState?: string | null;
+  // US traffic whose IP resolved outside allowed_states. Soft risk signal, never a block.
+  isOutOfRegion?: boolean;
 }

@@ -13,6 +13,19 @@ export const publicCache = new NodeCache({ stdTTL: 30, checkperiod: 60 });
 /** Platform settings (single row, rarely changes). */
 export const platformCache = new NodeCache({ stdTTL: 300, checkperiod: 600 });
 
+/** IP -> geo region (ipinfo lookups). Turns per-request lookups into roughly one external
+ *  call per unique IP per TTL window, keeping every consumer (region-check endpoint, entry
+ *  gate, map fallback) inside the ipinfo free tier. 2h TTL balances lookup volume against
+ *  mobile-IP churn (carrier IPs get reassigned; a longer TTL over-extends a stale verdict
+ *  in BOTH directions - stale-allowed abroad and stale-blocked after arriving in-region).
+ *  Only SUCCESSFUL lookups are cached - a transient ipinfo failure must not pin a
+ *  fail-open null on an IP for the whole window. */
+export const regionIpCache = new NodeCache({ stdTTL: 2 * 3600, checkperiod: 1800, maxKeys: 10_000 });
+
+export const invalidateRegionIpCache = (): void => {
+  regionIpCache.flushAll();
+};
+
 // ── Platform settings helper ─────────────────────────────────────────────────
 // Replaces all direct `SELECT ... FROM platform_settings WHERE id = 1` calls.
 

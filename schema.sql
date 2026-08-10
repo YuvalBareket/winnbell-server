@@ -359,6 +359,10 @@ CREATE TABLE ticket (
   risk_score_delta        SMALLINT NOT NULL DEFAULT 0,
   -- Submitter IP captured at receipt submission (fraud ring detection)
   submitter_ip            INET NULL,
+  -- IP-derived USPS state code at submission (requireEntryRegion). NULL = lookup failed or
+  -- unrestricted platform. Out-of-state is a soft risk signal only - carrier IPs misresolve
+  -- states, so this NEVER hard-blocks; non-US traffic is rejected before insert instead.
+  submitter_state         VARCHAR(2) NULL,
 
   -- Quarantine: ticket excluded from draw pool and cap count ─────────────────
   is_quarantined          BOOLEAN NOT NULL DEFAULT FALSE,

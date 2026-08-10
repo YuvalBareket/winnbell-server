@@ -2,6 +2,7 @@ import { Router, Request } from 'express';
 import rateLimit from 'express-rate-limit';
 import * as ticketController from './tickets.controller.js';
 import { requireRole, requirePhoneVerified, requireProfileComplete } from '../../shared/middleware/auth.middleware.js';
+import { requireEntryRegion } from '../auth/region.middleware.js';
 import { makeRateLimitStore } from '../../shared/rateLimitStore.js';
 import { getClientIpKey } from '../../shared/clientIp.js';
 
@@ -24,12 +25,15 @@ const router = Router();
 // the server-side age gate; the client's /profile-setup redirect alone is trivially bypassed.
 router.get('/my-tickets', ticketController.getMyTickets);
 router.get('/free-status', ticketController.getStatus);
-router.post('/activate-free', requireRole('User'), requirePhoneVerified, requireProfileComplete, entryLimiter, ticketController.activate);
-router.post('/receipt-entry', requireRole('User'), requirePhoneVerified, requireProfileComplete, entryLimiter, ticketController.submitReceiptEntry);
+// requireEntryRegion sits AFTER the limiter so external geo-lookup quota is limiter-capped.
+// It hard-blocks only non-US traffic (ToS physical presence at entry); a wrong-state result
+// is a soft risk signal recorded on the entry, never a block (carrier IPs misresolve states).
+router.post('/activate-free', requireRole('User'), requirePhoneVerified, requireProfileComplete, entryLimiter, requireEntryRegion, ticketController.activate);
+router.post('/receipt-entry', requireRole('User'), requirePhoneVerified, requireProfileComplete, entryLimiter, requireEntryRegion, ticketController.submitReceiptEntry);
 router.get('/receipt-upload-url', requireRole('User'), requirePhoneVerified, entryLimiter, ticketController.getReceiptUploadUrl);
 router.get('/my-risk-level', ticketController.getMyRiskLevel);
 // STAGING DEMO ONLY (temporary). Self-service reset of the caller's OWN activity; the service
 // gates on DEMO_USER_ENABLED (staging-only) so it is inert in production.
 router.post('/reset-demo', requireRole('User'), ticketController.resetDemo);
-router.post('/activate-promotional', requireRole('User'), requirePhoneVerified, requireProfileComplete, entryLimiter, ticketController.activatePromotional);
+router.post('/activate-promotional', requireRole('User'), requirePhoneVerified, requireProfileComplete, entryLimiter, requireEntryRegion, ticketController.activatePromotional);
 export default router;

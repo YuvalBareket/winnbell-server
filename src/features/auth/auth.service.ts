@@ -4,7 +4,7 @@ import { safeRollback } from '../../shared/db/txn.js';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import { isIP } from 'net';
-import { getPlatformSettings, invalidateUserAuth } from '../../shared/cache/cache.js';
+import { getPlatformSettings, invalidateUserAuth, regionIpCache } from '../../shared/cache/cache.js';
 import { resolveReferrerIdForSignup } from '../referral/referral.service.js';
 const getAllowedStates = async (): Promise<string[]> => {
   const settings = await getPlatformSettings();
@@ -112,15 +112,18 @@ const isPrivateIp = (ip: string): boolean =>
 
 export const getRegionFromIp = async (ip: string): Promise<IpRegion> => {
   if (!ip) return { country: null, stateCode: null, city: null, approxLocation: null };
+  const cached = regionIpCache.get<IpRegion>(ip);
+  if (cached) return cached;
+  const controller = new AbortController();
+  // Cleared in finally: on a thrown fetch (network error) the timer would otherwise dangle
+  // for 2s per failed request — pure GC/event-loop churn under an ipinfo outage at load.
+  const timeout = setTimeout(() => controller.abort(), 2000);
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2000);
     const tokenParam = process.env.IPINFO_TOKEN ? `?token=${process.env.IPINFO_TOKEN}` : '';
     // encode the client-controlled IP (from X-Forwarded-For/cf-connecting-ip) so a crafted
     // value can't inject path/query into the external URL or maneuver around the token param.
     const ipSegment = isPrivateIp(ip) ? '' : `${encodeURIComponent(ip)}/`;
     const res = await fetch(`https://ipinfo.io/${ipSegment}json${tokenParam}`, { signal: controller.signal });
-    clearTimeout(timeout);
     if (!res.ok) return { country: null, stateCode: null, city: null, approxLocation: null };
     const data = await res.json() as { country?: string; region?: string; city?: string; loc?: string };
     const country = typeof data.country === 'string' && data.country.length === 2 ? data.country : null;
@@ -137,9 +140,16 @@ export const getRegionFromIp = async (ip: string): Promise<IpRegion> => {
         approxLocation = { latitude, longitude };
       }
     }
-    return { country, stateCode, city, approxLocation };
+    const region: IpRegion = { country, stateCode, city, approxLocation };
+    // Cache only resolved lookups; maxKeys overflow throws in node-cache — treat as a miss.
+    if (country) {
+      try { regionIpCache.set(ip, region); } catch { /* cache full — skip */ }
+    }
+    return region;
   } catch {
     return { country: null, stateCode: null, city: null, approxLocation: null };
+  } finally {
+    clearTimeout(timeout);
   }
 };
 
@@ -165,6 +175,36 @@ export const evaluateRegionRestriction = async (ip: string): Promise<RegionCheck
   if (country !== 'US') return { blocked: true, country, state: stateCode, city, approxLocation };
   if (!stateCode) return { blocked: false, country, state: stateCode, city, approxLocation }; // US, state unknown — fail open
   return { blocked: !allowedStates.includes(stateCode), country, state: stateCode, city, approxLocation };
+};
+
+export interface EntryRegionPolicy {
+  /** Hard block: only for confidently-foreign traffic (country resolved and not US). */
+  blocked: boolean;
+  /** Detected US state code (USPS), null when unknown or non-US. */
+  state: string | null;
+  /** US traffic whose state resolved OUTSIDE allowed_states. Soft signal only: carrier IPs
+   *  often resolve to the wrong state, so this must never hard-block a submission. */
+  outOfRegion: boolean;
+}
+
+/**
+ * Entry-time region policy (ToS physical-presence-at-entry). Deliberately LOOSER than the
+ * signup check: non-US country = block; wrong US state = report, never block (the caller
+ * records it as a risk signal instead). allowed_states empty = platform unrestricted, and
+ * the geo lookup is skipped entirely. Detection failures fail open.
+ */
+export const evaluateEntryRegionPolicy = async (ip: string): Promise<EntryRegionPolicy> => {
+  const allowedStates = await getAllowedStates();
+  if (allowedStates.length === 0) return { blocked: false, state: null, outOfRegion: false };
+
+  const { country, stateCode } = await getRegionFromIp(ip);
+  if (!country) return { blocked: false, state: null, outOfRegion: false }; // fail open
+  // outOfRegion stays false on the hard-block path: it means "allowed through but wrong
+  // state" (a risk signal), and must never be true alongside blocked or a careless caller
+  // could double-penalize a request that was already rejected.
+  if (country !== 'US') return { blocked: true, state: null, outOfRegion: false };
+  if (!stateCode) return { blocked: false, state: null, outOfRegion: false }; // US, state unknown — fail open
+  return { blocked: false, state: stateCode, outOfRegion: !allowedStates.includes(stateCode) };
 };
 
 // ── Bot / throwaway-email protection ──────────────────────────────────────────

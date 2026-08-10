@@ -38,7 +38,7 @@ jest.mock('../../../shared/db/db.js', () => ({
 }));
 
 import { registerUser, loginUser, syncExternalUser, signupEmailBlockReason } from '../auth.service';
-import { invalidatePlatformSettings } from '../../../shared/cache/cache.js';
+import { invalidatePlatformSettings, invalidateRegionIpCache } from '../../../shared/cache/cache.js';
 
 // ── Constants ─────────────────────────────────────────────────────────────────
 const JWT_SECRET = 'test-secret';
@@ -69,9 +69,10 @@ const setupPoolQueries = (...responses: Array<{ rows: unknown[]; rowCount?: numb
 
 beforeEach(() => {
   jest.clearAllMocks();
-  // platform settings are cached in a real node-cache — flush so each test's
-  // mocked allowed_states actually takes effect
+  // platform settings and IP-geo results are cached in real node-caches — flush so each
+  // test's mocked allowed_states / mocked ipinfo fetch actually take effect
   invalidatePlatformSettings();
+  invalidateRegionIpCache();
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

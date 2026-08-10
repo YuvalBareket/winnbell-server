@@ -216,7 +216,15 @@ export const generateGlobalUniqueCode = async (client?: PoolClient): Promise<str
   throw new Error('Failed to generate a unique ticket code. Please try again.');
 };
 
-export const activateFreeTicket = async (userId: number, claimIp?: string): Promise<ActivationResult> => {
+/** IP-derived region result from requireEntryRegion, threaded into every entry-creating
+ *  service so the audit trail (ticket.submitter_state) and the out_of_region_entry risk
+ *  signal stay consistent across receipt, free, and promo entries. */
+export interface EntryRegion {
+  state: string | null;
+  outOfRegion: boolean;
+}
+
+export const activateFreeTicket = async (userId: number, claimIp?: string, region?: EntryRegion): Promise<ActivationResult> => {
   const pool = getPool();
   const client = await pool.connect();
 
@@ -304,10 +312,17 @@ export const activateFreeTicket = async (userId: number, claimIp?: string): Prom
     const ticketCode = await generateGlobalUniqueCode(client);
 
     const ticketResult = await client.query(`
-      INSERT INTO ticket (code, status, entry_source, business_id, activated_by_user_id, draw_id, activated_at)
-      VALUES ($1, 'Activated', 'free', NULL, $2, $3, NOW())
+      INSERT INTO ticket (code, status, entry_source, business_id, activated_by_user_id, draw_id, activated_at, submitter_state)
+      VALUES ($1, 'Activated', 'free', NULL, $2, $3, NOW(), $4)
       RETURNING id
-    `, [ticketCode, userId, activeDrawId]);
+    `, [ticketCode, userId, activeDrawId, region?.state ?? null]);
+
+    // Out-of-region soft signal — same +2 as the receipt path so free entries are not a
+    // blind spot in the fraud audit trail. Sync quarantine in case the delta crosses HIGH.
+    if (region?.outOfRegion) {
+      await updateUserRiskScore(userId, 2, client, ['out_of_region_entry']);
+      await syncUserQuarantineState(userId, activeDrawId, client);
+    }
 
     await client.query('COMMIT');
     // Free entries have no business/location — they affect no public cache, so nothing to invalidate.
@@ -592,6 +607,7 @@ export const submitReceiptEntryService = async (
       isDuplicateQuarantinedCrossUser: effectiveIsDuplicateQuar,
       typingDurationMs: input.typingDurationMs,
       receiptInputMethod: input.receiptInputMethod,
+      isOutOfRegion: input.isOutOfRegion,
     }, preFetchedRisk);
 
     // Progressive controls use the stored score (before this submission's delta).
@@ -799,9 +815,9 @@ export const submitReceiptEntryService = async (
             (code, status, entry_source, business_id, location_id, draw_id,
              activated_by_user_id, activated_at,
              receipt_identifier, transaction_amount, transaction_date, receipt_image_url, risk_score, risk_score_delta,
-             is_quarantined, quarantine_reason, quarantined_at, image_validation_status, submitter_ip, risk_flags,
+             is_quarantined, quarantine_reason, quarantined_at, image_validation_status, submitter_ip, submitter_state, risk_flags,
              anchor_ticket_id)
-           VALUES ($1, 'Activated', 'receipt', $2, $3, $4, $5, NOW(), $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+           VALUES ($1, 'Activated', 'receipt', $2, $3, $4, $5, NOW(), $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19)
            RETURNING id`,
           [
             ticketCode,
@@ -821,6 +837,7 @@ export const submitReceiptEntryService = async (
             quarantinedAt,
             i === 0 && hasImage ? 'pending' : 'not_required',
             input.submitterIp ?? null,
+            input.submitterState ?? null,
             // Tag the anchor so admins see WHY it was quarantined (the Risk Signal).
             i === 0 ? (isDuplicateDocument ? [...riskEval.flags, 'duplicate_document'] : riskEval.flags) : [],
             i === 0 ? null : insertedTickets[0].ticketId, // siblings link back to anchor
@@ -874,6 +891,7 @@ export const submitReceiptEntryService = async (
 export const activatePromotionalEntry = async (
   userId: number,
   code: string,
+  region?: EntryRegion,
 ): Promise<{ entryId: number; drawName: string; ticketId: number; code: string }> => {
   const pool = getPool();
   const client = await pool.connect();
@@ -969,11 +987,17 @@ export const activatePromotionalEntry = async (
     // The real entry: a ticket row, so the winner picker / caps / analytics all see it
     const ticketCode = await generateGlobalUniqueCode(client);
     const ticketResult = await client.query(
-      `INSERT INTO ticket (code, status, entry_source, business_id, activated_by_user_id, draw_id, activated_at)
-       VALUES ($1, 'Activated', 'promo', NULL, $2, $3, NOW())
+      `INSERT INTO ticket (code, status, entry_source, business_id, activated_by_user_id, draw_id, activated_at, submitter_state)
+       VALUES ($1, 'Activated', 'promo', NULL, $2, $3, NOW(), $4)
        RETURNING id`,
-      [ticketCode, userId, draw.id],
+      [ticketCode, userId, draw.id, region?.state ?? null],
     );
+
+    // Out-of-region soft signal — same +2 as the receipt path (see activateFreeTicket).
+    if (region?.outOfRegion) {
+      await updateUserRiskScore(userId, 2, client, ['out_of_region_entry']);
+      await syncUserQuarantineState(userId, draw.id, client);
+    }
 
     await client.query('COMMIT');
     // Promo entries have no business/location — they affect no public cache.
