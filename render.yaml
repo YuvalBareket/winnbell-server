@@ -71,6 +71,8 @@ services:
         sync: false
       - key: IPINFO_TOKEN
         sync: false
+      - key: MAXMIND_LICENSE_KEY
+        sync: false
       - key: SMTP_HOST
         sync: false
       - key: SMTP_PORT
@@ -156,6 +158,8 @@ services:
       - key: TWILIO_FROM_NUMBER
         sync: false
       - key: IPINFO_TOKEN
+        sync: false
+      - key: MAXMIND_LICENSE_KEY
         sync: false
       - key: SMTP_HOST
         sync: false

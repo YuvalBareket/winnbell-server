@@ -37,6 +37,12 @@ jest.mock('../../../shared/db/db.js', () => ({
   }),
 }));
 
+// Region tests below exercise the ipinfo path (mocked global.fetch) — pin GeoLite to
+// "not loaded" so test ordering can never flip which geo branch runs.
+jest.mock('../../../shared/geo/geolite.js', () => ({
+  lookupGeoLite: jest.fn().mockReturnValue(null),
+}));
+
 import { registerUser, loginUser, syncExternalUser, signupEmailBlockReason } from '../auth.service';
 import { invalidatePlatformSettings, invalidateRegionIpCache } from '../../../shared/cache/cache.js';
 

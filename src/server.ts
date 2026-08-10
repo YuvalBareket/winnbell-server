@@ -5,6 +5,7 @@ import { recoverStaleOcrJobs } from './features/ocr/ocr.service.js';
 import { cleanupExpiredRefreshTokens } from './features/auth/auth.service.js';
 import { cleanupOldWebhookEvents, reconcileSubscriptionsWithStripe } from './features/stripe/stripe.service.js';
 import { initMonitoring } from './shared/monitoring.js';
+import { initGeoLite } from './shared/geo/geolite.js';
 
 const PORT = process.env.PORT || 3000;
 
@@ -27,6 +28,10 @@ const startServer = async () => {
 
     // Re-queue any OCR jobs that were lost during a server restart
     await recoverStaleOcrJobs();
+
+    // Local GeoLite2 geo database: background download + weekly refresh. Non-blocking —
+    // geolocation serves from ipinfo until the local database is ready.
+    initGeoLite();
 
     // 3. Start Server
     app.listen(PORT, () => {

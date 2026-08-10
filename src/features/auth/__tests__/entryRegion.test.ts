@@ -22,6 +22,13 @@ jest.mock('../../../shared/db/db.js', () => ({
   getPool: jest.fn().mockReturnValue({ query: mockPoolQuery }),
 }));
 
+// These tests exercise the ipinfo path (mocked global.fetch). Pin GeoLite to "not loaded"
+// explicitly so no other test file that loads the local database can change which branch
+// of getRegionFromIp runs here.
+jest.mock('../../../shared/geo/geolite.js', () => ({
+  lookupGeoLite: jest.fn().mockReturnValue(null),
+}));
+
 import { evaluateEntryRegionPolicy } from '../auth.service';
 import { invalidatePlatformSettings, invalidateRegionIpCache } from '../../../shared/cache/cache.js';
 
@@ -163,7 +170,8 @@ describe('requireEntryRegion middleware', () => {
   };
 
   it('responds 403 REGION_RESTRICTED when the policy blocks', async () => {
-    mockPolicy.mockResolvedValue({ blocked: true, state: null, outOfRegion: true });
+    // outOfRegion is always false alongside blocked (the real policy can never produce both).
+    mockPolicy.mockResolvedValue({ blocked: true, state: null, outOfRegion: false });
     const { req, res, next } = makeReqRes();
 
     await requireEntryRegion(req, res, next);

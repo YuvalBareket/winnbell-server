@@ -5,6 +5,7 @@ import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import { isIP } from 'net';
 import { getPlatformSettings, invalidateUserAuth, regionIpCache } from '../../shared/cache/cache.js';
+import { lookupGeoLite } from '../../shared/geo/geolite.js';
 import { resolveReferrerIdForSignup } from '../referral/referral.service.js';
 const getAllowedStates = async (): Promise<string[]> => {
   const settings = await getPlatformSettings();
@@ -112,6 +113,14 @@ const isPrivateIp = (ip: string): boolean =>
 
 export const getRegionFromIp = async (ip: string): Promise<IpRegion> => {
   if (!ip) return { country: null, stateCode: null, city: null, approxLocation: null };
+  // PRIMARY: local GeoLite2 database — unlimited, microseconds, no external call, and no
+  // user IPs shared with a third party. Private IPs skip it (no record exists) and fall
+  // through to the ipinfo path, whose no-IP dev-machine resolution is deliberate (below).
+  // Any null (db not loaded yet, unknown IP) also falls through — ipinfo is the safety net.
+  if (!isPrivateIp(ip)) {
+    const local = lookupGeoLite(ip);
+    if (local) return local;
+  }
   const cached = regionIpCache.get<IpRegion>(ip);
   if (cached) return cached;
   const controller = new AbortController();

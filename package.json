@@ -4,6 +4,9 @@
   "description": "",
   "main": "index.js",
   "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "tsx watch src/server.ts",
     "build": "tsc",
@@ -27,12 +30,14 @@
     "ioredis": "^5.11.1",
     "jose": "^6.2.3",
     "jsonwebtoken": "^9.0.3",
+    "maxmind": "^5.0.7",
     "node-cache": "^5.1.2",
     "nodemailer": "^9.0.3",
     "pdfkit": "^0.19.1",
     "pg": "^8.20.0",
     "rate-limit-redis": "^5.0.0",
     "stripe": "^21.0.1",
+    "tar": "^7.5.22",
     "twilio": "^6.0.2",
     "web-push": "^3.6.7"
   },
