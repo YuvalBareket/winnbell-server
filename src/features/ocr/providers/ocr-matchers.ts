@@ -102,14 +102,21 @@ export const RECEIPT_KEYWORDS = [
   // English
   'TOTAL', 'AMOUNT', 'RECEIPT', 'INVOICE', 'TAX', 'SUBTOTAL',
   'GST', 'VAT', 'PAID', 'CHANGE', 'BALANCE', 'PURCHASE',
+  // Payment-context words US restaurant/retail receipts reliably print. Without these, a
+  // normal US restaurant receipt ("Sub Total / Tax / Total / Payment Method: VISA") scored
+  // only 2 keywords and hard-failed an honest customer (observed on a real test 2026-08-10).
+  'PAYMENT', 'CASH', 'VISA', 'MASTERCARD', 'DEBIT', 'CREDIT', 'GRATUITY',
   // Hebrew
   'סהכ', 'סה"כ', 'מעמ', 'מע"מ', 'חשבונית', 'קבלה', 'תשלום',
   'מחיר', 'סכום', 'עודף', 'שולם', 'כולל', 'לתשלום',
 ];
 
 export function isReceiptText(text: string): boolean {
+  // Receipts print keywords with arbitrary spacing ("Sub Total", "SUB-TOTAL" OCR'd with a
+  // space); match against a spaceless projection too so those still count as SUBTOTAL.
+  const spaceless = text.replace(/\s+/g, '');
   // Lower threshold for short receipts or non-Latin scripts
-  const keywordCount = RECEIPT_KEYWORDS.filter(k => text.includes(k)).length;
+  const keywordCount = RECEIPT_KEYWORDS.filter(k => text.includes(k) || spaceless.includes(k)).length;
   if (keywordCount >= 3 && text.length > 50) return true;
   // Hebrew receipts: 1 strong keyword is enough if there's Hebrew text present
   const hasHebrew = /[\u05D0-\u05EA]/.test(text);
