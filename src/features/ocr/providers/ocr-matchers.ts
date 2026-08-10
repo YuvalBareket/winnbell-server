@@ -50,6 +50,10 @@ export function matchAmount(text: string, amount: number): boolean | null {
     if (!Number.isFinite(cents)) continue;
     anyMoney = true;
     if (cents === claimedCents) return true;
+    // Dollar-rounding grace: people type "$23" off a $23.47 receipt (or round 23.99 up to
+    // 24). A WHOLE-dollar claim within a dollar of a printed amount counts as that amount.
+    // Cent-precise claims still require an exact match - typing cents implies reading them.
+    if (claimedCents % 100 === 0 && Math.abs(cents - claimedCents) < 100) return true;
   }
   return anyMoney ? false : null;
 }

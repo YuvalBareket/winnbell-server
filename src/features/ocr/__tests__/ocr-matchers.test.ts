@@ -44,6 +44,23 @@ describe('matchAmount', () => {
   test('a whole-dollar claim matches a printed .00 amount', () => {
     expect(matchAmount('TOTAL $12.00', 12)).toBe(true);
   });
+
+  test('a whole-dollar claim rounds DOWN onto a printed amount ($23 off a $23.47 slip)', () => {
+    expect(matchAmount('TOTAL $23.47', 23)).toBe(true);
+  });
+
+  test('a whole-dollar claim rounds UP onto a printed amount ($24 off a $23.47 slip)', () => {
+    expect(matchAmount('TOTAL $23.47', 24)).toBe(true);
+  });
+
+  test('the rounding grace never stretches a full dollar or more', () => {
+    expect(matchAmount('TOTAL $23.47', 25)).toBe(false);
+    expect(matchAmount('TOTAL $1,450.00', 1451)).toBe(false);
+  });
+
+  test('a cent-precise claim still requires an exact match (typing cents implies reading them)', () => {
+    expect(matchAmount('TOTAL $23.47', 23.5)).toBe(false);
+  });
 });
 
 // isReceiptText is the "is this even a receipt" hard gate (≥3 keywords). Pinned by a real

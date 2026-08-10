@@ -13,7 +13,10 @@ export interface OcrValidationResult {
   identifierFound: boolean;         // was the submitted identifier found in the image?
   amountMatches: boolean | null;    // null = total not visible; false = visible but wrong → fail
   dateMatches: boolean | null;      // null = date not visible; false = visible but wrong → fail
-  businessNameFound: true | null;    // true = confirmed; null = unverifiable (logo-only, etc.) → never fails
+  // true = confirmed; null = unverifiable (logo-only, etc.). The regex matcher never produces
+  // false; only the grounded LLM judgment layer (receiptValidationLlm.ts) may set false when
+  // the receipt legibly names a DIFFERENT merchant → fails like any contradicted soft check.
+  businessNameFound: boolean | null;
   confidence: 'high' | 'medium' | 'low';
   rawText?: string;                 // extracted text, for debugging/logging
   // Identifier-like tokens printed on the image (the document fingerprint). Used to detect

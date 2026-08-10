@@ -3,6 +3,7 @@ import { getPool } from '../../shared/db/db.js';
 import { safeRollback } from '../../shared/db/txn.js';
 import { updateUserRiskScore, syncUserQuarantineState } from '../risk/risk.service.js';
 import { GoogleVisionProvider } from './providers/google-vision.provider.js';
+import { judgeReceiptLlm, applyLlmTightening } from './receiptValidationLlm.js';
 import type { OcrProvider, OcrExpected, OcrValidationResult } from './ocr.types.js';
 import { canonicalizeReceiptIdentifier } from './receiptIdentity.js';
 
@@ -28,6 +29,7 @@ async function resolveReceiptContest(
   riskDelta: number,
   businessId: number,
   receiptIdentifier: string,
+  failPenalty: number,
 ): Promise<void> {
   const client = await pool.connect();
   try {
@@ -141,17 +143,18 @@ async function resolveReceiptContest(
         [contestTicketId],
       );
     } else {
-      // Genuinely failed OCR (not a receipt / identifier absent) → real fail + penalty.
+      // Genuinely failed OCR (not a receipt / identifier absent) → real fail + penalty
+      // (failPenalty is 0 for honest-mistake failures like a with-tip claim).
       await client.query(
-        `UPDATE ticket SET image_validation_status = 'failed', risk_score_delta = risk_score_delta + 2 WHERE id = $1`,
-        [contestTicketId],
+        `UPDATE ticket SET image_validation_status = 'failed', risk_score_delta = risk_score_delta + $2 WHERE id = $1`,
+        [contestTicketId, failPenalty],
       );
       await client.query(
         `UPDATE ticket SET is_quarantined = TRUE, quarantine_reason = 'ocr_validation_failed', quarantined_at = NOW()
          WHERE id = $1 OR anchor_ticket_id = $1`,
         [contestTicketId],
       );
-      await updateUserRiskScore(userId, 2, client);
+      if (failPenalty !== 0) await updateUserRiskScore(userId, failPenalty, client);
     }
 
     // Quarantine sync for the contester + any superseded squatters, inside the same txn.
@@ -242,6 +245,7 @@ async function resolveReceiptValidation(
   passed: boolean,
   contestProven: boolean,
   riskDelta: number,
+  failPenalty: number,
 ): Promise<void> {
   const client = await pool.connect();
   try {
@@ -336,9 +340,12 @@ async function resolveReceiptValidation(
       await updateUserRiskScore(userId, riskDelta, client);
       await syncUserQuarantineState(userId, drawId, client);
     } else {
+      // failPenalty is 0 for honest-mistake failures (e.g. a with-tip claim): the entry is
+      // still quarantined so the inflated amount never enters the draw, but the user is not
+      // treated as a fraud signal.
       await client.query(
-        `UPDATE ticket SET image_validation_status = 'failed', risk_score_delta = risk_score_delta + 2 WHERE id = $1`,
-        [ticketId],
+        `UPDATE ticket SET image_validation_status = 'failed', risk_score_delta = risk_score_delta + $2 WHERE id = $1`,
+        [ticketId, failPenalty],
       );
       await client.query(
         `UPDATE ticket
@@ -347,7 +354,7 @@ async function resolveReceiptValidation(
            AND (quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review') OR quarantine_reason IS NULL)`,
         [ticketId],
       );
-      await updateUserRiskScore(userId, 2, client);
+      if (failPenalty !== 0) await updateUserRiskScore(userId, failPenalty, client);
       await syncUserQuarantineState(userId, drawId, client);
     }
 
@@ -457,34 +464,81 @@ export const validateReceiptAsync = (
     const pool = getPool();
     try {
       const provider = getProvider();
-      const result = await provider.validate(imageUrl, expected);
+      let result = await provider.validate(imageUrl, expected);
 
-      // Hard requirements — instant fail if either is missing
-      const hardFail = !result.isReceipt || !result.identifierFound;
-
+      // Hard requirements — instant fail if either is missing.
       // Soft checks — three states:
       //   true  = found on receipt and matches user's claim ✓
       //   false = found on receipt but doesn't match → fraud signal → fail
       //   null  = not visible in image → can't verify → let it slide
-      const softChecks = [result.amountMatches, result.dateMatches, result.businessNameFound];
-      const anyWrong   = softChecks.some(v => v === false);
-      const anyMissing = softChecks.some(v => v === null);
+      const verdictOf = (r: OcrValidationResult) => {
+        const hardFail   = !r.isReceipt || !r.identifierFound;
+        const softChecks = [r.amountMatches, r.dateMatches, r.businessNameFound];
+        const anyWrong   = softChecks.some(v => v === false);
+        const anyMissing = softChecks.some(v => v === null);
+        // If any check found a value but it contradicts the user's claim → fail
+        // If all found checks match, but some couldn't be verified → partial pass (-1)
+        // If everything verified and matches → full pass (-3)
+        const fullPass    = !hardFail && !anyWrong && !anyMissing;
+        const partialPass = !hardFail && !anyWrong && anyMissing;
+        return { passed: fullPass || partialPass, riskDelta: fullPass ? -3 : partialPass ? -1 : 2 };
+      };
+      let { passed, riskDelta } = verdictOf(result);
+      // Risk penalty applied on a FAILED validation. 2 = the standard fraud-signal penalty;
+      // zeroed for honest-mistake failures (see the tip-flag case below).
+      let failPenalty = 2;
 
-      // If any check found a value but it contradicts the user's claim → fail
-      // If all found checks match, but some couldn't be verified → partial pass (-1)
-      // If everything verified and matches → full pass (-3)
-      const fullPass    = !hardFail && !anyWrong && !anyMissing;
-      const partialPass = !hardFail && !anyWrong && anyMissing;
-      const passed      = fullPass || partialPass;
-      const riskDelta   = fullPass ? -3 : partialPass ? -1 : 2;
+      // LLM judgment layer (Gemini on the SAME Vision text — no extra OCR call): consulted only
+      // for regex passes, tighten-only and grounded, so it can catch a claimed amount that is
+      // printed but isn't the total, a with-tip claim (Rules count pre-tip only), incoherent
+      // arithmetic (fabricated document), a non-receipt with receipt keywords, or a receipt
+      // from a different merchant — but can never rescue a fail nor invent evidence. Any LLM
+      // failure returns null and the regex verdict stands (see receiptValidationLlm.ts).
+      if (passed && result.rawText) {
+        // Cheap idempotency pre-check: a concurrent run (boot recovery racing a live job, or
+        // two instances) may have resolved this ticket while Vision ran. resolveReceipt*'s
+        // transactional guard already makes the double-fire a no-op; this just skips a wasted
+        // (and nondeterministic) LLM call whose judgment would be discarded anyway.
+        const preCheck = await pool.query(
+          `SELECT image_validation_status FROM ticket WHERE id = $1`,
+          [ticketId],
+        );
+        const preStatus: string | undefined = preCheck.rows[0]?.image_validation_status;
+        if (preStatus !== 'pending' && preStatus !== 'ocr_error') return;
+
+        const judgment = await judgeReceiptLlm(result.rawText, expected);
+        const tightening = applyLlmTightening(result, expected, judgment);
+        if (tightening.reasons.length > 0) {
+          console.log(`[OCR] LLM tightened ticket ${ticketId}: ${tightening.reasons.join(', ')}`);
+          result = tightening.result;
+          ({ passed, riskDelta } = verdictOf(result));
+          // A tip-inclusive claim is an HONEST mistake (they typed the bottom line of their
+          // own receipt), not fraud: quarantine the entry so the inflated amount never enters
+          // the draw, but apply NO fraud penalty. Every other flag keeps the standard +2.
+          if (!passed && tightening.reasons.every(r => r === 'llm_amount_includes_tip')) {
+            failPenalty = 0;
+          }
+        }
+        if (judgment && judgment.tip !== null) {
+          console.log(`[OCR] Tip line on ticket ${ticketId}: claimed ${expected.amount}, pre-tip ${judgment.preTipTotal ?? 'unknown'}, tip ${judgment.tip}`);
+        }
+        if (judgment?.mathConsistent === false) {
+          // Logged even when the grounding check discarded the flag, so admins can audit.
+          // mathProblem is model free-text that may echo receipt content (PII) - dev only,
+          // same policy as the raw Vision text log.
+          const detail = process.env.NODE_ENV !== 'production' ? (judgment.mathProblem ?? 'unspecified') : '[detail redacted]';
+          console.log(`[OCR] Math inconsistency reported on ticket ${ticketId}: ${detail}`);
+        }
+      }
 
       // Anti-squatting: a 'contest_pending' ticket is a user proving (with this image) that a
       // receipt a SQUATTER typed with no image is really theirs. Overriding another human's
       // entry demands a STRICTER bar than a normal OCR pass: the business name AND the amount
       // must be positively confirmed on the image (not merely "not contradicted"). Without this,
       // any photo that merely CONTAINS the number string could supersede an honest typed-only
-      // entry (identifierFound is a naive substring; businessNameFound alone is true|null and can
-      // never fail). Requiring both confirmed means the contester must hold a legible receipt
+      // entry (identifierFound is a naive substring; the regex matcher never sets
+      // businessNameFound=false — only the grounded LLM layer can). Requiring both confirmed
+      // means the contester must hold a legible receipt
       // that names the business and shows the amount - effectively the real receipt.
       const contestProven = passed && result.businessNameFound === true && result.amountMatches === true;
       const meta = await pool.query(
@@ -502,7 +556,7 @@ export const validateReceiptAsync = (
       if (quarantineReason === 'contest_pending') {
         await resolveReceiptContest(
           pool, ticketId, userId, drawId, passed, contestProven, riskDelta,
-          businessId, meta.rows[0].receipt_identifier,
+          businessId, meta.rows[0].receipt_identifier, failPenalty,
         );
         return;
       }
@@ -511,7 +565,7 @@ export const validateReceiptAsync = (
       // one transaction under the per-receipt advisory lock so concurrency can't race a second
       // standing entry and a crash can't leave a half-applied verdict.
       await resolveReceiptValidation(
-        pool, ticketId, userId, drawId, businessId, identifier, result, passed, contestProven, riskDelta,
+        pool, ticketId, userId, drawId, businessId, identifier, result, passed, contestProven, riskDelta, failPenalty,
       );
     } catch (err) {
       // Provider error (network, OCR failure, etc.) or a resolution that rolled back —
