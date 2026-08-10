@@ -47,7 +47,7 @@ describe('buildOfficialRulesText', () => {
     expect(text).toContain('Draw Date: August 31, 2026');
     expect(text).toContain('August 1, 2026 at 12:00 AM Eastern Time (ET)');
     expect(text).toContain('Cash prize of $250.00');
-    expect(text).toContain('Eligible Jurisdictions: State of Florida, United States only');
+    expect(text).toContain('Eligible Jurisdiction(s): State of Florida, United States only');
   });
 
   it('leaves NO unsubstituted placeholder anywhere (legal archive must be complete)', () => {
