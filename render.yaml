@@ -14,7 +14,8 @@ services:
     # APPLIES this value: "free" here silently downgraded prod on 2026-08-10
     # (spin-down + wake-up delays returned). Never set this back to free.
     plan: starter
-    branch: develop
+    # Production deploys from main ONLY. Staging (below) is the develop branch.
+    branch: main
     buildCommand: npm install --include=dev && npm run build
     startCommand: npm start
     envVars:
