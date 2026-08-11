@@ -9,8 +9,11 @@ services:
   - type: web
     name: winnbell-api
     env: node
-    region: virginia 
-    plan: free
+    region: virginia
+    # MUST match the paid tier set in the Render dashboard. A blueprint sync
+    # APPLIES this value: "free" here silently downgraded prod on 2026-08-10
+    # (spin-down + wake-up delays returned). Never set this back to free.
+    plan: starter
     branch: main
     buildCommand: npm install --include=dev && npm run build
     startCommand: npm start
