@@ -102,7 +102,9 @@ services:
     name: winnbell-api-staging
     env: node
     region: oregon
-    plan: free
+    # Staging is ALSO a paid Starter instance. A blueprint sync applies this value:
+    # "free" here downgraded staging on 2026-08-11, same as prod the day before.
+    plan: starter
     branch: develop
     buildCommand: npm install --include=dev && npm run build
     startCommand: npm start
