@@ -4,6 +4,7 @@ import app from './app.js';
 import { recoverStaleOcrJobs } from './features/ocr/ocr.service.js';
 import { cleanupExpiredRefreshTokens } from './features/auth/auth.service.js';
 import { cleanupOldWebhookEvents, reconcileSubscriptionsWithStripe } from './features/stripe/stripe.service.js';
+import { rollupFunnelDaily } from './features/analytics/analytics.rollup.js';
 import { initMonitoring } from './shared/monitoring.js';
 import { initGeoLite } from './shared/geo/geolite.js';
 
@@ -59,6 +60,15 @@ const startServer = async () => {
     setInterval(() => {
       recoverStaleOcrJobs().catch(err => console.error('[OCR] periodic recovery failed:', err));
     }, 30 * 60 * 1000);
+
+    // Funnel analytics rollup + raw-event retention: once shortly after boot (idempotent,
+    // advisory-lock-guarded so scaled-out instances don't double-run), then every 24 hours.
+    setTimeout(() => {
+      rollupFunnelDaily().catch(err => console.error('[funnel] boot rollup failed:', err));
+    }, 5 * 60 * 1000);
+    setInterval(() => {
+      rollupFunnelDaily().catch(err => console.error('[funnel] periodic rollup failed:', err));
+    }, 24 * 60 * 60 * 1000);
   } catch (error) {
     console.error('Failed to start server:', error);
     process.exit(1);

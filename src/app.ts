@@ -11,8 +11,10 @@ import * as drawsController from './features/draws/draws.controller.js';
 import stripeWebhookRoutes from './features/stripe/stripe.routes.js';
 import notificationRoutes from './features/notifications/notifications.routes.js';
 import phoneRouter from './features/phone/phone.routes.js';
+import { twilioStatusWebhook } from './features/phone/phone.controller.js';
 import referralRoutes from './features/referral/referral.routes.js';
 import contactRoutes from './features/contact/contact.routes.js';
+import analyticsRoutes from './features/analytics/analytics.routes.js';
 import { resolveReferral } from './features/referral/referral.controller.js';
 import { Router } from 'express';
 import {
@@ -202,6 +204,24 @@ const notificationsLimiter = rateLimit({
 
 // Stripe webhook must receive raw body — register BEFORE express.json()
 app.use('/webhooks/stripe', express.raw({ type: 'application/json' }), stripeWebhookRoutes);
+
+// Twilio delivery-status callback (urlencoded, signature-validated in the handler).
+app.post('/webhooks/twilio-status', express.urlencoded({ extended: false, limit: '5kb' }), twilioStatusWebhook);
+
+// Funnel analytics ingestion - registered BEFORE the global express.json() so it gets
+// its own tight 10kb body cap (a batch of 25 tiny events fits in ~4kb). Public: the
+// registration funnel starts before an account exists; optionalAuth binds user_id
+// when a JWT is present. The endpoint itself always answers 204 (see controller).
+const funnelLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  max: 120 * RATE_LIMIT_MULTIPLIER, // a real journey sends ~5-8 batches; 120 is abuse headroom
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: getClientIpKey,
+  store: makeRateLimitStore('funnel'),
+  message: { message: 'Too many requests.' },
+});
+app.use('/events', funnelLimiter, express.json({ limit: '10kb' }), optionalAuth, analyticsRoutes);
 
 app.use(express.json());
 

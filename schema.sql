@@ -96,7 +96,10 @@ CREATE TABLE IF NOT EXISTS phone_otp (
   code         VARCHAR(6) NOT NULL,
   expires_at   TIMESTAMP NOT NULL,
   attempts     INTEGER NOT NULL DEFAULT 0,
-  created_at   TIMESTAMP NOT NULL DEFAULT NOW()
+  created_at   TIMESTAMP NOT NULL DEFAULT NOW(),
+  -- Twilio MessageSid of the OTP SMS: correlates the /webhooks/twilio-status delivery
+  -- callback back to this OTP (funnel otp_delivered/otp_undelivered events).
+  twilio_message_sid TEXT NULL
 );
 
 
@@ -858,3 +861,67 @@ CREATE TABLE IF NOT EXISTS business_profile_view (
   UNIQUE (user_id, business_id, location_id)
 );
 CREATE INDEX IF NOT EXISTS idx_bpv_business_time ON business_profile_view (business_id, last_viewed_at);
+
+
+-- ── funnel_event (funnel analytics: registration + submission event stream) ──────────────────
+-- Append-only, PII-free (no emails/phones/receipt ids/amounts - only that a step happened).
+-- Client events arrive batched via POST /events (whitelisted types only); server-authoritative
+-- events (account_created, submission_accepted/rejected, otp_*) are emitted fire-and-forget
+-- AFTER commit/response, never inside a transaction. session_id = client-minted journey UUID
+-- (localStorage, 30-min idle rotation); account_created carries session+user and stitches the
+-- anonymous pre-signup journey to the user. meta.quarantined on submission_accepted is
+-- INTERNAL ONLY - never client-visible (shadowban invariant). Raw retention 180 days, then
+-- pruned after rollup into funnel_daily / funnel_transition_daily.
+CREATE TABLE IF NOT EXISTS funnel_event (
+  id           BIGSERIAL PRIMARY KEY,
+  event_id     UUID NOT NULL,       -- client/server minted; dedup key for idempotent retries
+  session_id   UUID NULL,           -- NULL = server context with no journey (e.g. async OCR worker)
+  user_id      INTEGER NULL REFERENCES "user"(id) ON DELETE SET NULL,
+  event_type   TEXT NOT NULL CHECK (event_type IN (
+    'scan_landing_viewed','join_landing_viewed','registration_page_viewed','registration_started',
+    'registration_email_entered','terms_accepted','registration_submitted','registration_failed',
+    'email_verification_pending','profile_setup_viewed','submit_page_viewed','submit_business_selected',
+    'submit_amount_entered','submit_receipt_id_entered','receipt_scan_used','submit_image_attached',
+    'submit_attempted','submission_confirmed_shown',
+    'account_created','first_login','returning_login','profile_setup_completed','profile_setup_failed',
+    'otp_requested','otp_send_failed','otp_delivered','otp_undelivered','otp_verify_attempted',
+    'otp_verified','otp_verify_failed','submission_accepted','submission_rejected',
+    'submission_ocr_cleared','submission_ocr_rejected'
+  )),
+  reason_code  TEXT NULL CHECK (reason_code IN (
+    'below_threshold','receipt_too_old','date_outside_campaign','duplicate_receipt','receipt_contested',
+    'image_required','daily_limit_high_risk','sequential_pattern','location_cap_reached',
+    'user_draw_cap_reached','weekly_limit_reached','email_unverified','phone_unverified',
+    'no_active_campaign','invalid_code','out_of_region','technical_error','unknown_error',
+    'email_taken','weak_password','provider_error','under_18','invalid_state','invalid_input',
+    'wrong_code','expired','too_many_attempts','send_error'
+  )),
+  location_id  INTEGER NULL REFERENCES business_location(id) ON DELETE SET NULL,
+  device_class TEXT NULL CHECK (device_class IN ('ios_pwa','ios_safari','android_pwa','android_chrome','desktop','other')),
+  client_ts    TIMESTAMP NULL,      -- client clock (intra-session deltas); occurred_at is server truth
+  occurred_at  TIMESTAMP NOT NULL DEFAULT NOW(),
+  meta         JSONB NULL           -- whitelisted small keys only (entry_count, sid, preselected...)
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_funnel_event_dedup   ON funnel_event (event_id);
+CREATE INDEX IF NOT EXISTS idx_funnel_event_session ON funnel_event (session_id);
+CREATE INDEX IF NOT EXISTS idx_funnel_event_user    ON funnel_event (user_id) WHERE user_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_funnel_event_time    ON funnel_event USING BRIN (occurred_at);
+
+-- Rollups (idempotent nightly upserts; dashboards read ONLY these, never raw funnel_event).
+CREATE TABLE IF NOT EXISTS funnel_daily (
+  day          DATE NOT NULL,
+  event_type   TEXT NOT NULL,
+  device_class TEXT NOT NULL DEFAULT '',
+  n            INTEGER NOT NULL,
+  PRIMARY KEY (day, event_type, device_class)
+);
+CREATE TABLE IF NOT EXISTS funnel_transition_daily (
+  day        DATE NOT NULL,
+  from_step  TEXT NOT NULL,
+  to_step    TEXT NOT NULL,
+  n          INTEGER NOT NULL,
+  avg_s      DOUBLE PRECISION NULL,
+  p50_s      DOUBLE PRECISION NULL,
+  p90_s      DOUBLE PRECISION NULL,
+  PRIMARY KEY (day, from_step, to_step)
+);

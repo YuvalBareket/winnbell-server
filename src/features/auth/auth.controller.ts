@@ -1,6 +1,7 @@
 import { Request, Response } from 'express';
 import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
+import { recordFunnelEvent } from '../analytics/analytics.service.js';
 import { createRemoteJWKSet, jwtVerify } from 'jose';
 import * as authService from './auth.service.js';
 import { RegisterRequest, AuthResponse } from './auth.types.js';
@@ -134,6 +135,10 @@ export const profileSetup = async (req: Request, res: Response): Promise<void> =
   try {
     const result = await authService.completeProfileSetup(userId, dateOfBirth, gender, state);
     res.json({ message: 'Profile updated', ...result });
+    recordFunnelEvent({
+      eventType: 'profile_setup_completed', userId,
+      sessionId: typeof req.headers?.['x-wb-fsid'] === 'string' ? (req.headers['x-wb-fsid'] as string) : null,
+    });
   } catch (error: unknown) {
     if (error instanceof Error && error.message === 'User not found') {
       res.status(404).json({ message: 'User not found' });
@@ -142,6 +147,12 @@ export const profileSetup = async (req: Request, res: Response): Promise<void> =
     if (error instanceof Error && (error.message.startsWith('Please') || error.message.startsWith('You must'))) {
       // Validation errors from the service carry user-facing messages
       res.status(400).json({ message: error.message });
+      recordFunnelEvent({
+        eventType: 'profile_setup_failed', userId,
+        sessionId: typeof req.headers?.['x-wb-fsid'] === 'string' ? (req.headers['x-wb-fsid'] as string) : null,
+        reasonCode: error.message.startsWith('You must') ? 'under_18'
+          : error.message.toLowerCase().includes('state') ? 'invalid_state' : 'invalid_input',
+      });
       return;
     }
     res.status(500).json({ message: 'Server error' });
@@ -274,6 +285,7 @@ export const syncUser = async (req: Request, res: Response): Promise<void> => {
       acquisitionSource: (acquisitionSource as string) || null,
       acquiredViaLocationId: typeof acquiredViaLocationId === 'number' ? acquiredViaLocationId : (Number(acquiredViaLocationId) || null),
       promoCode: (promoCode as string) || null,
+      funnelSessionId: typeof req.headers?.['x-wb-fsid'] === 'string' ? (req.headers['x-wb-fsid'] as string) : null,
     });
 
     res.json(result);

@@ -112,11 +112,19 @@ export const sendPhoneOtp = async (userId: number, phoneNumber: string): Promise
 
   if (isSmsLive()) {
     try {
-      await getTwilio().messages.create({
+      const message = await getTwilio().messages.create({
         to: normalizedPhone,
         from: process.env.TWILIO_FROM_NUMBER!,
         body: `Your Winnbell verification code is ${code}. It expires in ${OTP_EXPIRY_MINUTES} minutes.`,
+        // Delivery receipts for the funnel (otp_delivered/otp_undelivered). Only set when
+        // the env is configured; Twilio ignores an absent statusCallback.
+        ...(process.env.TWILIO_STATUS_CALLBACK_URL ? { statusCallback: process.env.TWILIO_STATUS_CALLBACK_URL } : {}),
       });
+      // Correlates the status callback to this OTP. Best-effort: a failure here must not
+      // fail the send (the SMS is already on its way).
+      await pool
+        .query(`UPDATE phone_otp SET twilio_message_sid = $1 WHERE id = $2`, [message.sid, inserted.rows[0].id])
+        .catch((e) => console.error('[phone] sid store failed:', e instanceof Error ? e.message : e));
     } catch (err) {
       // The SMS never went out: remove the row so the user is not stuck in a "code sent"
       // state that cannot verify and blocks the next attempt via the 60s spacing check.

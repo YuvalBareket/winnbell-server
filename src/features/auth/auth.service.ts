@@ -7,6 +7,7 @@ import { isIP } from 'net';
 import { getPlatformSettings, invalidateUserAuth, regionIpCache } from '../../shared/cache/cache.js';
 import { lookupGeoLite } from '../../shared/geo/geolite.js';
 import { resolveReferrerIdForSignup } from '../referral/referral.service.js';
+import { recordFunnelEvent } from '../analytics/analytics.service.js';
 const getAllowedStates = async (): Promise<string[]> => {
   const settings = await getPlatformSettings();
   return settings.allowed_states ?? [];
@@ -554,7 +555,7 @@ export const syncExternalUser = async (
   externalId: string,
   email: string,
   fullName: string,
-  metadata?: { role?: string; inviteToken?: string | null; ip?: string; referralCode?: string | null; acquisitionSource?: string | null; acquiredViaLocationId?: number | null; promoCode?: string | null },
+  metadata?: { role?: string; inviteToken?: string | null; ip?: string; referralCode?: string | null; acquisitionSource?: string | null; acquiredViaLocationId?: number | null; promoCode?: string | null; funnelSessionId?: string | null },
 ) => {
   const pool = getPool();
   email = email.toLowerCase().trim();
@@ -644,10 +645,14 @@ export const syncExternalUser = async (
              registration_ip = COALESCE("user".registration_ip, EXCLUDED.registration_ip),
              city = COALESCE("user".city, EXCLUDED.city),
              updated_at = NOW()
-       RETURNING id, role, full_name AS "fullName", email, token_epoch, is_active, date_of_birth::text AS date_of_birth, gender, state, created_at`,
+       RETURNING id, role, full_name AS "fullName", email, token_epoch, is_active, date_of_birth::text AS date_of_birth, gender, state, created_at, (xmax = 0) AS was_created`,
       [externalId, email, fullName, role, detectedState, safeIp, detectedCity],
     );
     const dbUser = upsertResult.rows[0];
+    // Fresh INSERT vs existing row (xmax = 0 only on newly inserted tuples). Captured for
+    // the funnel event below, then removed so it never leaks into the auth response spread.
+    const wasCreated = dbUser.was_created === true;
+    delete dbUser.was_created;
 
     // TOCTOU guard: a concurrent deleteAccount can commit between the deleted-check above
     // and this upsert (which deliberately does NOT resurrect is_active). Re-check on the
@@ -748,6 +753,18 @@ export const syncExternalUser = async (
 
     await client.query('COMMIT');
     invalidateUserAuth(dbUser.id);
+
+    // Funnel: authoritative signup/login events, fire-and-forget after commit.
+    // account_created doubles as the first login (external-auth signup and first
+    // sign-in are the same moment), so first_login is intentionally never emitted.
+    recordFunnelEvent(
+      wasCreated
+        ? {
+            eventType: 'account_created', userId: dbUser.id, sessionId: metadata?.funnelSessionId ?? null,
+            locationId: acquiredViaLocationId, meta: { source: acquisitionSource },
+          }
+        : { eventType: 'returning_login', userId: dbUser.id, sessionId: metadata?.funnelSessionId ?? null },
+    );
 
     return {
       message: 'Sync successful',

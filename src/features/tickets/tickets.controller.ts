@@ -5,6 +5,16 @@ import { AuthRequest } from '../../shared/middleware/auth.middleware.js';
 import { validateLength } from '../../shared/validation.js';
 import { getClientIp } from '../../shared/clientIp.js';
 import { normalizeReceiptIdentifier } from '../ocr/receiptIdentity.js';
+import { recordFunnelEvent } from '../analytics/analytics.service.js';
+import { mapErrorToReasonCode } from '../analytics/reasonCodes.js';
+
+// Funnel journey id: minted client-side, sent on every api call by the tracker.
+// Absent (old clients, direct API use) is fine - events still link via user_id.
+// req.headers (not req.header()) so bare test-mock requests work too.
+const funnelSessionId = (req: AuthRequest): string | null => {
+  const v = req.headers?.['x-wb-fsid'];
+  return typeof v === 'string' ? v : null;
+};
 
 export const getMyTickets = async (req: AuthRequest, res: Response) => {
   try {
@@ -53,12 +63,22 @@ export const activate = async (req: AuthRequest, res: Response) => {
     const userId = req.user!.id;
     const result = await ticketService.activateFreeTicket(userId, getClientIp(req), res.locals.entryRegion);
     res.status(201).json(result);
+    // Funnel: fire-and-forget AFTER the response; ticket_id lets internal queries join
+    // quarantine state without it ever entering a client payload.
+    recordFunnelEvent({
+      eventType: 'submission_accepted', userId, sessionId: funnelSessionId(req),
+      meta: { entry_source: 'free', entry_count: 1, ticket_id: result.ticketId },
+    });
   } catch (error: unknown) {
     // Surface the service's curated, user-facing reason (weekly limit, no open campaign,
     // 30-entry cap, email not verified) - same pattern as activatePromotional/submitReceiptEntry.
     // PHONE_NOT_VERIFIED never reaches here (requirePhoneVerified middleware runs first).
     const message = error instanceof Error && error.message ? error.message : 'Activation failed';
     res.status(400).json({ message });
+    recordFunnelEvent({
+      eventType: 'submission_rejected', userId: req.user?.id ?? null, sessionId: funnelSessionId(req),
+      reasonCode: mapErrorToReasonCode(message), meta: { entry_source: 'free' },
+    });
   }
 };
 
@@ -140,9 +160,19 @@ export const submitReceiptEntry = async (req: AuthRequest, res: Response) => {
       tickets: result.tickets,
       entryCount: result.entryCount,
     });
+    recordFunnelEvent({
+      eventType: 'submission_accepted', userId, sessionId: funnelSessionId(req),
+      meta: { entry_source: 'receipt', entry_count: result.entryCount, ticket_id: firstTicket.ticketId },
+    });
   } catch (error: unknown) {
+    const funnelReject = (reason: ReturnType<typeof mapErrorToReasonCode>) =>
+      recordFunnelEvent({
+        eventType: 'submission_rejected', userId: req.user?.id ?? null, sessionId: funnelSessionId(req),
+        reasonCode: reason, meta: { entry_source: 'receipt' },
+      });
     if (error instanceof Error && error.message === 'PHONE_NOT_VERIFIED') {
       res.status(403).json({ message: 'PHONE_NOT_VERIFIED' });
+      funnelReject('phone_unverified');
       return;
     }
     // Anti-squatting: another user typed this receipt with no image. Ask this user (who may
@@ -153,11 +183,13 @@ export const submitReceiptEntry = async (req: AuthRequest, res: Response) => {
         code: 'RECEIPT_CONTEST_IMAGE_REQUIRED',
         message: 'It looks like this receipt was already entered. Attach a photo of it and try again to confirm it is yours.',
       });
+      funnelReject('receipt_contested');
       return;
     }
     // Surface the service's curated, user-facing message (threshold, dates, duplicates, etc.).
     const message = error instanceof Error && error.message ? error.message : 'Entry submission failed.';
     res.status(400).json({ message });
+    funnelReject(mapErrorToReasonCode(message));
   }
 };
 
@@ -191,10 +223,18 @@ export const activatePromotional = async (req: AuthRequest, res: Response) => {
 
     const result = await ticketService.activatePromotionalEntry(userId, code, res.locals.entryRegion);
     res.status(201).json({ success: true, ...result });
+    recordFunnelEvent({
+      eventType: 'submission_accepted', userId, sessionId: funnelSessionId(req),
+      meta: { entry_source: 'promo', entry_count: 1, ticket_id: result.ticketId },
+    });
   } catch (error: unknown) {
     // Surface the service's curated, user-facing message (invalid code, max uses, one-per-campaign, cap).
     const message = error instanceof Error && error.message ? error.message : 'Promotional entry failed.';
     res.status(400).json({ message });
+    recordFunnelEvent({
+      eventType: 'submission_rejected', userId: req.user?.id ?? null, sessionId: funnelSessionId(req),
+      reasonCode: mapErrorToReasonCode(message), meta: { entry_source: 'promo' },
+    });
   }
 };
 

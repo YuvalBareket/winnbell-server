@@ -6,6 +6,7 @@ import { GoogleVisionProvider } from './providers/google-vision.provider.js';
 import { judgeReceiptLlm, applyLlmTightening } from './receiptValidationLlm.js';
 import type { OcrProvider, OcrExpected, OcrValidationResult } from './ocr.types.js';
 import { canonicalizeReceiptIdentifier } from './receiptIdentity.js';
+import { recordFunnelEvent } from '../analytics/analytics.service.js';
 
 // ─── Anti-squatting: contest resolution ───────────────────────────────────────
 // A 'contest_pending' ticket carries an image proving the real owner holds a receipt that
@@ -164,6 +165,11 @@ async function resolveReceiptContest(
     }
 
     await client.query('COMMIT');
+    // Funnel: contest verdict (internal-only). won -> cleared; otherwise the entry stays out.
+    recordFunnelEvent({
+      eventType: won ? 'submission_ocr_cleared' : 'submission_ocr_rejected',
+      userId, reasonCode: won ? null : 'receipt_contested', meta: { ticket_id: contestTicketId },
+    });
   } catch (err) {
     await safeRollback(client);
     throw err;
@@ -311,6 +317,11 @@ async function resolveReceiptValidation(
           // (business + amount not both confirmed) - so THIS entry is the later duplicate.
           await handleDuplicateDocument(client, ticketId, userId, drawId);
           await client.query('COMMIT');
+          // Funnel (internal-only; the user is never told - shadowban invariant).
+          recordFunnelEvent({
+            eventType: 'submission_ocr_rejected', userId,
+            reasonCode: 'duplicate_receipt', meta: { ticket_id: ticketId },
+          });
           return;
         }
         // This image is PROVEN and every competing claim is just a typed number: this user holds
@@ -359,6 +370,11 @@ async function resolveReceiptValidation(
     }
 
     await client.query('COMMIT');
+    // Funnel: the spec's review-outcome beats (internal-only; user never notified).
+    recordFunnelEvent({
+      eventType: passed ? 'submission_ocr_cleared' : 'submission_ocr_rejected',
+      userId, meta: { ticket_id: ticketId },
+    });
   } catch (err) {
     await safeRollback(client);
     throw err; // let the caller's catch record an ocr_error for retry
