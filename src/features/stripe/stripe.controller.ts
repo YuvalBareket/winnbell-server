@@ -17,6 +17,15 @@ import {
   createFoundingRenewalCheckoutSession,
 } from './stripe.service.js';
 
+// ── TEMPORARY: September trial campaign ─────────────────────────────────────────
+// During the trial, businesses are added to campaigns manually and no one subscribes.
+// This is the server-side backstop for the paused subscribe page (client const
+// CAMPAIGN_SIGNUP_PAUSED): even a request that bypasses the UI cannot open a Stripe
+// checkout. Active on deployed environments only (Render sets NODE_ENV=production on
+// BOTH prod and staging); local dev stays open so the payment flow can still be tested.
+// Remove this const + its guard in createCheckout to restore self-serve payments.
+const SUBSCRIPTIONS_PAUSED = process.env.NODE_ENV === 'production';
+
 // GET /business/subscription/founding-availability  (public — no auth)
 export const getFoundingAvailability = async (_req: Request, res: Response) => {
   try {
@@ -34,6 +43,13 @@ export const getFoundingAvailability = async (_req: Request, res: Response) => {
 // Body: { entries_per_location } → regular monthly subscription
 export const createCheckout = async (req: Request, res: Response) => {
   try {
+    // Trial backstop: no new subscriptions can be purchased while sign-ups are paused,
+    // regardless of what the client sends. Covers both the founding and regular flows.
+    if (SUBSCRIPTIONS_PAUSED) {
+      res.status(403).json({ error: 'New subscriptions are temporarily unavailable.' });
+      return;
+    }
+
     const userId = req.user!.id;
     const business = await getBusinessForCheckout(userId);
     if (!business) {
