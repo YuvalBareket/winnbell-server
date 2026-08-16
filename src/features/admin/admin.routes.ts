@@ -7,6 +7,7 @@ import {
   adminGetCampaignEntries,
   adminGetBusinessAnalytics,
 } from './adminBusinessView.controller.js';
+import { getFunnelAnalytics } from './adminFunnel.controller.js';
 import { requireRole } from '../../shared/middleware/auth.middleware.js';
 
 const router = Router();
@@ -14,6 +15,7 @@ const router = Router();
 router.use(requireRole('Admin'));
 
 router.get('/overview', adminController.getOverview);
+router.get('/funnel', getFunnelAnalytics);
 router.get('/businesses', adminController.getDashboardData);
 // health-summary MUST be registered before /businesses/:businessId so the literal
 // string 'health-summary' is never captured as a businessId param (Express 5 matches
