@@ -19,7 +19,7 @@ export const getFunnelAnalytics = async (req: Request, res: Response): Promise<v
     const days = ALLOWED_DAYS.includes(Number(req.query.days)) ? Number(req.query.days) : 30;
     const pool = getPool();
 
-    const [totals, reasons, daily, transitions] = await Promise.all([
+    const [totals, reasons, daily, transitions, journey] = await Promise.all([
       pool.query(
         `SELECT event_type, COUNT(*)::int AS n
          FROM funnel_event
@@ -53,6 +53,30 @@ export const getFunnelAnalytics = async (req: Request, res: Response): Promise<v
          GROUP BY 1, 2`,
         [days],
       ),
+      // New-user journey: PER-USER (not per-event) activation funnel for the cohort who
+      // created their account in the range. Answers the question the event funnels can't:
+      // how many new users never got an entry. EXISTS lookups ride the partial user index.
+      pool.query(
+        `WITH cohort AS (
+           SELECT DISTINCT user_id FROM funnel_event
+           WHERE event_type = 'account_created' AND user_id IS NOT NULL
+             AND occurred_at >= CURRENT_DATE - $1::int
+         )
+         SELECT
+           COUNT(*)::int AS accounts,
+           COUNT(*) FILTER (WHERE EXISTS (
+             SELECT 1 FROM funnel_event f WHERE f.user_id = c.user_id AND f.event_type = 'otp_verified'
+           ))::int AS phone_verified,
+           COUNT(*) FILTER (WHERE EXISTS (
+             SELECT 1 FROM funnel_event f WHERE f.user_id = c.user_id
+               AND f.event_type IN ('submit_attempted', 'submission_accepted', 'submission_rejected')
+           ))::int AS tried_entry,
+           COUNT(*) FILTER (WHERE EXISTS (
+             SELECT 1 FROM funnel_event f WHERE f.user_id = c.user_id AND f.event_type = 'submission_accepted'
+           ))::int AS got_entry
+         FROM cohort c`,
+        [days],
+      ),
     ]);
 
     const totalsMap: Record<string, number> = {};
@@ -66,6 +90,7 @@ export const getFunnelAnalytics = async (req: Request, res: Response): Promise<v
       rejectionReasons: reasons.rows,
       daily: daily.rows,
       transitions: transitions.rows,
+      journey: journey.rows[0],
     });
   } catch (err) {
     console.error('[admin] funnel analytics failed:', err instanceof Error ? err.message : err);
