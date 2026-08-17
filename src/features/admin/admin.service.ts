@@ -2248,6 +2248,7 @@ export const getBusinessDetailService = async (businessId: number) => {
         b.min_transaction_amount,
         b.website_url,
         b.logo_url,
+        b.receipt_example_image_url,
         b.created_at,
         u.id AS owner_id,
         u.full_name AS owner_name,
