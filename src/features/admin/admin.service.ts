@@ -2149,13 +2149,20 @@ export const addBusinessToDrawService = async (drawId: number, businessId: numbe
   if (drawStatus !== 'Upcoming' && drawStatus !== 'Open') throw new Error('Can only add businesses to Upcoming or Open draws');
 
   const subCheck = await pool.query(
-    `SELECT s.fee_at_entry, s.entries_per_location, b.min_transaction_amount
+    `SELECT s.fee_at_entry,
+            -- Plan-less business (manual/free-trial add): snapshot the CURRENT global entry
+            -- cap so the capacity displays (business analytics, admin totals) show a number.
+            -- Display-only semantics: enforcement always reads the LIVE plan/global values
+            -- at submission time, so a later Settings change still governs acceptance even
+            -- though this snapshot keeps showing what the cap was when the business was added.
+            COALESCE(s.entries_per_location, (SELECT global_entry_cap FROM platform_settings WHERE id = 1)) AS cap_for_entry,
+            b.min_transaction_amount
      FROM business b LEFT JOIN subscription s ON s.business_id = b.id AND s.status IN ('Active', 'Trialing')
      WHERE b.id = $1 LIMIT 1`,
     [businessId],
   );
   const feeAtEntry = subCheck.rows[0]?.fee_at_entry ?? 0;
-  const capAtEntry = subCheck.rows[0]?.entries_per_location ?? null;
+  const capAtEntry = subCheck.rows[0]?.cap_for_entry ?? null;
   const minTxAtEntry = subCheck.rows[0]?.min_transaction_amount ?? null;
 
   await pool.query(
