@@ -176,13 +176,25 @@ export interface RegionCheckResult {
  * allowed_states empty/null = no restriction. Detection failures fail open so a
  * geo-API hiccup never locks out legitimate users.
  */
+// US-only enforcement is gated on NODE_ENV=production: the team develops from outside
+// the US, so LOCAL dev keeps the legacy semantics where an empty allowed_states means
+// unrestricted. NOTE: Render sets NODE_ENV=production on BOTH prod AND staging (see the
+// rate-limiter comment in app.ts), so staging enforces US-only too. Where it applies,
+// US-only ALWAYS holds (ToS: 50 states + DC) and the states list only narrows WHICH
+// states qualify; empty = every US state, never worldwide.
+const enforceUsOnly = () => process.env.NODE_ENV === 'production';
+
 export const evaluateRegionRestriction = async (ip: string): Promise<RegionCheckResult> => {
   const { country, stateCode, city, approxLocation } = await getRegionFromIp(ip);
   const allowedStates = await getAllowedStates();
 
-  if (allowedStates.length === 0) return { blocked: false, country, state: stateCode, city, approxLocation };
+  // Legacy dev/staging path: no states configured + prod enforcement off = unrestricted.
+  if (allowedStates.length === 0 && !enforceUsOnly()) {
+    return { blocked: false, country, state: stateCode, city, approxLocation };
+  }
   if (!country) return { blocked: false, country, state: stateCode, city, approxLocation }; // fail open
   if (country !== 'US') return { blocked: true, country, state: stateCode, city, approxLocation };
+  if (allowedStates.length === 0) return { blocked: false, country, state: stateCode, city, approxLocation };
   if (!stateCode) return { blocked: false, country, state: stateCode, city, approxLocation }; // US, state unknown — fail open
   return { blocked: !allowedStates.includes(stateCode), country, state: stateCode, city, approxLocation };
 };
@@ -200,12 +212,16 @@ export interface EntryRegionPolicy {
 /**
  * Entry-time region policy (ToS physical-presence-at-entry). Deliberately LOOSER than the
  * signup check: non-US country = block; wrong US state = report, never block (the caller
- * records it as a risk signal instead). allowed_states empty = platform unrestricted, and
- * the geo lookup is skipped entirely. Detection failures fail open.
+ * records it as a risk signal instead). US-only enforcement follows NODE_ENV=production
+ * (prod + staging, see enforceUsOnly above): with it on, allowed_states empty = every US
+ * state qualifies and no out-of-region signal is recorded; with it off (local dev),
+ * empty = unrestricted and the geo lookup is skipped entirely. Detection failures fail open.
  */
 export const evaluateEntryRegionPolicy = async (ip: string): Promise<EntryRegionPolicy> => {
   const allowedStates = await getAllowedStates();
-  if (allowedStates.length === 0) return { blocked: false, state: null, outOfRegion: false };
+  if (allowedStates.length === 0 && !enforceUsOnly()) {
+    return { blocked: false, state: null, outOfRegion: false };
+  }
 
   const { country, stateCode } = await getRegionFromIp(ip);
   if (!country) return { blocked: false, state: null, outOfRegion: false }; // fail open
@@ -214,7 +230,7 @@ export const evaluateEntryRegionPolicy = async (ip: string): Promise<EntryRegion
   // could double-penalize a request that was already rejected.
   if (country !== 'US') return { blocked: true, state: null, outOfRegion: false };
   if (!stateCode) return { blocked: false, state: null, outOfRegion: false }; // US, state unknown — fail open
-  return { blocked: false, state: stateCode, outOfRegion: !allowedStates.includes(stateCode) };
+  return { blocked: false, state: stateCode, outOfRegion: allowedStates.length > 0 && !allowedStates.includes(stateCode) };
 };
 
 // ── Bot / throwaway-email protection ──────────────────────────────────────────
