@@ -1,19 +1,19 @@
-/**
- * Tests — entry-time region policy (ToS physical-presence-at-entry)
+﻿/**
+ * Tests â€” entry-time region policy (ToS physical-presence-at-entry)
  *
  *   evaluateEntryRegionPolicy
- *     - Unrestricted platform (allowed_states empty) → allowed, NO geo lookup at all
- *     - Non-US country → blocked
- *     - US + allowed state → allowed, state recorded, not out-of-region
- *     - US + non-allowed state → allowed (soft), out-of-region flagged
- *     - US + unresolvable state → allowed, fail open
- *     - Geo lookup failure → allowed, fail open
+ *     - Unrestricted platform (allowed_states empty) â†’ allowed, NO geo lookup at all
+ *     - Non-US country â†’ blocked
+ *     - US + allowed state â†’ allowed, state recorded, not out-of-region
+ *     - US + non-allowed state â†’ allowed (soft), out-of-region flagged
+ *     - US + unresolvable state â†’ allowed, fail open
+ *     - Geo lookup failure â†’ allowed, fail open
  *     - Per-IP cache: repeat lookup for the same IP does not re-fetch
  *
  *   requireEntryRegion middleware
- *     - Blocked policy → 403 { code: 'REGION_RESTRICTED' }, next NOT called
- *     - Allowed policy → next called, res.locals.entryRegion populated
- *     - Policy throws → fail open (next called, no locals)
+ *     - Blocked policy â†’ 403 { code: 'REGION_RESTRICTED' }, next NOT called
+ *     - Allowed policy â†’ next called, res.locals.entryRegion populated
+ *     - Policy throws â†’ fail open (next called, no locals)
  */
 
 const mockPoolQuery = jest.fn();
@@ -54,12 +54,40 @@ afterEach(() => {
   global.fetch = originalFetch;
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // evaluateEntryRegionPolicy
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 describe('evaluateEntryRegionPolicy', () => {
-  it('skips the geo lookup entirely when the platform is unrestricted', async () => {
+  it('PROD (NODE_ENV=production): hard-blocks non-US entries even with no states configured', async () => {
+    // Tripwire for the 2026-08-17 contract: in production an empty allowed_states means
+    // "every US state", never "no region policy".
+    const prevEnv = process.env.NODE_ENV; process.env.NODE_ENV = 'production';
+    try {
+      setAllowedStates([]);
+      global.fetch = mockIpinfo({ country: 'IL' });
+
+      const policy = await evaluateEntryRegionPolicy('203.0.113.50');
+      expect(policy).toEqual({ blocked: true, state: null, outOfRegion: false });
+    } finally {
+      process.env.NODE_ENV = prevEnv;
+    }
+  });
+
+  it('PROD (NODE_ENV=production): allows any US state with no out-of-region signal when no states configured', async () => {
+    const prevEnv = process.env.NODE_ENV; process.env.NODE_ENV = 'production';
+    try {
+      setAllowedStates([]);
+      global.fetch = mockIpinfo({ country: 'US', region: 'Montana' });
+
+      const policy = await evaluateEntryRegionPolicy('203.0.113.55');
+      expect(policy).toEqual({ blocked: false, state: 'MT', outOfRegion: false });
+    } finally {
+      process.env.NODE_ENV = prevEnv;
+    }
+  });
+
+  it('DEV/STAGING (flag off): skips the geo lookup entirely when no states are configured', async () => {
     setAllowedStates([]);
     const fetchSpy = mockIpinfo({ country: 'IL' });
     global.fetch = fetchSpy;
@@ -69,7 +97,7 @@ describe('evaluateEntryRegionPolicy', () => {
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
-  it('hard-blocks a non-US country (outOfRegion stays false — it is a soft signal, never set alongside blocked)', async () => {
+  it('hard-blocks a non-US country (outOfRegion stays false â€” it is a soft signal, never set alongside blocked)', async () => {
     setAllowedStates(['FL']);
     global.fetch = mockIpinfo({ country: 'IL', region: 'Tel Aviv' });
 
@@ -109,7 +137,7 @@ describe('evaluateEntryRegionPolicy', () => {
     expect(policy).toEqual({ blocked: false, state: null, outOfRegion: false });
   });
 
-  it('caches the geo result per IP — the second call does not re-fetch', async () => {
+  it('caches the geo result per IP â€” the second call does not re-fetch', async () => {
     setAllowedStates(['FL']);
     const fetchSpy = mockIpinfo({ country: 'US', region: 'Florida' });
     global.fetch = fetchSpy;
@@ -121,7 +149,7 @@ describe('evaluateEntryRegionPolicy', () => {
     expect(fetchSpy).toHaveBeenCalledTimes(1);
   });
 
-  it('does NOT cache failed lookups — a transient error is retried on the next call', async () => {
+  it('does NOT cache failed lookups â€” a transient error is retried on the next call', async () => {
     setAllowedStates(['FL']);
     global.fetch = jest.fn().mockRejectedValue(new Error('hiccup')) as unknown as typeof fetch;
     await evaluateEntryRegionPolicy('203.0.113.57');
@@ -135,9 +163,9 @@ describe('evaluateEntryRegionPolicy', () => {
   });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 // requireEntryRegion middleware
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 describe('requireEntryRegion middleware', () => {
   // Isolated mock of the policy so middleware behavior is tested independently

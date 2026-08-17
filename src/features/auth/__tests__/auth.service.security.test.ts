@@ -1,5 +1,5 @@
-/**
- * Security & edge-case tests — auth.service.ts (post-Supabase migration)
+﻿/**
+ * Security & edge-case tests â€” auth.service.ts (post-Supabase migration)
  *
  * Covers service-level invariants NOT tested in auth.service.test.ts:
  *
@@ -24,7 +24,7 @@
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 
-// ── Mock DB ───────────────────────────────────────────────────────────────────
+// â”€â”€ Mock DB â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const mockPoolQuery = jest.fn();
 const mockClientQuery = jest.fn();
 const mockRelease = jest.fn();
@@ -37,7 +37,7 @@ jest.mock('../../../shared/db/db.js', () => ({
   }),
 }));
 
-// Region tests below exercise the ipinfo path (mocked global.fetch) — pin GeoLite to
+// Region tests below exercise the ipinfo path (mocked global.fetch) â€” pin GeoLite to
 // "not loaded" so test ordering can never flip which geo branch runs.
 jest.mock('../../../shared/geo/geolite.js', () => ({
   lookupGeoLite: jest.fn().mockReturnValue(null),
@@ -46,11 +46,11 @@ jest.mock('../../../shared/geo/geolite.js', () => ({
 import { registerUser, loginUser, syncExternalUser, signupEmailBlockReason } from '../auth.service';
 import { invalidatePlatformSettings, invalidateRegionIpCache } from '../../../shared/cache/cache.js';
 
-// ── Constants ─────────────────────────────────────────────────────────────────
+// â”€â”€ Constants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 const JWT_SECRET = 'test-secret';
 process.env.JWT_SECRET = JWT_SECRET;
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+// â”€â”€ Helpers â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
 const makeInviteToken = (locationId: number) =>
   jwt.sign({ type: 'MANAGER_INVITE', locationId, businessId: 99 }, JWT_SECRET, { expiresIn: '1h' });
@@ -75,17 +75,17 @@ const setupPoolQueries = (...responses: Array<{ rows: unknown[]; rowCount?: numb
 
 beforeEach(() => {
   jest.clearAllMocks();
-  // platform settings and IP-geo results are cached in real node-caches — flush so each
+  // platform settings and IP-geo results are cached in real node-caches â€” flush so each
   // test's mocked allowed_states / mocked ipinfo fetch actually take effect
   invalidatePlatformSettings();
   invalidateRegionIpCache();
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 1. registerUser — disposable email rejection
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// 1. registerUser â€” disposable email rejection
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-describe('registerUser — disposable email rejection', () => {
+describe('registerUser â€” disposable email rejection', () => {
   it('should reject mailinator.com before touching the DB', async () => {
     await expect(
       registerUser('Spammer', 'spam@mailinator.com', 'password', 'User'),
@@ -117,7 +117,7 @@ describe('registerUser — disposable email rejection', () => {
   it('should accept a normal gmail.com address', async () => {
     setupClientQueries(
       { rows: [] }, // BEGIN
-      { rows: [] }, // email check — not found
+      { rows: [] }, // email check â€” not found
       { rows: [{ id: 10, role: 'User', full_name: 'Real User', email: 'real@gmail.com' }] },
       { rows: [] }, // COMMIT
     );
@@ -139,11 +139,11 @@ describe('registerUser — disposable email rejection', () => {
   });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 1b. Signup-email policy — plus-alias blocking (STRICT_SIGNUP_EMAILS, prod only)
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// 1b. Signup-email policy â€” plus-alias blocking (STRICT_SIGNUP_EMAILS, prod only)
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-describe('signup-email policy — plus-alias blocking in real production only', () => {
+describe('signup-email policy â€” plus-alias blocking in real production only', () => {
   // Strict mode = NODE_ENV=production AND no DEMO_USER_ENABLED (Render staging also
   // runs NODE_ENV=production but carries the demo flag). Uses existing env vars only.
   const originalNodeEnv = process.env.NODE_ENV;
@@ -183,7 +183,7 @@ describe('signup-email policy — plus-alias blocking in real production only', 
 
   it('syncExternalUser: rejects a NEW plus-alias signup with EMAIL_NOT_ALLOWED on prod', async () => {
     enterProd();
-    // pool #1 = existence check → no account = new signup, policy applies
+    // pool #1 = existence check â†’ no account = new signup, policy applies
     setupPoolQueries({ rows: [] });
     await expect(
       syncExternalUser('ext-alias', 'farm+2@gmail.com', 'Alias Farmer', { ip: '8.8.8.8' }),
@@ -192,7 +192,7 @@ describe('signup-email policy — plus-alias blocking in real production only', 
 
   it('syncExternalUser: an EXISTING plus-alias account still signs in on prod', async () => {
     enterProd();
-    // pool #1 = existence check → account exists, policy skipped (no lockout)
+    // pool #1 = existence check â†’ account exists, policy skipped (no lockout)
     setupPoolQueries({ rows: [{ 1: 1 }] });
     setupClientQueries(
       { rows: [] }, // BEGIN
@@ -207,18 +207,18 @@ describe('signup-email policy — plus-alias blocking in real production only', 
   });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 2. syncExternalUser — existing role NOT downgraded on re-sync
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// 2. syncExternalUser â€” existing role NOT downgraded on re-sync
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-describe('syncExternalUser — existing user role is never downgraded', () => {
+describe('syncExternalUser â€” existing user role is never downgraded', () => {
   it('should preserve Admin role returned by DB even when metadata says User', async () => {
     // The ON CONFLICT clause updates external_auth_id, is_email_verified, declared_state
     // but does NOT update the role column. The RETURNING clause returns the DB value.
     // This test verifies the service respects whatever role the DB gives back.
     setupClientQueries(
       { rows: [] }, // BEGIN
-      { rows: [] }, // deletedCheck — not a deleted account
+      { rows: [] }, // deletedCheck â€” not a deleted account
       // Simulates ON CONFLICT DO UPDATE returning the existing DB role (Admin)
       { rows: [{ id: 99, role: 'Admin', fullName: 'Admin User', email: 'admin@prod.com' }] },
       { rows: [] }, // user_acquisition INSERT (added after upsert)
@@ -228,7 +228,7 @@ describe('syncExternalUser — existing user role is never downgraded', () => {
 
     const res = await syncExternalUser('ext-admin', 'admin@prod.com', 'Admin User', { role: 'User' });
 
-    // Service must return whatever role the DB gave back — Admin is preserved
+    // Service must return whatever role the DB gave back â€” Admin is preserved
     expect(res.user.role).toBe('Admin');
     expect(res.message).toBe('Sync successful');
   });
@@ -251,11 +251,11 @@ describe('syncExternalUser — existing user role is never downgraded', () => {
   });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 3. syncExternalUser — region blocking
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// 3. syncExternalUser â€” region blocking
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-describe('syncExternalUser — region blocking via IP', () => {
+describe('syncExternalUser â€” region blocking via IP', () => {
   /** Mock the ipinfo /json response used by getRegionFromIp. */
   const mockIpinfo = (body: { country?: string; region?: string }) =>
     jest.fn().mockResolvedValue({
@@ -267,7 +267,7 @@ describe('syncExternalUser — region blocking via IP', () => {
     const originalFetch = global.fetch;
     global.fetch = mockIpinfo({ country: 'IL', region: 'Tel Aviv' });
 
-    // pool #1 = existence check (no account → new signup, block applies), #2 = allowed_states
+    // pool #1 = existence check (no account â†’ new signup, block applies), #2 = allowed_states
     setupPoolQueries({ rows: [] }, { rows: [{ allowed_states: ['FL'] }] });
 
     try {
@@ -283,7 +283,7 @@ describe('syncExternalUser — region blocking via IP', () => {
     const originalFetch = global.fetch;
     global.fetch = mockIpinfo({ country: 'US', region: 'Georgia' });
 
-    // pool #1 = existence check (no account → new signup, block applies), #2 = allowed_states
+    // pool #1 = existence check (no account â†’ new signup, block applies), #2 = allowed_states
     setupPoolQueries({ rows: [] }, { rows: [{ allowed_states: ['FL'] }] });
 
     try {
@@ -328,7 +328,7 @@ describe('syncExternalUser — region blocking via IP', () => {
     const originalFetch = global.fetch;
     global.fetch = jest.fn().mockRejectedValue(new Error('network error')) as unknown as typeof fetch;
 
-    // allowed_states restricted — but detection failed, so we must fail open
+    // allowed_states restricted â€” but detection failed, so we must fail open
     // pool #1 = existence check (new signup), #2 = allowed_states
     setupPoolQueries({ rows: [] }, { rows: [{ allowed_states: ['FL'] }] });
 
@@ -373,24 +373,71 @@ describe('syncExternalUser — region blocking via IP', () => {
     }
   });
 
-  it('should allow anyone when allowed_states is empty (no restriction configured)', async () => {
+  it('PROD (NODE_ENV=production): blocks a non-US signup even when allowed_states is empty', async () => {
+    // Tripwire for the 2026-08-17 contract: in production, clearing the states list
+    // means "every US state", never "worldwide".
     const originalFetch = global.fetch;
+    const prevEnv = process.env.NODE_ENV; process.env.NODE_ENV = 'production';
     global.fetch = mockIpinfo({ country: 'IL', region: 'Tel Aviv' });
 
-    // pool #1 = existence check (new signup), #2 = allowed_states (empty = unrestricted)
+    // pool #1 = existence check (new signup), #2 = allowed_states (empty = all US states)
+    setupPoolQueries({ rows: [] }, { rows: [{ allowed_states: [] }] });
+
+    try {
+      await expect(
+        syncExternalUser('ext-il2', 'il@test.com', 'IL User', { ip: '203.0.113.9' }),
+      ).rejects.toThrow('REGION_RESTRICTED');
+    } finally {
+      global.fetch = originalFetch;
+      process.env.NODE_ENV = prevEnv;
+    }
+  });
+
+  it('PROD (NODE_ENV=production): allows a US signup from ANY state when allowed_states is empty', async () => {
+    const originalFetch = global.fetch;
+    const prevEnv = process.env.NODE_ENV; process.env.NODE_ENV = 'production';
+    global.fetch = mockIpinfo({ country: 'US', region: 'Montana' });
+
+    // pool #1 = existence check (new signup), #2 = allowed_states (empty = all US states)
     setupPoolQueries({ rows: [] }, { rows: [{ allowed_states: [] }] });
 
     setupClientQueries(
       { rows: [] },
       { rows: [] }, // deletedCheck
-      { rows: [{ id: 44, role: 'User', fullName: 'IL User', email: 'il@test.com' }] },
+      { rows: [{ id: 44, role: 'User', fullName: 'MT User', email: 'mt@test.com' }] },
       { rows: [] }, // user_acquisition INSERT (added after upsert)
       { rows: [] },
       { rows: [] },
     );
 
     try {
-      const res = await syncExternalUser('ext-il2', 'il@test.com', 'IL User', { ip: '203.0.113.9' });
+      const res = await syncExternalUser('ext-mt1', 'mt@test.com', 'MT User', { ip: '8.8.8.8' });
+      expect(res.message).toBe('Sync successful');
+    } finally {
+      global.fetch = originalFetch;
+      process.env.NODE_ENV = prevEnv;
+    }
+  });
+
+  it('DEV/STAGING (NODE_ENV not production): allows a non-US signup when allowed_states is empty (team tests from abroad)', async () => {
+    // Under jest NODE_ENV is 'test' - exactly the non-production case this pins.
+    const originalFetch = global.fetch;
+    global.fetch = mockIpinfo({ country: 'IL', region: 'Tel Aviv' });
+
+    // pool #1 = existence check (new signup), #2 = allowed_states (empty = legacy unrestricted)
+    setupPoolQueries({ rows: [] }, { rows: [{ allowed_states: [] }] });
+
+    setupClientQueries(
+      { rows: [] },
+      { rows: [] }, // deletedCheck
+      { rows: [{ id: 45, role: 'User', fullName: 'IL Dev', email: 'ildev@test.com' }] },
+      { rows: [] }, // user_acquisition INSERT (added after upsert)
+      { rows: [] },
+      { rows: [] },
+    );
+
+    try {
+      const res = await syncExternalUser('ext-il-dev', 'ildev@test.com', 'IL Dev', { ip: '203.0.113.9' });
       expect(res.message).toBe('Sync successful');
     } finally {
       global.fetch = originalFetch;
@@ -399,10 +446,10 @@ describe('syncExternalUser — region blocking via IP', () => {
 
   it('should allow an EXISTING user to sign in from a blocked region (login is never region-blocked)', async () => {
     const originalFetch = global.fetch;
-    // Non-US IP + restricted states — would block a brand-new signup
+    // Non-US IP + restricted states â€” would block a brand-new signup
     global.fetch = mockIpinfo({ country: 'IL', region: 'Tel Aviv' });
 
-    // pool.query #1 = existence check → account already exists. (Region queries never fire after that.)
+    // pool.query #1 = existence check â†’ account already exists. (Region queries never fire after that.)
     setupPoolQueries({ rows: [{ '?column?': 1 }] });
 
     setupClientQueries(
@@ -440,18 +487,18 @@ describe('syncExternalUser — region blocking via IP', () => {
   });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 4. syncExternalUser — Manager via business_location
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// 4. syncExternalUser â€” Manager via business_location
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-describe('syncExternalUser — Manager detection via business_location', () => {
+describe('syncExternalUser â€” Manager detection via business_location', () => {
   it('should populate location_id when user is assigned as manager of a location', async () => {
     setupClientQueries(
       { rows: [] },
       { rows: [] }, // deletedCheck
       { rows: [{ id: 60, role: 'Business', fullName: 'Mgr', email: 'mgr@biz.com' }] },
       { rows: [] }, // user_acquisition INSERT (added after upsert)
-      { rows: [{ id: 7 }] }, // business_location — user is manager
+      { rows: [{ id: 7 }] }, // business_location â€” user is manager
       { rows: [] }, // COMMIT
     );
 
@@ -483,11 +530,11 @@ describe('syncExternalUser — Manager detection via business_location', () => {
   });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 5. syncExternalUser — businessIsActive from is_subscribed
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// 5. syncExternalUser â€” businessIsActive from is_subscribed
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-describe('syncExternalUser — businessIsActive field', () => {
+describe('syncExternalUser â€” businessIsActive field', () => {
   it('should set businessIsActive true when is_subscribed is true', async () => {
     setupClientQueries(
       { rows: [] },
@@ -538,11 +585,11 @@ describe('syncExternalUser — businessIsActive field', () => {
   });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 6. loginUser — business_id in response
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// 6. loginUser â€” business_id in response
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-describe('loginUser — business_id in response', () => {
+describe('loginUser â€” business_id in response', () => {
   const hash = bcrypt.hashSync('pass', 10);
 
   it('should include business_id when Business user has a business row', async () => {
@@ -579,16 +626,16 @@ describe('loginUser — business_id in response', () => {
 
     const res = await loginUser('user@test.com', 'pass');
 
-    // business_id query is never run for User role — result should be null
+    // business_id query is never run for User role â€” result should be null
     expect(res.user.business_id).toBeNull();
   });
 });
 
-// ─────────────────────────────────────────────────────────────────────────────
-// 7. syncExternalUser — Admin role in metadata is always blocked
-// ─────────────────────────────────────────────────────────────────────────────
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// 7. syncExternalUser â€” Admin role in metadata is always blocked
+// â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
 
-describe('syncExternalUser — Admin role escalation blocked', () => {
+describe('syncExternalUser â€” Admin role escalation blocked', () => {
   it('should downgrade Admin metadata role to User before DB upsert', async () => {
     // The service only allows 'Business' or 'User' from metadata.
     // Any other value (including 'Admin') defaults to 'User'.
@@ -603,7 +650,7 @@ describe('syncExternalUser — Admin role escalation blocked', () => {
 
     const res = await syncExternalUser('ext-hacker', 'hacker@test.com', 'Hacker', { role: 'Admin' });
 
-    // Admin is not in the allowlist — the INSERT uses 'User'
+    // Admin is not in the allowlist â€” the INSERT uses 'User'
     // The DB RETURNING clause returns 'User'
     expect(res.user.role).toBe('User');
   });
