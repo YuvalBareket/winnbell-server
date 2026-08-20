@@ -42,13 +42,16 @@ const RESPONSE_SCHEMA = {
     subtotal: { type: 'NUMBER', nullable: true },
     tax: { type: 'NUMBER', nullable: true },
     tip: { type: 'NUMBER', nullable: true },
+    cashTendered: { type: 'NUMBER', nullable: true },
+    changeGiven: { type: 'NUMBER', nullable: true },
     lineItemTotals: { type: 'ARRAY', items: { type: 'NUMBER' }, nullable: true },
     mathConsistent: { type: 'BOOLEAN', nullable: true },
     mathProblem: { type: 'STRING', nullable: true },
   },
   required: [
     'isReceipt', 'actualPayableTotal', 'merchantName', 'preTipTotal',
-    'subtotal', 'tax', 'tip', 'lineItemTotals', 'mathConsistent', 'mathProblem',
+    'subtotal', 'tax', 'tip', 'cashTendered', 'changeGiven',
+    'lineItemTotals', 'mathConsistent', 'mathProblem',
   ],
 };
 
@@ -72,6 +75,11 @@ export interface LlmReceiptJudgment {
   tax: number | null;
   /** The tip/gratuity amount as printed (or handwritten). */
   tip: number | null;
+  /** Cash the customer handed over (a CASH / TENDERED line), as printed. On cash receipts
+   *  this is often a big round number well above the total - claiming it is inflation. */
+  cashTendered: number | null;
+  /** Change returned to the customer (a CHANGE line), as printed. Same inflation vector. */
+  changeGiven: number | null;
   /** Each charge line's price as printed (discounts negative). For the items-sum check. */
   lineItemTotals: number[] | null;
   /** false = the printed numbers clearly contradict each other (fabricated-receipt signal). */
@@ -92,6 +100,8 @@ Rules:
 - "subtotal": the pre-tax subtotal as printed, else null.
 - "tax": the tax amount as printed, else null.
 - "tip": the tip/gratuity amount as printed or handwritten, else null.
+- "cashTendered": the cash amount the customer handed to the cashier (a CASH / TENDERED / AMOUNT TENDERED line), as a plain number, else null. This is NOT the total.
+- "changeGiven": the change returned to the customer (a CHANGE / CHANGE DUE line), as a plain number, else null. This is NOT the total.
 - "lineItemTotals": the price of each charge line as printed, in order, discounts as negative numbers; null when the item lines are not legible.
 - "mathConsistent": do the printed numbers cohere (line items sum to the subtotal; subtotal + tax = total; total + tip = final total)? Use false ONLY when printed numbers clearly contradict each other after accounting for every printed discount, fee, and rounding line. When unsure use true.
 - "mathProblem": when mathConsistent is false, one short sentence naming the contradiction, else null.
@@ -140,6 +150,8 @@ export const parseJudgment = (parsed: Record<string, unknown>): LlmReceiptJudgme
   subtotal: toNumber(parsed.subtotal),
   tax: toNumber(parsed.tax),
   tip: toNumber(parsed.tip),
+  cashTendered: toNumber(parsed.cashTendered),
+  changeGiven: toNumber(parsed.changeGiven),
   lineItemTotals: Array.isArray(parsed.lineItemTotals) && parsed.lineItemTotals.length > 0
     ? (() => {
         const items = parsed.lineItemTotals.map(toLineAmount);
@@ -218,7 +230,15 @@ export const applyLlmTightening = (
       // under-extracted (grabbed the subtotal as the total) - flagging there would fail
       // honest users. The inflation fraud this targets (order number / approval code typed
       // as the amount) is only ever printed as a bare integer, never as "10432.00".
-      !printed.decimals.has(claimedCents)
+      // EXCEPTION: a claim that equals the grounded CASH-TENDERED or CHANGE line is the
+      // one inflation that IS decimal-printed ("Total 12.00 / Cash 100.00 / Change 88.00",
+      // claim $100). Those two lines are extractor-identified AND printed, so flagging them
+      // cannot hit the honest under-extraction case; null fields fail open to the old rule.
+      // (A cash payment of the exact total never reaches here: the claim then matches the
+      // pre-tip total and returns in the first branch above.)
+      (!printed.decimals.has(claimedCents) ||
+        claimedCents === grounded(judgment.cashTendered) ||
+        claimedCents === grounded(judgment.changeGiven))
     ) {
       tightened.amountMatches = false;
       reasons.push('llm_amount_not_total');

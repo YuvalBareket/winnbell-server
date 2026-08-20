@@ -1,6 +1,6 @@
 import type { OcrProvider, OcrExpected, OcrValidationResult } from '../ocr.types.js';
 import { matchAmount, matchDate, matchBusinessName, isReceiptText, scoreConfidence } from './ocr-matchers.js';
-import { normalizeReceiptIdentifier, alnumOnly, extractDocumentTokens } from '../receiptIdentity.js';
+import { identifierFoundInText, extractDocumentTokens } from '../receiptIdentity.js';
 
 export class GoogleVisionProvider implements OcrProvider {
   async validate(imageUrl: string, expected: OcrExpected): Promise<OcrValidationResult> {
@@ -66,11 +66,9 @@ export class GoogleVisionProvider implements OcrProvider {
     const rawText: string = annotation?.fullTextAnnotation?.text ?? '';
     const normalizedText = rawText.toUpperCase().replace(/\s+/g, ' ');
 
-    // Match the identifier on the fully alnum-only projection so a normalized id ("13663859")
-    // is found even when the receipt printed it as "1366-3859" / "1366 3859". Guard the empty
-    // case: "".includes("") is true, so an empty normalized id must never count as found.
-    const normalizedId = normalizeReceiptIdentifier(expected.identifier);
-    const identifierFound = normalizedId.length > 0 && alnumOnly(rawText).includes(normalizedId);
+    // Shared matcher: containment on the alnum projection for normal-length ids, whole-run
+    // matching for short ones (see identifierFoundInText). Same helper as the Gemini provider.
+    const identifierFound = identifierFoundInText(expected.identifier, rawText);
     const amountMatches = matchAmount(normalizedText, expected.amount);
     const dateMatches = expected.date ? matchDate(normalizedText, expected.date) : null;
     const isReceipt = isReceiptText(normalizedText);

@@ -1,4 +1,4 @@
-import { normalizeReceiptIdentifier, alnumOnly, extractDocumentTokens, canonicalizeReceiptIdentifier } from '../receiptIdentity';
+import { normalizeReceiptIdentifier, alnumOnly, extractDocumentTokens, canonicalizeReceiptIdentifier, identifierFoundInText } from '../receiptIdentity';
 
 describe('canonicalizeReceiptIdentifier', () => {
   const tokens = ['KDWJRMDV0001', '21210637'];
@@ -60,6 +60,33 @@ describe('extractDocumentTokens', () => {
     const tokens = extractDocumentTokens(many + ' ID100000 ID100000');
     expect(tokens.length).toBeLessThanOrEqual(40);
     expect(new Set(tokens).size).toBe(tokens.length); // de-duplicated
+  });
+});
+
+describe('identifierFoundInText', () => {
+  test('normal-length ids match by containment across printed separators', () => {
+    expect(identifierFoundInText('#1366-3859', 'Receipt number 1366-3859 thank you')).toBe(true);
+    expect(identifierFoundInText('13663859', 'Receipt number 1366 3859')).toBe(true);
+    expect(identifierFoundInText('99999999', 'Receipt number 1366-3859')).toBe(false);
+  });
+
+  test('empty and non-alnum identifiers never count as found', () => {
+    expect(identifierFoundInText('', 'TOTAL 12.00')).toBe(false);
+    expect(identifierFoundInText('##--', 'TOTAL 12.00')).toBe(false);
+  });
+
+  test('short id (Toast check number) matches only a whole printed run, never a fragment of a bigger number', () => {
+    const galgal = 'GALGAL\nCheck #12\nDine In\n1 Falafel Pita 1.50\nTax 0.11\nTotal 1.61';
+    expect(identifierFoundInText('12', galgal)).toBe(true);        // Check #12 → run "12"
+    expect(identifierFoundInText('#12', galgal)).toBe(true);       // form input with the hash
+    expect(identifierFoundInText('12', 'TOTAL $1.20')).toBe(false); // "120" contains "12" — containment trap
+    expect(identifierFoundInText('12', 'ORDER 1512')).toBe(false);  // digit-glued run is a different number
+    expect(identifierFoundInText('12', 'TABLE 5 GUESTS 2')).toBe(false);
+  });
+
+  test('short id glued to a letter label still matches (NO12 / CHECK12)', () => {
+    expect(identifierFoundInText('12', 'No12\nTotal 8.00')).toBe(true);
+    expect(identifierFoundInText('12', 'CHECK12 Total 8.00')).toBe(true);
   });
 });
 

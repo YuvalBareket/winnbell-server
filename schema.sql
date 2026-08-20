@@ -355,6 +355,12 @@ CREATE TABLE ticket (
   receipt_tokens          TEXT[] NULL,
   transaction_amount      NUMERIC(10, 2) NULL CHECK (transaction_amount IS NULL OR transaction_amount > 0),
   transaction_date        DATE NULL,
+  -- Distinct-document sequence within one (business, draw, identifier, date) dedup slot.
+  -- 0 for every normal entry. Bumped ONLY by OCR resolution when a scan proved this entry is
+  -- a physically different paper than a standing claim printing the same number on the same
+  -- day (degenerate POS registers that repeat check numbers within a day). Lets the unique
+  -- index accept the proven-distinct document without weakening dedup anywhere else.
+  receipt_doc_seq         SMALLINT NOT NULL DEFAULT 0,
   receipt_image_url       VARCHAR(500) NULL,
   -- Risk score snapshot at submission time (user score, not a running total)
   risk_score              INTEGER NOT NULL DEFAULT 0 CHECK (risk_score >= 0),
@@ -372,7 +378,10 @@ CREATE TABLE ticket (
   -- Reason codes: high_risk_user | ocr_pending | ocr_validation_failed |
   --               ocr_error_pending_review | shared_receipt_suspected |
   --               superseded_by_admin_decision (an admin approved a COMPETING ticket for the
-  --               same receipt; this claim silently loses the slot - shadowban style)
+  --               same receipt; this claim silently loses the slot - shadowban style) |
+  --               date_unreadable_review (cross-day claim on a shared receipt number whose
+  --               scan printed no legible date; content checks passed, held out of the pool
+  --               for human review - releasable via the admin image approve)
   quarantine_reason       TEXT NULL,
   quarantined_at          TIMESTAMP NULL,
 
@@ -439,6 +448,10 @@ CREATE TABLE IF NOT EXISTS receipt_threshold_attempt (
   business_id        INTEGER NOT NULL REFERENCES business(id) ON DELETE CASCADE,
   receipt_identifier VARCHAR(255) NOT NULL,
   attempted_amount   NUMERIC(10,2) NOT NULL,
+  -- Claimed transaction date of the rejected attempt. Probing detection compares only
+  -- same-day attempts: daily-reset POS check numbers repeat across days at different
+  -- amounts, and a genuine receipt has one fixed total only within its own day.
+  transaction_date   DATE NULL,
   created_at         TIMESTAMP NOT NULL DEFAULT NOW()
 );
 CREATE INDEX IF NOT EXISTS idx_receipt_threshold_attempt_lookup
@@ -582,8 +595,16 @@ CREATE INDEX idx_ticket_cap_check
 -- A merchant that resets its receipt counter each campaign (carbon pads) can have a genuinely
 -- different receipt #1001 in a later draw without colliding with a prior one, while same-campaign
 -- reuse of one number is still blocked.
+-- The TRANSACTION DATE partitions the slot per day (Toast-style POS check numbers reset daily,
+-- so "Check #12" on Monday and on Tuesday are different receipts). The DATE RELAXATION IS
+-- APPLICATION-ENFORCED under advisory lock family 4: a different-date claim on a taken number
+-- is only allowed through when THAT entry's own scan verifies the printed date (typed entries
+-- get strict identifier-only dedup in submitReceiptEntryService); the index is the backstop
+-- that makes the per-day slots possible at all. receipt_doc_seq (normally 0) disambiguates
+-- scan-PROVEN distinct documents that share number AND day (degenerate registers). COALESCE
+-- keeps legacy NULL-date rows inside the unique enforcement (btree treats NULLs as distinct).
 CREATE UNIQUE INDEX idx_ticket_receipt_unique
-  ON ticket (business_id, draw_id, receipt_identifier)
+  ON ticket (business_id, draw_id, receipt_identifier, COALESCE(transaction_date, DATE '1970-01-01'), receipt_doc_seq)
   WHERE receipt_identifier IS NOT NULL
     AND (is_quarantined = FALSE OR quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review'));
 

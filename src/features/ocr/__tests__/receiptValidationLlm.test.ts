@@ -28,6 +28,8 @@ const judgment = (overrides: Partial<LlmReceiptJudgment> = {}): LlmReceiptJudgme
   subtotal: null,
   tax: null,
   tip: null,
+  cashTendered: null,
+  changeGiven: null,
   lineItemTotals: null,
   mathConsistent: null,
   mathProblem: null,
@@ -251,6 +253,68 @@ describe('applyLlmTightening', () => {
     expect(out.reasons).toContain('llm_amount_not_total');
   });
 
+  // ── Cash tendered / change (2026-08-20 review issue A) ──────────────────────────
+  // "Total 12.00 / Cash 100.00 / Change 88.00": the cash and change lines are printed as
+  // decimal money, so the plain decimals-printed escape used to let a $100 claim through.
+  const cashReceipt = 'JOES DINER\nRECEIPT #12345678\nBURGER 11.00\nTAX 1.00\nTOTAL 12.00\nCASH 100.00\nCHANGE 88.00';
+
+  it('flags a claim equal to the printed CASH-TENDERED line (decimal-printed inflation)', () => {
+    const out = applyLlmTightening(
+      baseResult({ rawText: cashReceipt }),
+      { ...expected, amount: 100 },
+      judgment({ preTipTotal: 12, actualPayableTotal: 12, cashTendered: 100, changeGiven: 88 }),
+    );
+    expect(out.result.amountMatches).toBe(false);
+    expect(out.reasons).toContain('llm_amount_not_total');
+  });
+
+  it('flags a claim equal to the printed CHANGE line', () => {
+    const out = applyLlmTightening(
+      baseResult({ rawText: cashReceipt }),
+      { ...expected, amount: 88 },
+      judgment({ preTipTotal: 12, actualPayableTotal: 12, cashTendered: 100, changeGiven: 88 }),
+    );
+    expect(out.result.amountMatches).toBe(false);
+    expect(out.reasons).toContain('llm_amount_not_total');
+  });
+
+  it('an exact-change cash payment (claim == total == cash) still passes', () => {
+    // The claim matches the pre-tip total, so the first branch returns before the
+    // inflation check ever sees that the same number is also the cash line.
+    const exactCash = 'JOES DINER\nRECEIPT #12345678\nTOTAL 12.00\nCASH 12.00\nCHANGE 0.00';
+    const out = applyLlmTightening(
+      baseResult({ rawText: exactCash }),
+      { ...expected, amount: 12 },
+      judgment({ preTipTotal: 12, actualPayableTotal: 12, cashTendered: 12 }),
+    );
+    expect(out.result.amountMatches).toBe(true);
+    expect(out.reasons).toEqual([]);
+  });
+
+  it('FAILS OPEN when the model misses the cash fields (decimal-printed claim, old behavior)', () => {
+    // cashTendered/changeGiven null -> the decimals-printed escape stands, exactly as before
+    // the fields existed. The under-extraction protection for honest users is untouched.
+    const out = applyLlmTightening(
+      baseResult({ rawText: cashReceipt }),
+      { ...expected, amount: 100 },
+      judgment({ preTipTotal: 12, actualPayableTotal: 12 }),
+    );
+    expect(out.result.amountMatches).toBe(true);
+    expect(out.reasons).toEqual([]);
+  });
+
+  it('a MIS-EXTRACTED cash value that is not printed cannot flag (grounded)', () => {
+    // Model asserts cashTendered=95 but no 95.00 is printed: the value grounds to null and
+    // the claim (printed as decimal money) keeps the honest-under-extraction escape.
+    const out = applyLlmTightening(
+      baseResult({ rawText: cashReceipt }),
+      { ...expected, amount: 100 },
+      judgment({ preTipTotal: 12, actualPayableTotal: 12, cashTendered: 95 }),
+    );
+    expect(out.result.amountMatches).toBe(true);
+    expect(out.reasons).toEqual([]);
+  });
+
   it('IGNORES a tip disposition whose tip amount is not printed (ungrounded)', () => {
     const noTipPrinted = 'JOES DINER\nRECEIPT #12345678\nTOTAL 70.00\nFINAL 90.00';
     const out = applyLlmTightening(
@@ -367,12 +431,16 @@ describe('parseJudgment', () => {
   it('clamps the math fields: mixed-validity item arrays collapse to null', () => {
     const j = parseJudgment({
       subtotal: 62, tax: '8.00', tip: 0,            // 0 is not a real tip line
+      cashTendered: '100.00',                        // numeric string is accepted
+      changeGiven: -3,                               // non-positive -> null
       lineItemTotals: [10, 'x', 5],                  // one junk entry -> whole array unusable
       mathConsistent: false, mathProblem: '  sums are off  ',
     });
     expect(j.subtotal).toBe(62);
     expect(j.tax).toBe(8);
     expect(j.tip).toBeNull();
+    expect(j.cashTendered).toBe(100);
+    expect(j.changeGiven).toBeNull();
     expect(j.lineItemTotals).toBeNull();
     expect(j.mathConsistent).toBe(false);
     expect(j.mathProblem).toBe('sums are off');
@@ -429,6 +497,8 @@ describe('judgeReceiptLlm', () => {
       subtotal: null,
       tax: null,
       tip: null,
+      cashTendered: null,
+      changeGiven: null,
       lineItemTotals: null,
       mathConsistent: true,
       mathProblem: null,
