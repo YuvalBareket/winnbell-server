@@ -24,12 +24,16 @@ export interface RiskContext {
   drawId?: number;
   receiptIdentifier: string;
   transactionAmount: number;
+  /** Claimed transaction date (YYYY-MM-DD). Scopes the threshold-probing signal to the same
+   *  DAY: daily-reset POS check numbers legitimately repeat across days at different amounts,
+   *  so a cross-day "same number, different amount" must not read as amount manipulation. */
+  transactionDate?: string;
   /** Active (non-quarantined) cross-user duplicate — triggers scaled penalty. */
   isDuplicateCrossUser?: boolean;
   /** Quarantined cross-user duplicate — triggers scaled penalty but allows submission through. */
   isDuplicateQuarantinedCrossUser?: boolean;
   typingDurationMs?: number;
-  receiptInputMethod?: 'typed' | 'pasted';
+  receiptInputMethod?: 'typed' | 'pasted' | 'scanned';
   /** Submitter's IP resolved to a US state outside allowed_states (requireEntryRegion).
    *  Soft signal only — carrier IPs misresolve states, so it scores but never blocks. */
   isOutOfRegion?: boolean;
@@ -188,16 +192,21 @@ export const evaluateUserRisk = async (
           -- The accepted-ticket count is scoped to the current draw ($5) when provided: receipt
           -- numbers are unique per (business, draw) since 2026-07-25, so a legitimate cross-draw
           -- resubmission of a recycled number with a different amount must NOT read as probing.
-          -- (receipt_threshold_attempt has no draw_id but self-purges after 7 days, so it is
-          -- naturally bounded to the current campaign window.)
+          -- Also scoped to the claimed transaction DAY ($6) when provided: daily-reset check
+          -- numbers legitimately repeat across days at different amounts (Toast POS), and a
+          -- genuine receipt has one fixed total only within its own day.
+          -- (receipt_threshold_attempt self-purges after 7 days, so it is naturally bounded
+          -- to the current campaign window.)
           SELECT (
             (SELECT COUNT(*) FROM ticket
               WHERE activated_by_user_id = $1 AND business_id = $2
                 AND receipt_identifier = $3 AND transaction_amount != $4
-                AND ($5::int IS NULL OR draw_id = $5))
+                AND ($5::int IS NULL OR draw_id = $5)
+                AND ($6::date IS NULL OR transaction_date IS NOT DISTINCT FROM $6::date))
             + (SELECT COUNT(*) FROM receipt_threshold_attempt
               WHERE user_id = $1 AND business_id = $2
-                AND receipt_identifier = $3 AND attempted_amount != $4)
+                AND receipt_identifier = $3 AND attempted_amount != $4
+                AND ($6::date IS NULL OR transaction_date IS NULL OR transaction_date = $6::date))
           )::int AS cnt
         ),
         outlier AS (
@@ -214,7 +223,7 @@ export const evaluateUserRisk = async (
         (SELECT ids          FROM seq24h)  AS seq24h_ids,
         (SELECT cnt          FROM probe)   AS probe_count,
         (SELECT avg_amount   FROM outlier) AS avg_amount`,
-      [userId, businessId, receiptIdentifier, transactionAmount, drawId ?? null],
+      [userId, businessId, receiptIdentifier, transactionAmount, drawId ?? null, context.transactionDate ?? null],
     );
 
     const sr = signalRes.rows[0];
@@ -398,14 +407,18 @@ export const updateUserRiskScore = async (
 
 /**
  * Check if a receipt identifier has already been used by another user for the same business
- * IN THE SAME DRAW. Receipt numbers are unique per campaign, not across all time, so a merchant
- * that recycles receipt numbers between draws does not false-flag honest customers.
+ * IN THE SAME DRAW ON THE SAME DAY. Receipt numbers are unique per campaign, not across all
+ * time, so a merchant that recycles receipt numbers between draws does not false-flag honest
+ * customers. Scoped to the claimed transaction DATE because Toast-style POS check numbers
+ * reset daily: someone claiming "Check #12" on Tuesday is NOT a fraud signal against Monday's
+ * "Check #12" (routing for cross-day collisions is the submit path's dedup ladder, not risk).
  */
 export const checkDuplicateReceiptIdentifier = async (
   businessId: number,
   receiptIdentifier: string,
   submittingUserId: number,
   drawId: number,
+  transactionDate: string | null,
   client?: PoolClient,
 ): Promise<DuplicateCheckResult> => {
   const db = client ?? getPool();
@@ -415,8 +428,9 @@ export const checkDuplicateReceiptIdentifier = async (
        BOOL_OR(is_quarantined = FALSE)                                      AS has_active,
        BOOL_OR(is_quarantined = TRUE)                                       AS has_quarantined
      FROM ticket
-     WHERE business_id = $1 AND receipt_identifier = $2 AND activated_by_user_id != $3 AND draw_id = $4`,
-    [businessId, receiptIdentifier, submittingUserId, drawId],
+     WHERE business_id = $1 AND receipt_identifier = $2 AND activated_by_user_id != $3 AND draw_id = $4
+       AND transaction_date IS NOT DISTINCT FROM $5::date`,
+    [businessId, receiptIdentifier, submittingUserId, drawId, transactionDate],
   );
   const row = result.rows[0];
   return {
@@ -457,6 +471,11 @@ export const syncUserQuarantineState = async (userId: number, drawId: number, cl
                ON o.business_id = a.business_id
               AND o.draw_id = a.draw_id
               AND o.receipt_identifier = a.receipt_identifier
+              -- Match the FULL dedup-slot key (id + day + doc_seq), mirroring
+              -- idx_ticket_receipt_unique: a claim only blocks the lift when it holds the
+              -- SAME per-day slot this ticket would re-enter.
+              AND o.transaction_date IS NOT DISTINCT FROM a.transaction_date
+              AND o.receipt_doc_seq = a.receipt_doc_seq
               AND o.id <> a.id
               AND (o.is_quarantined = FALSE OR o.quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review'))
              WHERE a.id = COALESCE(ticket.anchor_ticket_id, ticket.id)

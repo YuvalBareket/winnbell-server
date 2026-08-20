@@ -19,6 +19,34 @@ export function alnumOnly(text: string): string {
   return text.toUpperCase().replace(/[^A-Z0-9]/g, '');
 }
 
+// Below this normalized length, substring containment stops meaning anything: the flattened
+// alnum projection of any receipt ("$1.20" -> "120", "12:45" -> "1245") contains almost every
+// 1-3 char string, so a short id (Toast-style "Check #12") must match a whole printed run.
+const CONTAINMENT_MIN = 4;
+
+/**
+ * Is this identifier actually printed in the OCR text? The one matcher BOTH providers use, so
+ * a verdict never depends on which OCR engine read the image.
+ *  - Normalized length >= 4: substring containment on the alnum-only projection (finds
+ *    "13663859" printed as "1366-3859" / "1366 3859").
+ *  - Shorter (daily-reset POS check numbers): the id must be a whole alnum run of the text
+ *    ("Check #12" -> runs CHECK, 12), or a run of letters glued to it ("NO12"). A digit-glued
+ *    run ("1512", "120") never counts - that is a different number that merely contains it.
+ */
+export function identifierFoundInText(identifier: string, rawText: string): boolean {
+  const id = normalizeReceiptIdentifier(identifier);
+  if (id.length === 0) return false;
+  if (id.length >= CONTAINMENT_MIN) return alnumOnly(rawText).includes(id);
+  for (const run of rawText.split(/[^A-Za-z0-9]+/)) {
+    const tok = run.toUpperCase();
+    if (tok === id) return true;
+    if (tok.length > id.length && tok.endsWith(id) && /^[A-Z]+$/.test(tok.slice(0, tok.length - id.length))) {
+      return true;
+    }
+  }
+  return false;
+}
+
 // Token length window: >= 6 excludes prices ("45000"), card last-4, and most date fragments;
 // <= 40 excludes long barcodes / base64-ish blobs that never serve as a receipt number.
 const TOKEN_MIN = 6;

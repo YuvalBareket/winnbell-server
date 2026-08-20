@@ -39,7 +39,9 @@ export interface ReceiptEntryInput {
   transactionDate?: string; // ISO date string (YYYY-MM-DD), stored for later receipt verification
   receiptImageUrl?: string;
   typingDurationMs?: number;
-  receiptInputMethod?: 'typed' | 'pasted';
+  // 'scanned' = autofilled from the receipt photo by the scan endpoint. Like 'pasted' it is
+  // exempt from the typing-speed signal (there was no typing to time).
+  receiptInputMethod?: 'typed' | 'pasted' | 'scanned';
   submitterIp?: string; // Captured server-side for fraud ring detection
   // IP-derived US state at submission (requireEntryRegion middleware). Null = unknown.
   submitterState?: string | null;

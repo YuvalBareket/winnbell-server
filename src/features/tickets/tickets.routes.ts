@@ -19,6 +19,19 @@ const entryLimiter = rateLimit({
   message: { message: 'Too many attempts, please slow down.' },
 });
 
+// Receipt-scan autofill: each scan is a paid Gemini call, so cap it at 10 per user per day
+// (honest use is 1-2 scans per entry, 5 entries/day max). Short-window burst protection is
+// covered by sharing the per-minute entryLimiter on the route.
+const scanLimiter = rateLimit({
+  windowMs: 24 * 60 * 60 * 1000,
+  max: 10 * (process.env.NODE_ENV === 'production' ? 1 : 5),
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req: Request) => req.user?.id?.toString() ?? getClientIpKey(req),
+  store: makeRateLimitStore('rscan'),
+  message: { message: 'Daily scan limit reached. You can still type the receipt details.' },
+});
+
 const router = Router();
 
 // Entry-creating routes also require the step-2 profile (DOB + gender + state) on record -
@@ -31,7 +44,8 @@ router.get('/free-status', ticketController.getStatus);
 router.post('/activate-free', requireRole('User'), requirePhoneVerified, requireProfileComplete, entryLimiter, requireEntryRegion, ticketController.activate);
 router.post('/receipt-entry', requireRole('User'), requirePhoneVerified, requireProfileComplete, entryLimiter, requireEntryRegion, ticketController.submitReceiptEntry);
 router.get('/receipt-upload-url', requireRole('User'), requirePhoneVerified, entryLimiter, ticketController.getReceiptUploadUrl);
-router.get('/my-risk-level', ticketController.getMyRiskLevel);
+router.post('/receipt-scan', requireRole('User'), requirePhoneVerified, entryLimiter, scanLimiter, ticketController.scanReceipt);
+router.get('/my-risk-level', requireRole('User'), ticketController.getMyRiskLevel);
 // STAGING DEMO ONLY (temporary). Self-service reset of the caller's OWN activity; the service
 // gates on DEMO_USER_ENABLED (staging-only) so it is inert in production.
 router.post('/reset-demo', requireRole('User'), ticketController.resetDemo);

@@ -3,6 +3,7 @@ import { getPool } from '../../shared/db/db.js';
 import { safeRollback } from '../../shared/db/txn.js';
 import { updateUserRiskScore, syncUserQuarantineState } from '../risk/risk.service.js';
 import { GoogleVisionProvider } from './providers/google-vision.provider.js';
+import { GeminiVisionProvider } from './providers/gemini-vision.provider.js';
 import { judgeReceiptLlm, applyLlmTightening } from './receiptValidationLlm.js';
 import type { OcrProvider, OcrExpected, OcrValidationResult } from './ocr.types.js';
 import { canonicalizeReceiptIdentifier } from './receiptIdentity.js';
@@ -47,15 +48,24 @@ async function resolveReceiptContest(
     // + verify) finds a different reason under the row lock and no-ops - so riskDelta is never
     // double-applied and the slot is never promoted twice.
     const guard = await client.query(
-      `SELECT quarantine_reason FROM ticket WHERE id = $1 FOR UPDATE`,
+      `SELECT quarantine_reason, to_char(transaction_date, 'YYYY-MM-DD') AS tx_date, transaction_amount
+       FROM ticket WHERE id = $1 FOR UPDATE`,
       [contestTicketId],
     );
     if (guard.rows[0]?.quarantine_reason !== 'contest_pending') {
       await safeRollback(client);
       return;
     }
+    // A contest fights over ONE per-day dedup slot: the (identifier, claimed day) this entry
+    // targets. Claims on other days are independent slots (daily-reset check numbers) and are
+    // never displaced by this contest.
+    const contestDate: string | null = guard.rows[0]?.tx_date ?? null;
+    const contestCents: number | null = guard.rows[0]?.transaction_amount != null
+      ? Math.round(parseFloat(guard.rows[0].transaction_amount) * 100) : null;
 
     let won = false;
+    let docSeq: number | null = null;
+    let duplicateOfVerified = false;
     const supersededUserIds: number[] = [];
 
     if (proven) {
@@ -64,9 +74,10 @@ async function resolveReceiptContest(
         `SELECT 1 FROM ticket o
          JOIN draw d ON d.winner_ticket_id = o.id
          WHERE o.business_id = $1 AND o.receipt_identifier = $2 AND o.activated_by_user_id <> $3 AND o.draw_id = $4
+           AND o.transaction_date IS NOT DISTINCT FROM $5::date
            AND (o.is_quarantined = FALSE OR o.quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review'))
          LIMIT 1`,
-        [businessId, receiptIdentifier, userId, drawId],
+        [businessId, receiptIdentifier, userId, drawId, contestDate],
       );
 
       if (winnerConflict.rows.length === 0) {
@@ -77,6 +88,7 @@ async function resolveReceiptContest(
           `WITH squatters AS (
              SELECT id FROM ticket
              WHERE business_id = $1 AND receipt_identifier = $2 AND activated_by_user_id <> $3 AND draw_id = $4
+               AND transaction_date IS NOT DISTINCT FROM $5::date
                AND is_quarantined = FALSE AND image_validation_status = 'not_required'
                AND id NOT IN (SELECT winner_ticket_id FROM draw WHERE winner_ticket_id IS NOT NULL)
            )
@@ -95,44 +107,78 @@ async function resolveReceiptContest(
            WHERE (t.id = s.id OR t.anchor_ticket_id = s.id)
              AND t.id NOT IN (SELECT winner_ticket_id FROM draw WHERE winner_ticket_id IS NOT NULL)
            RETURNING t.activated_by_user_id AS uid`,
-          [businessId, receiptIdentifier, userId, drawId],
+          [businessId, receiptIdentifier, userId, drawId, contestDate],
         );
         for (const r of superseded.rows as Array<{ uid: number }>) {
           if (r.uid && !supersededUserIds.includes(r.uid)) supersededUserIds.push(r.uid);
         }
 
-        // After clearing the squatters, is any OTHER standing claim still held (e.g. a verified
-        // image that landed during our OCR)? If so we must not override it - the contest loses.
+        // After clearing the squatters, what SAME-DAY claims still stand (e.g. a verified
+        // image that landed during our OCR, or a degenerate register printing the same number
+        // on every same-day receipt)? The distinct-document rung decides with scan-verified
+        // AMOUNTS: all-different amounts = different purchases → this contest coexists in a
+        // bumped receipt_doc_seq slot; an equal amount on a VERIFIED claim = the same paper →
+        // duplicate; an equal amount on a still-unverified claim = an in-flight race we cannot
+        // adjudicate yet → benign contest_not_won (no penalty), the slot stays theirs.
         const otherStanding = await client.query(
-          `SELECT 1 FROM ticket
+          `SELECT image_validation_status = 'passed' AS verified,
+                  transaction_amount::text AS amount,
+                  receipt_doc_seq
+           FROM ticket
            WHERE business_id = $1 AND receipt_identifier = $2 AND activated_by_user_id <> $3 AND draw_id = $4
-             AND (is_quarantined = FALSE OR quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review'))
-           LIMIT 1`,
-          [businessId, receiptIdentifier, userId, drawId],
+             AND transaction_date IS NOT DISTINCT FROM $5::date
+             AND (is_quarantined = FALSE OR quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review'))`,
+          [businessId, receiptIdentifier, userId, drawId, contestDate],
         );
-        won = otherStanding.rows.length === 0;
+        if (otherStanding.rows.length === 0) {
+          won = true;
+        } else {
+          const centsOf = (a: string | null) => a != null ? Math.round(parseFloat(a) * 100) : null;
+          const sameAmount = otherStanding.rows.filter(
+            (r: { amount: string | null }) => centsOf(r.amount) === contestCents,
+          );
+          if (sameAmount.length === 0) {
+            won = true;
+            docSeq = otherStanding.rows.reduce(
+              (m: number, r: { receipt_doc_seq: number }) => Math.max(m, Number(r.receipt_doc_seq)), 0,
+            ) + 1;
+          } else if (sameAmount.some((r: { verified: boolean }) => r.verified === true)) {
+            duplicateOfVerified = true;
+          }
+        }
       }
     }
 
     if (won) {
-      // Promote this entry into the standing slot (squatters already left the index above).
+      // Promote this entry into the standing slot (squatters already left the index above;
+      // a coexisting distinct document takes the next doc_seq slot).
+      // Deferred reward: a low-clean-streak account earns 0 here, not -3/-1 (laundering guard).
+      const appliedDelta = await deferredOcrRewardDelta(client, userId, riskDelta);
       await client.query(
         `UPDATE ticket SET image_validation_status = 'passed', risk_score_delta = risk_score_delta + $2,
+               receipt_doc_seq = COALESCE($3, receipt_doc_seq),
                is_quarantined = FALSE, quarantine_reason = NULL, quarantined_at = NULL
          WHERE id = $1`,
-        [contestTicketId, riskDelta],
+        [contestTicketId, appliedDelta, docSeq],
       );
       await client.query(
         `UPDATE ticket SET is_quarantined = FALSE, quarantine_reason = NULL, quarantined_at = NULL WHERE anchor_ticket_id = $1`,
         [contestTicketId],
       );
-      await updateUserRiskScore(userId, riskDelta, client);
+      // Zeroed reward: skip the call - updateUserRiskScore's delta-0 branch would double
+      // count a "clean entry" the submission path already counted.
+      if (appliedDelta !== 0) await updateUserRiskScore(userId, appliedDelta, client);
       for (const squatterUserId of supersededUserIds) {
         // +3: superseding a verified owner is a stronger fraud signal than a normal OCR
         // fail (+2). The squatter typed a number that turned out to belong to someone who
         // proved it, so push their score harder toward the image-required / throttle gates.
         await updateUserRiskScore(squatterUserId, 3, client);
       }
+    } else if (duplicateOfVerified) {
+      // Same number, same day, same amount as an already-VERIFIED claim: this contest photo
+      // shows the same paper another user proved. That is the duplicate-document case, not a
+      // benign loss - shadow-ban with the standard +3.
+      await handleDuplicateDocument(client, contestTicketId, userId, drawId);
     } else if (passed) {
       // Valid image (passed normal OCR) but did not win the slot - either not proven to the
       // stricter contest bar, or it lost the race to another verified claim. NOT fraud: keep the
@@ -178,29 +224,64 @@ async function resolveReceiptContest(
   }
 }
 
+// ─── Deferred OCR reputation reward (image-authenticity posture) ──────────────
+// A full OCR pass proves the CONTENT of a photographed receipt, not that the receipt is the
+// submitter's OWN: real receipts from the trash or a social-media screenshot pass every content
+// check, and each -3 reward would LAUNDER such an account toward low-risk (no image required,
+// trusted). So the reward is deferred: negative OCR deltas only apply once the account holds a
+// streak of OCR_REWARD_MIN_CLEAN_STREAK submissions with zero risk signals (risk_clean_entries
+// resets on any flag - and farming fast is itself a velocity flag). Honest users lose nothing:
+// a reward only ever matters to a score already above 0, i.e. an account carrying fraud
+// signals. Positive deltas (penalties) always apply unchanged. The TICKET's risk_score_delta
+// records what was ACTUALLY applied, so admin chips stay truthful.
+const OCR_REWARD_MIN_CLEAN_STREAK = 6;
+
+async function deferredOcrRewardDelta(
+  client: PoolClient,
+  userId: number,
+  riskDelta: number,
+): Promise<number> {
+  if (riskDelta >= 0) return riskDelta;
+  const r = await client.query(`SELECT risk_clean_entries FROM "user" WHERE id = $1`, [userId]);
+  const streak = Number(r.rows[0]?.risk_clean_entries ?? 0);
+  return streak >= OCR_REWARD_MIN_CLEAN_STREAK ? riskDelta : 0;
+}
+
+// ─── Same-business velocity signal (receipt-farming signature) ────────────────
+// Several image-VERIFIED receipts from one business inside a day is the farming shape
+// (collecting other customers' receipts at a single location); a loyal regular produces one.
+// FLAG ONLY - admin-visible on the ticket and the user, never a score change and never a
+// block, precisely because that loyal regular exists.
+const SAME_BUSINESS_VERIFIED_24H_FLAG_AT = 3;
+const SAME_BUSINESS_VELOCITY_FLAG = 'same_business_receipt_velocity';
+
 // ─── Duplicate-document handling ──────────────────────────────────────────────
-// The image is a receipt already used at this business under a different number. Silent
-// shadow-ban: the entry looks accepted but is quarantined (never drawn), +3 risk, and a
-// 'duplicate_document' flag so admins see WHY. Mirrors the OCR-fail write shape.
+// The image is a receipt already used at this business (same paper under a different number,
+// or an unrelaxable claim on a taken number). Silent shadow-ban: the entry looks accepted but
+// is quarantined (never drawn), +penalty risk, and a 'duplicate_document' flag so admins see
+// WHY. Mirrors the OCR-fail write shape. penalty=0 is for NON-fraud duplicates (e.g. a
+// different-day claim whose receipt prints no date, so the relaxation cannot be verified):
+// the entry stays out of the draw but the user is not treated as a fraud signal.
 async function handleDuplicateDocument(
   client: PoolClient,
   ticketId: number,
   userId: number,
   drawId: number,
+  penalty = 3,
 ): Promise<void> {
   await client.query(
-    `UPDATE ticket SET image_validation_status = 'failed', risk_score_delta = risk_score_delta + 3,
+    `UPDATE ticket SET image_validation_status = 'failed', risk_score_delta = risk_score_delta + $2,
        risk_flags = CASE WHEN NOT (COALESCE(risk_flags, '{}') @> ARRAY['duplicate_document'])
                          THEN array_append(COALESCE(risk_flags, '{}'), 'duplicate_document') ELSE risk_flags END
      WHERE id = $1`,
-    [ticketId],
+    [ticketId, penalty],
   );
   await client.query(
     `UPDATE ticket SET is_quarantined = TRUE, quarantine_reason = 'duplicate_document', quarantined_at = NOW()
      WHERE id = $1 OR anchor_ticket_id = $1`,
     [ticketId],
   );
-  await updateUserRiskScore(userId, 3, client);
+  if (penalty !== 0) await updateUserRiskScore(userId, penalty, client);
   await syncUserQuarantineState(userId, drawId, client);
 }
 
@@ -334,10 +415,129 @@ async function resolveReceiptValidation(
       }
     }
 
+    // ── Date ladder (per-day dedup slots - scan evidence only) ──────────────────
+    // The dedup identity is (business, draw, identifier, DAY). A passing entry that shares
+    // its number with other standing claims may only stand when the relaxation it relies on
+    // is verified by THIS scan:
+    //  - claims on OTHER days only → the printed date must positively match the claimed date
+    //    (dateMatches === true). Unverifiable (no legible date printed) = no relaxation is
+    //    GRANTED, but it is no longer treated as a duplicate either: the entry is HELD for
+    //    review under 'date_unreadable_review' (an undated receipt is not a fraud signal,
+    //    and faded thermal dates are common exactly at the daily-reset registers this
+    //    rung exists for).
+    //  - a claim on the SAME day (degenerate registers that repeat numbers within a day, or
+    //    a race) → the distinct-document rung: scan-verified AMOUNTS discriminate. A different
+    //    amount is a different purchase → coexist in a bumped receipt_doc_seq slot; the same
+    //    amount is the same paper → duplicate (+3 vs a verified claim). Typed-only same-day
+    //    assertions lose to proof exactly like the collider path (strict contest bar).
+    let docSeq: number | null = null;
+    if (passed && identifier) {
+      const selfRow = await client.query(
+        `SELECT to_char(transaction_date, 'YYYY-MM-DD') AS tx_date, transaction_amount
+         FROM ticket WHERE id = $1`,
+        [ticketId],
+      );
+      const txDate: string | null = selfRow.rows[0]?.tx_date ?? null;
+      const txCents: number | null = selfRow.rows[0]?.transaction_amount != null
+        ? Math.round(parseFloat(selfRow.rows[0].transaction_amount) * 100) : null;
+      const claims = await client.query(
+        `SELECT id,
+                transaction_date IS NOT DISTINCT FROM $5::date AS same_day,
+                image_validation_status = 'passed' AS verified,
+                (is_quarantined = FALSE AND image_validation_status = 'not_required') AS typed_only,
+                transaction_amount::text AS amount,
+                receipt_doc_seq
+         FROM ticket
+         WHERE business_id = $1 AND receipt_identifier = $2 AND draw_id = $3 AND id <> $4
+           AND (is_quarantined = FALSE OR quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review'))`,
+        [businessId, identifier, drawId, ticketId, txDate],
+      );
+      const sameDay = claims.rows.filter((r: { same_day: boolean }) => r.same_day === true);
+      const quarantineAsDuplicate = async (penalty: number) => {
+        await handleDuplicateDocument(client, ticketId, userId, drawId, penalty);
+        await client.query('COMMIT');
+        recordFunnelEvent({
+          eventType: 'submission_ocr_rejected', userId,
+          reasonCode: 'duplicate_receipt', meta: { ticket_id: ticketId },
+        });
+      };
+      if (claims.rows.length > 0 && sameDay.length === 0) {
+        if (result.dateMatches !== true) {
+          // The number is claimed on OTHER days and THIS scan could not read a printed date.
+          // (dateMatches === false would have failed the verdict upstream, so only the
+          // unreadable NULL reaches here - this is "can't verify", never "contradicted".)
+          // Quarantining it as a duplicate silently killed honest cross-day customers
+          // whose thermal date faded. Instead: HOLD for human review - truthful 'passed'
+          // content status (everything legible matched the claim), NO reward, NO penalty,
+          // quarantined under a distinct, countable reason. The cross-day dup exploit
+          // stays closed: a held entry never enters the pool, is never auto-granted, and
+          // the partial unique index ignores it, so it blocks no one. Admins release it
+          // via the image-decision approve (which re-checks the slot) or leave it held.
+          await client.query(
+            `UPDATE ticket SET image_validation_status = 'passed' WHERE id = $1`,
+            [ticketId],
+          );
+          await client.query(
+            `UPDATE ticket
+             SET is_quarantined = TRUE, quarantine_reason = 'date_unreadable_review', quarantined_at = NOW()
+             WHERE id = $1 OR anchor_ticket_id = $1`,
+            [ticketId],
+          );
+          await syncUserQuarantineState(userId, drawId, client);
+          await client.query('COMMIT');
+          // Funnel: held, not cleared (internal-only; the user is never told - shadowban
+          // invariant). Distinct meta so the hold is countable apart from real rejections.
+          recordFunnelEvent({
+            eventType: 'submission_ocr_rejected', userId,
+            meta: { ticket_id: ticketId, held: 'date_unreadable' },
+          });
+          return;
+        }
+        // Printed date verified → this entry owns its per-day slot (doc_seq stays 0).
+      } else if (sameDay.length > 0) {
+        const typedOnly = sameDay.filter((r: { typed_only: boolean }) => r.typed_only === true);
+        const imageBacked = sameDay.filter((r: { typed_only: boolean }) => r.typed_only !== true);
+        if (imageBacked.length === 0) {
+          if (!contestProven) {
+            // An unproven image cannot displace another human's standing assertion.
+            await quarantineAsDuplicate(3);
+            return;
+          }
+          await supersedeTypedOnlyDocumentClaims(
+            client, typedOnly.map((r: { id: number }) => r.id), drawId,
+          );
+        } else {
+          const centsOf = (a: string | null) => a != null ? Math.round(parseFloat(a) * 100) : null;
+          const sameAmount = imageBacked.filter((r: { amount: string | null }) => centsOf(r.amount) === txCents);
+          if (sameAmount.length === 0) {
+            // Every image-backed same-day claim is a DIFFERENT purchase (distinct verified
+            // amounts): coexist in the next doc_seq slot. Typed-only same-day assertions,
+            // if any, keep their slot untouched (they were not displaced by this proof).
+            docSeq = sameDay.reduce(
+              (m: number, r: { receipt_doc_seq: number }) => Math.max(m, Number(r.receipt_doc_seq)), 0,
+            ) + 1;
+          } else if (sameAmount.some((r: { verified: boolean }) => r.verified === true)) {
+            // Same number, same day, same amount as a VERIFIED claim: the same paper.
+            await quarantineAsDuplicate(3);
+            return;
+          } else {
+            // Equal amount but the competing claim is still unverified (in-flight race):
+            // cannot prove which is the dup yet - this one stands aside without penalty.
+            await quarantineAsDuplicate(0);
+            return;
+          }
+        }
+      }
+    }
+
     if (passed) {
+      // Deferred reward: a low-clean-streak account earns 0 here, not -3/-1 (laundering guard).
+      const appliedDelta = await deferredOcrRewardDelta(client, userId, riskDelta);
       await client.query(
-        `UPDATE ticket SET image_validation_status = 'passed', risk_score_delta = risk_score_delta + $2 WHERE id = $1`,
-        [ticketId, riskDelta],
+        `UPDATE ticket SET image_validation_status = 'passed', risk_score_delta = risk_score_delta + $2,
+                receipt_doc_seq = COALESCE($3, receipt_doc_seq)
+         WHERE id = $1`,
+        [ticketId, appliedDelta, docSeq],
       );
       // Unquarantine anchor + siblings that were held for OCR (awaiting the first pass, or held
       // after a provider error that a retry has now cleared).
@@ -348,8 +548,33 @@ async function resolveReceiptValidation(
            AND quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review')`,
         [ticketId],
       );
-      await updateUserRiskScore(userId, riskDelta, client);
+      // A deferred (zeroed) reward must NOT call updateUserRiskScore: its delta-0 branch
+      // counts a "clean entry", which the submission path already counted for this receipt.
+      if (appliedDelta !== 0) await updateUserRiskScore(userId, appliedDelta, client);
       await syncUserQuarantineState(userId, drawId, client);
+
+      // Same-business velocity signal. Only anchor tickets ever reach 'passed', so this
+      // COUNT is a count of verified RECEIPTS (not inflated by multi-entry siblings), and
+      // it includes the row updated above.
+      const vel = await client.query(
+        `SELECT COUNT(*)::int AS cnt FROM ticket
+         WHERE activated_by_user_id = $1 AND business_id = $2
+           AND image_validation_status = 'passed'
+           AND activated_at >= NOW() - INTERVAL '24 hours'`,
+        [userId, businessId],
+      );
+      if (Number(vel.rows[0]?.cnt ?? 0) >= SAME_BUSINESS_VERIFIED_24H_FLAG_AT) {
+        await client.query(
+          `UPDATE ticket SET risk_flags = array_append(COALESCE(risk_flags, '{}'), $2)
+           WHERE id = $1 AND NOT (COALESCE(risk_flags, '{}') @> ARRAY[$2::text])`,
+          [ticketId, SAME_BUSINESS_VELOCITY_FLAG],
+        );
+        await client.query(
+          `UPDATE "user" SET risk_flags = array_append(COALESCE(risk_flags, '{}'), $2)
+           WHERE id = $1 AND NOT (COALESCE(risk_flags, '{}') @> ARRAY[$2::text])`,
+          [userId, SAME_BUSINESS_VELOCITY_FLAG],
+        );
+      }
     } else {
       // failPenalty is 0 for honest-mistake failures (e.g. a with-tip claim): the entry is
       // still quarantined so the inflated amount never enters the draw, but the user is not
@@ -384,12 +609,16 @@ async function resolveReceiptValidation(
 }
 
 // ─── Provider Factory ─────────────────────────────────────────────────────────
-// Google Vision is the only supported provider (used by dev/staging/prod: OCR_PROVIDER=google).
-// It enforces a 10MB image cap; the old Tesseract provider (no size cap, unbounded CPU) was
-// removed as a DoS vector.
+// OCR_PROVIDER selects the engine per environment:
+//   'gemini'         → GeminiVisionProvider (Gemini Flash-Lite reads the photo directly and
+//                      returns a verbatim transcript; the same deterministic matchers decide).
+//   anything else    → GoogleVisionProvider (the default - flipping the env var is the whole
+//                      rollout, and unsetting it is the whole rollback).
+// Both enforce the same SSRF guard and 10MB image cap; the old Tesseract provider (no size
+// cap, unbounded CPU) was removed as a DoS vector.
 
 function getProvider(): OcrProvider {
-  return new GoogleVisionProvider();
+  return process.env.OCR_PROVIDER === 'gemini' ? new GeminiVisionProvider() : new GoogleVisionProvider();
 }
 
 // ─── Async Validator ──────────────────────────────────────────────────────────

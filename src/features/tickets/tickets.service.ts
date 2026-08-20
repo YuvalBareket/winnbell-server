@@ -481,12 +481,15 @@ export const submitReceiptEntryService = async (
       // Use pool directly so this persists even though the enclosing transaction rolls back on throw.
       await updateUserRiskScore(userId, 1);
 
-      // Heavier penalty if the same identifier was previously submitted successfully with a different amount
+      // Heavier penalty if the same identifier was previously submitted successfully with a
+      // different amount ON THE SAME CLAIMED DAY (daily-reset check numbers legitimately
+      // repeat across days at different amounts, so cross-day is never probing).
       const probeCheck = await pool.query(
         `SELECT COUNT(*) AS count FROM ticket
          WHERE business_id = $1 AND receipt_identifier = $2
-           AND transaction_amount != $3 AND draw_id = $4`,
-        [business_id, input.receiptIdentifier, input.transactionAmount, drawId],
+           AND transaction_amount != $3 AND draw_id = $4
+           AND ($5::date IS NULL OR transaction_date IS NOT DISTINCT FROM $5::date)`,
+        [business_id, input.receiptIdentifier, input.transactionAmount, drawId, input.transactionDate ?? null],
       );
       if (parseInt(probeCheck.rows[0].count, 10) > 0) {
         await updateUserRiskScore(userId, 3); // +3 more = +4 total for confirmed probe
@@ -511,11 +514,11 @@ export const submitReceiptEntryService = async (
       // window, so the table self-maintains with no cron job (this path is rare).
       await pool.query(
         `WITH ins AS (
-           INSERT INTO receipt_threshold_attempt (user_id, business_id, receipt_identifier, attempted_amount)
-           VALUES ($1, $2, $3, $4)
+           INSERT INTO receipt_threshold_attempt (user_id, business_id, receipt_identifier, attempted_amount, transaction_date)
+           VALUES ($1, $2, $3, $4, $5::date)
          )
          DELETE FROM receipt_threshold_attempt WHERE created_at < NOW() - INTERVAL '7 days'`,
-        [userId, business_id, input.receiptIdentifier, input.transactionAmount],
+        [userId, business_id, input.receiptIdentifier, input.transactionAmount, input.transactionDate ?? null],
       );
       throw new Error(`So close! Entries at ${business_name} need a purchase of $${minTransactionAmount} or more. Come back next time with a qualifying receipt and you are in.`);
     }
@@ -554,41 +557,61 @@ export const submitReceiptEntryService = async (
       [String(business_id), input.receiptIdentifier],
     );
 
-    // Check cross-user duplicate inside the transaction (using client, not pool) so the
-    // advisory lock above actually serializes this read against concurrent submissions.
+    // Check the same-DAY cross-user duplicate inside the transaction (using client, not pool)
+    // so the advisory lock above actually serializes this read against concurrent submissions.
+    // Same-day scope: since the dedup identity gained the transaction date, a different-day
+    // collision (Toast-style daily-reset check numbers) is normal, not a fraud signal; the
+    // claim map below handles routing for ANY-day collisions.
     const dupCheck = await checkDuplicateReceiptIdentifier(
       business_id,
       input.receiptIdentifier,
       userId,
       drawId,
+      input.transactionDate ?? null,
       client,
     );
 
-    // ── Contest routing (anti-squatting) ────────────────────────────────────────
-    // Distinguish the two kinds of standing cross-user claim on this receipt:
-    //  - IMAGE-BACKED: another user proved it (OCR passed) or is proving it (OCR in
-    //    flight / errored). Final - cannot be contested.
-    //  - TYPED-ONLY: another user just typed the number with no image (a squatter, who
-    //    can block the real customer with a guessed number). Overridable by proof: the
-    //    real owner may attach a photo, and if OCR verifies it we supersede the squatter.
+    // ── Claim map (dedup ladder routing) ────────────────────────────────────────
+    // Every claim on this (business, draw, identifier), split three ways:
+    //  - OWN vs OTHER user (own claims count in ANY state - no resubmit churn);
+    //  - SAME claimed day vs a different day (Toast check numbers reset daily);
+    //  - IMAGE-BACKED (proved / being proved by a photo) vs TYPED-ONLY (an assertion).
+    // GOVERNING RULE: every dedup relaxation (per-day slots, distinct-document coexistence)
+    // is granted only by SCAN EVIDENCE at OCR-resolution time. A typed entry always faces
+    // strict identifier-only dedup, exactly as before dates entered the identity.
     const hasImage = !!input.receiptImageUrl;
     const claimRes = await client.query(
       `SELECT
-         BOOL_OR(
-           (is_quarantined = FALSE AND image_validation_status IN ('passed', 'pending'))
-           OR quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review')
-         ) AS image_backed_by_other,
-         BOOL_OR(is_quarantined = FALSE AND image_validation_status = 'not_required') AS typed_only_by_other
-       FROM ticket
-       WHERE business_id = $1 AND receipt_identifier = $2 AND activated_by_user_id <> $3 AND draw_id = $4`,
-      [business_id, input.receiptIdentifier, userId, drawId],
+         BOOL_OR(own AND same_day) AS own_same_day,
+         BOOL_OR(own AND NOT same_day) AS own_other_day,
+         BOOL_OR(NOT own AND standing AND same_day AND image_backed) AS other_same_day_image,
+         BOOL_OR(NOT own AND standing AND same_day AND NOT image_backed) AS other_same_day_typed,
+         BOOL_OR(NOT own AND standing AND NOT same_day) AS other_other_day,
+         BOOL_OR(NOT own AND same_day AND in_contest) AS contest_in_flight
+       FROM (
+         SELECT
+           activated_by_user_id = $3 AS own,
+           transaction_date IS NOT DISTINCT FROM $5::date AS same_day,
+           (is_quarantined = FALSE OR quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review')) AS standing,
+           ((is_quarantined = FALSE AND image_validation_status IN ('passed', 'pending'))
+             OR quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review')) AS image_backed,
+           quarantine_reason = 'contest_pending' AS in_contest
+         FROM ticket
+         WHERE business_id = $1 AND receipt_identifier = $2 AND draw_id = $4
+       ) c`,
+      [business_id, input.receiptIdentifier, userId, drawId, input.transactionDate ?? null],
     );
-    const imageBackedByOther = claimRes.rows[0]?.image_backed_by_other === true;
-    const typedOnlyByOther = claimRes.rows[0]?.typed_only_by_other === true;
+    const cm = claimRes.rows[0] ?? {};
+    const ownSameDay = cm.own_same_day === true;
+    const ownOtherDay = cm.own_other_day === true;
+    const otherSameDayImage = cm.other_same_day_image === true;
+    const otherSameDayTyped = cm.other_same_day_typed === true;
+    const otherOtherDay = cm.other_other_day === true;
+    const contestInFlight = cm.contest_in_flight === true;
     // A contestable squatter is NOT a fraud signal against the legitimate owner: the
     // cross-user duplicate penalty and cap-exemption must not punish someone proving
     // their own receipt. Treat the collision as "no duplicate" for risk + cap purposes.
-    const contestable = typedOnlyByOther && !imageBackedByOther;
+    const contestable = otherSameDayTyped && !otherSameDayImage;
     const effectiveIsDuplicate = contestable ? false : dupCheck.isDuplicate;
     const effectiveIsDuplicateQuar = contestable ? false : dupCheck.isDuplicateQuarantined;
 
@@ -603,6 +626,7 @@ export const submitReceiptEntryService = async (
       drawId,
       receiptIdentifier: input.receiptIdentifier,
       transactionAmount: input.transactionAmount,
+      transactionDate: input.transactionDate,
       isDuplicateCrossUser: effectiveIsDuplicate,
       isDuplicateQuarantinedCrossUser: effectiveIsDuplicateQuar,
       typingDurationMs: input.typingDurationMs,
@@ -660,50 +684,52 @@ export const submitReceiptEntryService = async (
     // High-risk shadowban is decided by stored score, exactly as at insert prep below.
     const isHighRisk = riskEval.totalScore > RISK_THRESHOLDS.MEDIUM_MAX;
 
-    // ── Standing-claim resolution (anti-squatting) ──────────────────────────────
-    // Same user already holds a ticket for this receipt (any state) → no resubmit churn.
-    const ownExisting = await client.query(
-      `SELECT 1 FROM ticket
-       WHERE business_id = $1 AND receipt_identifier = $2 AND activated_by_user_id = $3 AND draw_id = $4
-       LIMIT 1`,
-      [business_id, input.receiptIdentifier, userId, drawId],
-    );
-    if (ownExisting.rows.length > 0) {
+    // ── Standing-claim resolution (dedup ladder) ────────────────────────────────
+    // Same user already holds a ticket for this number ON THIS DAY (any state) → resubmission
+    // of the same purchase, plain block. A DIFFERENT day is a potentially legitimate new
+    // purchase at a daily-reset register and falls through to the ladder below.
+    if (ownSameDay) {
       throw new Error('This receipt has already been entered. If you think this is a mistake, please contact us and we will help sort it out.');
     }
 
     let isContest = false;
-    if (imageBackedByOther) {
-      // Another user proved (or is proving) this receipt with an image — final. Plain block.
-      throw new Error('This receipt has already been entered. If you think this is a mistake, please contact us and we will help sort it out.');
-    } else if (contestable && !isHighRisk && hasImage) {
-      // One contest at a time per receipt: if another user's contest is already awaiting its OCR
-      // verdict, don't open a second (which would waste OCR calls and leave a race-loser). We
-      // hold the receipt advisory lock here, so this read is consistent.
-      const inFlight = await client.query(
-        `SELECT 1 FROM ticket
-         WHERE business_id = $1 AND receipt_identifier = $2 AND activated_by_user_id <> $3 AND draw_id = $4
-           AND quarantine_reason = 'contest_pending'
-         LIMIT 1`,
-        [business_id, input.receiptIdentifier, userId, drawId],
-      );
-      if (inFlight.rows.length > 0) {
-        throw new Error('This receipt is already being reviewed. Please try again in a few minutes.');
+    let dateVerifyRequired = false;
+    if (ownOtherDay || otherSameDayImage || otherSameDayTyped || otherOtherDay) {
+      // SOME claim exists on this number. Typed submissions get zero relaxation: invite a
+      // photo (the client turns the special code into "attach a photo and try again") - scan
+      // evidence is the only way past a taken number. High-risk users keep the plain block
+      // (they cannot contest today either).
+      if (isHighRisk) {
+        throw new Error('This receipt has already been entered. If you think this is a mistake, please contact us and we will help sort it out.');
       }
-      // Squatter override: this user brought a photo to prove the receipt is theirs. Insert
-      // as a CONTEST held OUT of the standing slot (quarantine_reason 'contest_pending', which
-      // the partial unique index excludes, so it never collides with the squatter's row). OCR
-      // resolves it: on proof we supersede the squatter and promote this entry; otherwise it is
-      // released with no penalty and the squatter is left untouched.
-      isContest = true;
-    } else if (contestable && !isHighRisk) {
-      // Squatter present, but this user typed with no image — invite a photo (special code the
-      // client turns into "someone already entered this receipt, attach a photo and try again").
-      throw new Error('RECEIPT_CONTEST_IMAGE_REQUIRED');
+      if (!hasImage) {
+        throw new Error('RECEIPT_CONTEST_IMAGE_REQUIRED');
+      }
+      if (otherSameDayImage || otherSameDayTyped) {
+        // A same-day fight. One contest at a time per (receipt, day): if another user's
+        // contest is already awaiting its OCR verdict, don't open a second (wasted OCR call
+        // and a guaranteed race-loser). We hold the receipt advisory lock, so this is consistent.
+        if (contestInFlight) {
+          throw new Error('This receipt is already being reviewed. Please try again in a few minutes.');
+        }
+        // Insert as a CONTEST held OUT of the standing slot (quarantine_reason
+        // 'contest_pending', which the partial unique index excludes). OCR resolves it:
+        //  - vs a typed-only squatter: on proof, supersede and promote (assertion loses to proof);
+        //  - vs an image-backed claim (degenerate same-number-same-day registers): the
+        //    distinct-document rung compares the scan-verified amounts - a different purchase
+        //    coexists in its own doc_seq slot, the same paper is a duplicate.
+        isContest = true;
+      } else {
+        // Claims exist only on OTHER days (own or others'): the per-day slot is free, but the
+        // GOVERNING RULE holds - the date partition applies only once THIS entry's scan
+        // verifies the printed date. Hold it quarantined (ocr_pending) regardless of risk
+        // tier until the ladder decides; the unique index admits it (different day).
+        dateVerifyRequired = true;
+      }
     } else if (dupCheck.isDuplicate) {
-      // Any other active claim (a high-risk user meeting a squatter, or the rare failed-active
-      // edge) → today's plain block. Quarantined-but-released claims fall through and this user
-      // (with the real paper receipt) may enter.
+      // Safety net (dupCheck is same-day scoped, so same-day standing claims were handled
+      // above): any remaining active claim → plain block. Quarantined-but-released claims
+      // fall through and this user (with the real paper receipt) may enter.
       throw new Error('This receipt has already been entered. If you think this is a mistake, please contact us and we will help sort it out.');
     }
 
@@ -775,9 +801,11 @@ export const submitReceiptEntryService = async (
     }
 
     // isHighRisk + hasImage were computed above (contest routing). Medium-risk users'
-    // ticket is held quarantined until OCR passes.
+    // ticket is held quarantined until OCR passes. A date-ladder entry (same number claimed
+    // on a new day) is held for ANY risk tier: it may only stand once its scan verifies the
+    // printed date, so it must not be live in the meantime.
     const isMediumRisk = riskEval.totalScore > RISK_THRESHOLDS.LOW_MAX && !isHighRisk;
-    const isOcrPending = isMediumRisk && hasImage;
+    const isOcrPending = (isMediumRisk || dateVerifyRequired) && hasImage;
     // A contest is held out of the standing slot as 'contest_pending' (excluded from the
     // partial unique index) until OCR resolves it; otherwise the normal quarantine rules.
     // A detected duplicate document is silently shadow-banned at insert (never active).

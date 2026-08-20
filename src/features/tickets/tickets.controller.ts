@@ -103,18 +103,20 @@ export const submitReceiptEntry = async (req: AuthRequest, res: Response) => {
       return;
     }
     const sanitizedId = String(receiptIdentifier).trim();
-    // Min 5 (matches the client). Shorter numeric strings collide with digit runs that appear
-    // incidentally in unrelated receipt images (barcodes, phone numbers), which weakens the
-    // contest OCR proof - so the floor is enforced server-side, not just in the form.
-    if (sanitizedId.length < 5 || sanitizedId.length > 100) {
-      res.status(400).json({ message: 'receiptIdentifier must be between 5 and 100 characters.' });
+    // Min 1 (matches the client): Toast-style POS check numbers ("Check #12") are 1-2 digits
+    // and daily-reset short numbers are the NORM for US restaurants. Short ids are safe now
+    // because the OCR match is no longer bare substring containment (identifierFoundInText
+    // requires a whole printed run below 4 alnum chars) and same-number collisions route
+    // through the contest/photo machinery, not the length rule.
+    if (sanitizedId.length < 1 || sanitizedId.length > 100) {
+      res.status(400).json({ message: 'receiptIdentifier must be between 1 and 100 characters.' });
       return;
     }
     // Canonical form (uppercase alnum only) is what we STORE and dedup on, so "#1366-3859"
     // and "1366-3859" can't both be entered as if they were different receipts.
     const normalizedId = normalizeReceiptIdentifier(sanitizedId);
-    if (normalizedId.length < 4) {
-      res.status(400).json({ message: 'receiptIdentifier must contain at least 4 letters or numbers.' });
+    if (normalizedId.length < 1) {
+      res.status(400).json({ message: 'receiptIdentifier must contain at least 1 letter or number.' });
       return;
     }
 
@@ -146,7 +148,7 @@ export const submitReceiptEntry = async (req: AuthRequest, res: Response) => {
       transactionDate: typeof transactionDate === 'string' ? transactionDate : undefined,
       receiptImageUrl: receiptImageUrl ?? undefined,
       typingDurationMs: typingDurationMs !== undefined ? Number(typingDurationMs) : undefined,
-      receiptInputMethod: receiptInputMethod === 'pasted' ? 'pasted' : receiptInputMethod === 'typed' ? 'typed' : undefined,
+      receiptInputMethod: receiptInputMethod === 'pasted' ? 'pasted' : receiptInputMethod === 'typed' ? 'typed' : receiptInputMethod === 'scanned' ? 'scanned' : undefined,
       submitterIp: getClientIp(req),
       submitterState: res.locals.entryRegion?.state ?? null,
       isOutOfRegion: res.locals.entryRegion?.outOfRegion === true,
@@ -206,6 +208,31 @@ export const getReceiptUploadUrl = async (req: AuthRequest, res: Response) => {
       return;
     }
     res.status(500).json({ message: 'Failed to generate upload URL.' });
+  }
+};
+
+// Receipt-scan autofill: Gemini reads the already-uploaded photo and returns the fields for
+// the form. Convenience only - the submitted values still go through full validation, the
+// dedup ladder, and async OCR verification exactly like typed ones. Soft-failure contract:
+// any read problem returns { ok: false } (never an error status), the client falls back to
+// typing with the photo kept attached.
+export const scanReceipt = async (req: AuthRequest, res: Response) => {
+  try {
+    const { receiptImageUrl } = req.body as { receiptImageUrl?: unknown };
+    const r2Base = process.env.R2_PUBLIC_URL;
+    if (typeof receiptImageUrl !== 'string' || !r2Base || !receiptImageUrl.startsWith(r2Base + '/receipt-images/')) {
+      res.status(400).json({ message: 'Invalid receipt image URL.' });
+      return;
+    }
+    const { extractReceiptFields } = await import('../ocr/receiptScan.js');
+    const fields = await extractReceiptFields(receiptImageUrl);
+    if (!fields) {
+      res.json({ ok: false, identifier: null, amount: null, date: null });
+      return;
+    }
+    res.json({ ok: true, ...fields });
+  } catch {
+    res.json({ ok: false, identifier: null, amount: null, date: null });
   }
 };
 

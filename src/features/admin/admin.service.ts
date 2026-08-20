@@ -2397,23 +2397,43 @@ export const adminImageDecisionService = async (
     );
 
     const ticketRes = await client.query(
-      `SELECT id, activated_by_user_id, draw_id, image_validation_status FROM ticket WHERE id = $1 FOR UPDATE`,
+      `SELECT id, activated_by_user_id, draw_id, image_validation_status, is_quarantined, quarantine_reason
+       FROM ticket WHERE id = $1 FOR UPDATE`,
       [ticketId],
     );
     if (!ticketRes.rows[0]) throw new Error('Ticket not found');
 
-    const { activated_by_user_id: userId, draw_id: drawId, image_validation_status: prevStatus } = ticketRes.rows[0];
+    const {
+      activated_by_user_id: userId, draw_id: drawId, image_validation_status: prevStatus,
+      is_quarantined: isQuarantined, quarantine_reason: quarantineReason,
+    } = ticketRes.rows[0];
     if (!userId) throw new Error('Ticket has no associated user');
 
     const overrideable = ['passed', 'failed', 'ocr_error', 'pending'];
     if (!overrideable.includes(prevStatus)) throw new Error(`Cannot override image decision for status: ${prevStatus}`);
 
+    // A ticket can sit at status 'passed' while HELD out of the pool with no reward ever
+    // applied: content checks passed but the entry did not (yet) earn a standing slot.
+    //   date_unreadable_review - cross-day claim whose scan printed no legible date; held
+    //     for exactly this human decision.
+    //   contest_not_won - valid image that lost its contest slot.
+    // For these, approve is a RELEASE (not a double-approve) and reject must not "reverse"
+    // a -3 reward that was never granted.
+    const heldWithoutReward =
+      isQuarantined === true &&
+      prevStatus === 'passed' &&
+      (quarantineReason === 'date_unreadable_review' || quarantineReason === 'contest_not_won');
+
     // Idempotency: prevent double-approve or double-reject from farming risk score
-    if (decision === 'approve' && prevStatus === 'passed') throw new Error('Image is already approved');
+    if (decision === 'approve' && prevStatus === 'passed' && !heldWithoutReward) {
+      throw new Error('Image is already approved');
+    }
     if (decision === 'reject' && prevStatus === 'failed') throw new Error('Image is already rejected');
 
     if (decision === 'approve') {
-      // Reverse the +2 penalty if previously failed, then apply -3 reward
+      // Reverse the +2 penalty if previously failed, then apply -3 reward. (Releasing a held
+      // ticket grants the plain -3: a human just verified the receipt, which outranks the
+      // deferred-reward laundering guard the automatic pass applies.)
       const ticketDeltaChange = prevStatus === 'failed' ? -5 : -3;
       const userDelta = prevStatus === 'failed' ? -5 : -3;
 
@@ -2433,6 +2453,11 @@ export const adminImageDecisionService = async (
            ON o.business_id = me.business_id
           AND o.draw_id = me.draw_id
           AND o.receipt_identifier = me.receipt_identifier
+          -- Full dedup-slot key (day + doc_seq, mirroring idx_ticket_receipt_unique): only a
+          -- winner holding the SAME per-day slot blocks this approval. A cross-day claim on a
+          -- daily-reset check number is a different receipt and is never in conflict.
+          AND o.transaction_date IS NOT DISTINCT FROM me.transaction_date
+          AND o.receipt_doc_seq = me.receipt_doc_seq
           AND o.id <> me.id
           AND (o.is_quarantined = FALSE OR o.quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review'))
          JOIN draw d ON d.winner_ticket_id = o.id
@@ -2446,7 +2471,7 @@ export const adminImageDecisionService = async (
 
       await client.query(
         `WITH approved AS (
-           SELECT business_id, draw_id, receipt_identifier, id
+           SELECT business_id, draw_id, receipt_identifier, transaction_date, receipt_doc_seq, id
            FROM ticket
            WHERE id = $1 AND receipt_identifier IS NOT NULL
          )
@@ -2460,6 +2485,12 @@ export const adminImageDecisionService = async (
                  WHERE o.business_id = a.business_id
                    AND o.draw_id = a.draw_id
                    AND o.receipt_identifier = a.receipt_identifier
+                   -- Displace only the holder of the SAME per-day slot (day + doc_seq, the
+                   -- unique-index key). Claims on other days of a daily-reset check number -
+                   -- including this same user's own other-day entries - are different
+                   -- receipts and must survive an approval untouched.
+                   AND o.transaction_date IS NOT DISTINCT FROM a.transaction_date
+                   AND o.receipt_doc_seq = a.receipt_doc_seq
                    AND o.id <> a.id
                    AND (o.is_quarantined = FALSE OR o.quarantine_reason IN ('ocr_pending', 'ocr_error_pending_review'))
                )
@@ -2481,15 +2512,17 @@ export const adminImageDecisionService = async (
         `UPDATE ticket
          SET is_quarantined = FALSE, quarantine_reason = NULL, quarantined_at = NULL
          WHERE anchor_ticket_id = $1
-           AND quarantine_reason IN ('ocr_pending', 'ocr_validation_failed', 'ocr_error_pending_review', 'contest_pending', 'contest_not_won')`,
+           AND quarantine_reason IN ('ocr_pending', 'ocr_validation_failed', 'ocr_error_pending_review', 'contest_pending', 'contest_not_won', 'date_unreadable_review')`,
         [ticketId],
       );
       await updateUserRiskScore(userId, userDelta, client);
       await syncUserQuarantineState(userId, drawId, client);
     } else {
-      // Reverse the -3 reward if previously passed, then apply +2 penalty
-      const ticketDeltaChange = prevStatus === 'passed' ? 5 : 2;
-      const userDelta = prevStatus === 'passed' ? 5 : 2;
+      // Reverse the -3 reward if previously passed, then apply +2 penalty. A held-passed
+      // ticket (date_unreadable_review / contest_not_won) never received the reward, so
+      // rejecting it applies the plain +2 - reversing there would over-penalize by 3.
+      const ticketDeltaChange = prevStatus === 'passed' && !heldWithoutReward ? 5 : 2;
+      const userDelta = ticketDeltaChange;
 
       await client.query(
         `UPDATE ticket

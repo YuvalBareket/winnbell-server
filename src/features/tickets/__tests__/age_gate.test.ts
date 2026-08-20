@@ -82,8 +82,7 @@ const buildClientResponses = (opts: { sector: string; dateOfBirth: string | null
       }],
     }, // preflight CTE
     { rows: [] }, // receipt-level advisory lock
-    { rows: [{ image_backed_by_other: false, typed_only_by_other: false }] }, // claim-state
-    { rows: [] }, // ownExisting
+    { rows: [{}] }, // claim map (dedup ladder) — no claims on this number
     { rows: [] }, // duplicate-document fingerprint check
     { rows: [] }, // code conflict check
     { rows: [{ id: 100 }] }, // INSERT RETURNING id

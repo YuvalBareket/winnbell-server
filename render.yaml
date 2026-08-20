@@ -47,6 +47,12 @@ services:
         sync: false
       - key: OCR_PROVIDER
         sync: false
+      # Gemini key: used by the receipt-scan autofill (receiptRead.ts) and the LLM
+      # judgment layer (receiptValidationLlm.ts) regardless of OCR_PROVIDER, and by the
+      # validation provider when OCR_PROVIDER=gemini. MUST be a PAID-billing key
+      # (free-tier terms allow training on inputs; receipt text carries customer PII).
+      - key: GEMINI_API_KEY
+        sync: false
       - key: R2_ACCESS_KEY_ID
         sync: false
       - key: R2_SECRET_ACCESS_KEY
@@ -136,6 +142,10 @@ services:
       - key: GOOGLE_VISION_API_KEY
         sync: false
       - key: OCR_PROVIDER
+        sync: false
+      # Same as production: needed by scan autofill + LLM judgment even before the
+      # OCR_PROVIDER=gemini flip. Paid-billing key only.
+      - key: GEMINI_API_KEY
         sync: false
       - key: R2_ACCESS_KEY_ID
         sync: false

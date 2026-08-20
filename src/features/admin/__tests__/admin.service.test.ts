@@ -1068,4 +1068,90 @@ describe('adminImageDecisionService — approval supersedes competing claims (P2
     expect(updates).toHaveLength(0);
     expect(calls).toContain('ROLLBACK');
   });
+
+  test('winner-conflict and supersede queries are scoped to the FULL dedup slot (day + doc_seq)', async () => {
+    // Approving one day of a daily-reset check number must never displace (or be blocked by)
+    // claims on OTHER days - including the same user's own other-day entries.
+    mockQuery.mockResolvedValueOnce({ rows: [{ business_id: 3, receipt_identifier: 'RCP1' }] });
+    mockClientQuery.mockImplementation((sql: string) => {
+      if (sql.includes('FOR UPDATE')) return Promise.resolve({ rows: [TICKET_ROW] });
+      if (sql.includes('JOIN draw d ON d.winner_ticket_id')) return Promise.resolve({ rows: [] });
+      return Promise.resolve({ rows: [], rowCount: 1 });
+    });
+
+    await adminImageDecisionService(9, 'approve');
+
+    const calls = mockClientQuery.mock.calls.map(([sql]) => sql as string);
+    const winnerCheck = calls.find(s => s.includes('JOIN draw d ON d.winner_ticket_id'));
+    const supersede = calls.find(s => s.includes('superseded_by_admin_decision'));
+    for (const sql of [winnerCheck, supersede]) {
+      expect(sql).toContain('transaction_date IS NOT DISTINCT FROM');
+      expect(sql).toContain('receipt_doc_seq');
+    }
+  });
+});
+
+// ─────────────────────────────────────────────
+// adminImageDecisionService — held-passed tickets (2026-08-20 review issue B)
+// A 'date_unreadable_review' hold sits at status 'passed' while quarantined, and never
+// received the -3 reward. Approve must RELEASE it (not error "already approved"); reject
+// must apply the plain +2 (no phantom reward to reverse).
+// ─────────────────────────────────────────────
+describe('adminImageDecisionService — date_unreadable_review holds', () => {
+  const HELD_ROW = {
+    id: 9, activated_by_user_id: 7, draw_id: 42,
+    image_validation_status: 'passed', is_quarantined: true, quarantine_reason: 'date_unreadable_review',
+  };
+
+  const routeWith = (ticketRow: Record<string, unknown>) => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ business_id: 3, receipt_identifier: 'RCP1' }] });
+    mockClientQuery.mockImplementation((sql: string) => {
+      if (sql.includes('FOR UPDATE')) return Promise.resolve({ rows: [ticketRow] });
+      if (sql.includes('JOIN draw d ON d.winner_ticket_id')) return Promise.resolve({ rows: [] });
+      return Promise.resolve({ rows: [], rowCount: 1 });
+    });
+  };
+
+  test('approve RELEASES the hold with the plain -3 reward and lifts held siblings', async () => {
+    routeWith(HELD_ROW);
+
+    await adminImageDecisionService(9, 'approve');
+
+    const approveCall = mockClientQuery.mock.calls.find(([sql]) =>
+      (sql as string).includes("image_validation_status = 'passed'") && (sql as string).includes('risk_score_delta'));
+    expect(approveCall).toBeDefined();
+    expect((approveCall as unknown[])[1]).toEqual([9, -3]); // reward now granted, not -5
+    const siblingLift = mockClientQuery.mock.calls
+      .map(([sql]) => sql as string)
+      .find(s => s.includes('anchor_ticket_id = $1') && s.includes('is_quarantined = FALSE'));
+    expect(siblingLift).toContain('date_unreadable_review');
+    expect(mockClientQuery.mock.calls.map(([sql]) => sql)).toContain('COMMIT');
+  });
+
+  test('approve on a LIVE passed ticket still errors (idempotency intact)', async () => {
+    routeWith({ ...HELD_ROW, is_quarantined: false, quarantine_reason: null });
+
+    await expect(adminImageDecisionService(9, 'approve')).rejects.toThrow(/already approved/);
+  });
+
+  test('reject on a held ticket applies +2, not the +5 reward reversal', async () => {
+    routeWith(HELD_ROW);
+
+    await adminImageDecisionService(9, 'reject');
+
+    const rejectCall = mockClientQuery.mock.calls.find(([sql]) =>
+      (sql as string).includes("image_validation_status = 'failed'") && (sql as string).includes('risk_score_delta'));
+    expect(rejectCall).toBeDefined();
+    expect((rejectCall as unknown[])[1]).toEqual([9, 2]);
+  });
+
+  test('reject on a genuinely passed live ticket still reverses the reward (+5)', async () => {
+    routeWith({ ...HELD_ROW, is_quarantined: false, quarantine_reason: null });
+
+    await adminImageDecisionService(9, 'reject');
+
+    const rejectCall = mockClientQuery.mock.calls.find(([sql]) =>
+      (sql as string).includes("image_validation_status = 'failed'") && (sql as string).includes('risk_score_delta'));
+    expect((rejectCall as unknown[])[1]).toEqual([9, 5]);
+  });
 });
