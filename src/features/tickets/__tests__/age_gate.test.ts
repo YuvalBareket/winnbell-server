@@ -50,10 +50,22 @@ const BASE_INPUT = {
   submitterIp: '127.0.0.1',
 };
 
+// Format a Date as YYYY-MM-DD from its LOCAL calendar components. isAtLeast21 compares
+// local month/day (see its docstring - date-only strings vs pg DATE hydration), so the
+// fixtures must be built from local components too. Using toISOString() (UTC) instead
+// rolled the day back when the suite ran just after local midnight in a timezone ahead of
+// UTC, silently turning "day before the birthday" into "on the birthday" and flipping the
+// boundary assertions. Building locally makes these tests deterministic at any time of day.
+const localYMD = (d: Date): string => {
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  return `${d.getFullYear()}-${mm}-${dd}`;
+};
+
 const dobYearsAgo = (years: number): string => {
   const d = new Date();
   d.setFullYear(d.getFullYear() - years);
-  return d.toISOString().split('T')[0];
+  return localYMD(d);
 };
 
 /** Full happy-path response sequence; sector/date_of_birth injected into the preflight row. */
@@ -167,14 +179,14 @@ describe('isAtLeast21', () => {
   test('true exactly on the 21st birthday', () => {
     const d = new Date();
     d.setFullYear(d.getFullYear() - 21);
-    expect(isAtLeast21(d.toISOString().split('T')[0])).toBe(true);
+    expect(isAtLeast21(localYMD(d))).toBe(true);
   });
 
   test('false the day before the 21st birthday', () => {
     const d = new Date();
     d.setFullYear(d.getFullYear() - 21);
     d.setDate(d.getDate() + 1);
-    expect(isAtLeast21(d.toISOString().split('T')[0])).toBe(false);
+    expect(isAtLeast21(localYMD(d))).toBe(false);
   });
 
   test('false for null, undefined, and garbage', () => {

@@ -40,6 +40,7 @@ import {
   pauseBusinessInDrawService,
   getBusinessDetailService,
   getBusinessEntriesService,
+  getAdminEntriesService,
   adminImageDecisionService,
   getDrawCandidateService,
   getDrawRejectedWinnersService,
@@ -627,6 +628,30 @@ export const getBusinessEntries = async (req: Request, res: Response) => {
     res.json(result);
   } catch (error) {
     res.status(500).json({ message: 'Failed to fetch business entries' });
+  }
+};
+
+const ADMIN_ENTRIES_STATUSES = ['review', 'all', 'passed', 'failed', 'quarantined'] as const;
+type AdminEntriesStatus = (typeof ADMIN_ENTRIES_STATUSES)[number];
+
+export const getAdminEntries = async (req: Request, res: Response) => {
+  const drawId = req.query.drawId ? parseInt(req.query.drawId as string, 10) : null;
+  if (req.query.drawId && (drawId === null || isNaN(drawId))) {
+    res.status(400).json({ message: 'Invalid drawId' });
+    return;
+  }
+  const rawStatus = (req.query.status as string) ?? 'review';
+  const status: AdminEntriesStatus = (ADMIN_ENTRIES_STATUSES as readonly string[]).includes(rawStatus)
+    ? (rawStatus as AdminEntriesStatus)
+    : 'review';
+  const page = Math.max(1, parseInt((req.query.page as string) ?? '1', 10) || 1);
+  const limit = Math.min(50, Math.max(1, parseInt((req.query.limit as string) ?? '25', 10) || 25));
+  try {
+    const result = await getAdminEntriesService(drawId, status, page, limit);
+    res.json(result);
+  } catch (error) {
+    console.error('[admin.getAdminEntries]', error);
+    res.status(500).json({ message: 'Failed to fetch entries' });
   }
 };
 

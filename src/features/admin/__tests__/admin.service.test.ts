@@ -1155,3 +1155,55 @@ describe('adminImageDecisionService — date_unreadable_review holds', () => {
     expect((rejectCall as unknown[])[1]).toEqual([9, 5]);
   });
 });
+
+// ─────────────────────────────────────────────
+// adminImageDecisionService — contest_not_won holds (second heldWithoutReward reason)
+// A 'contest_not_won' ticket is also status='passed'/quarantined with no reward ever
+// applied. The same release/plain-penalty logic must apply as for date_unreadable_review.
+// ─────────────────────────────────────────────
+describe('adminImageDecisionService — contest_not_won holds', () => {
+  const CONTEST_NOT_WON_ROW = {
+    id: 9, activated_by_user_id: 7, draw_id: 42,
+    image_validation_status: 'passed', is_quarantined: true, quarantine_reason: 'contest_not_won',
+  };
+
+  const routeWith = (ticketRow: Record<string, unknown>) => {
+    mockQuery.mockResolvedValueOnce({ rows: [{ business_id: 3, receipt_identifier: 'RCP1' }] });
+    mockClientQuery.mockImplementation((sql: string) => {
+      if (sql.includes('FOR UPDATE')) return Promise.resolve({ rows: [ticketRow] });
+      if (sql.includes('JOIN draw d ON d.winner_ticket_id')) return Promise.resolve({ rows: [] });
+      return Promise.resolve({ rows: [], rowCount: 1 });
+    });
+  };
+
+  test('approve RELEASES a contest_not_won hold with plain -3 reward (not -5)', async () => {
+    routeWith(CONTEST_NOT_WON_ROW);
+
+    await adminImageDecisionService(9, 'approve');
+
+    const approveCall = mockClientQuery.mock.calls.find(([sql]) =>
+      (sql as string).includes("image_validation_status = 'passed'") && (sql as string).includes('risk_score_delta'));
+    expect(approveCall).toBeDefined();
+    // Plain -3: the contest path never applied a reward, so this is a fresh grant, not a reversal.
+    expect((approveCall as unknown[])[1]).toEqual([9, -3]);
+    expect(mockClientQuery.mock.calls.map(([sql]) => sql)).toContain('COMMIT');
+  });
+
+  test('approve on a live (non-quarantined) passed ticket still throws even after a prior contest_not_won approve', async () => {
+    routeWith({ ...CONTEST_NOT_WON_ROW, is_quarantined: false, quarantine_reason: null });
+
+    await expect(adminImageDecisionService(9, 'approve')).rejects.toThrow(/already approved/);
+  });
+
+  test('reject on a contest_not_won held ticket applies +2 (never the +5 reward reversal)', async () => {
+    routeWith(CONTEST_NOT_WON_ROW);
+
+    await adminImageDecisionService(9, 'reject');
+
+    const rejectCall = mockClientQuery.mock.calls.find(([sql]) =>
+      (sql as string).includes("image_validation_status = 'failed'") && (sql as string).includes('risk_score_delta'));
+    expect(rejectCall).toBeDefined();
+    // +2: no reward was ever granted; reversing -3 then adding +2 would give +5, which is wrong.
+    expect((rejectCall as unknown[])[1]).toEqual([9, 2]);
+  });
+});

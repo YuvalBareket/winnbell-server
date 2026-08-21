@@ -30,6 +30,7 @@ router.get('/users', adminController.getUsers);
 router.get('/users/analytics-summary', adminController.getUserAnalytics);
 router.get('/users/:userId', adminController.getUserDetail);
 router.get('/businesses/:businessId', adminController.getBusinessDetail);
+router.get('/entries', adminController.getAdminEntries);
 router.get('/businesses/:businessId/entries', adminController.getBusinessEntries);
 router.get('/businesses/:businessId/campaign/list', adminGetCampaignList);
 router.get('/businesses/:businessId/campaign/header', adminGetCampaignHeader);
