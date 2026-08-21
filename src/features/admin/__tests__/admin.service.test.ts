@@ -443,6 +443,16 @@ describe('openDrawService — enrollment', () => {
     // The reset spares cancelling subs: their skip records "skipped the campaign they
     // already paid for" and must survive the open for the plan page to say so.
     expect(skipReset![0]).toMatch(/cancel_at_period_end = FALSE/);
+
+    // Pre-open joiners (free-trial button / admin adds) may have changed their threshold
+    // between joining and the open; the open refreshes the snapshot so per-campaign
+    // analytics report the value the campaign actually ran under.
+    const snapshotRefresh = mockClientQuery.mock.calls.find(
+      ([s]: [string]) => typeof s === 'string' && s.includes('SET min_transaction_at_entry = b.min_transaction_amount'),
+    );
+    expect(snapshotRefresh).toBeDefined();
+    expect(snapshotRefresh![0]).toMatch(/IS DISTINCT FROM b\.min_transaction_amount/);
+    expect(snapshotRefresh![1]).toEqual([5]);
   });
 
   test('refuses to open a second draw while one is already Open', async () => {

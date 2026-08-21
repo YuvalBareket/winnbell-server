@@ -855,6 +855,18 @@ const openDrawInTx = async (client: import('pg').PoolClient, drawId: number, act
     WHERE d.id = $1
     ON CONFLICT (draw_id, business_id) DO NOTHING
   `, [drawId]);
+  // Refresh the threshold snapshot for PRE-OPEN joiners (the free-trial join button and
+  // admin adds insert draw_entry rows weeks before the open). A business can legitimately
+  // change its threshold right up to this boundary (changes only become pending once IN an
+  // open draw), which would leave the join-time snapshot stale for the entire campaign in
+  // per-campaign analytics. "At entry" means "as the campaign went live".
+  await client.query(`
+    UPDATE draw_entry de
+    SET min_transaction_at_entry = b.min_transaction_amount
+    FROM business b
+    WHERE b.id = de.business_id AND de.draw_id = $1
+      AND de.min_transaction_at_entry IS DISTINCT FROM b.min_transaction_amount
+  `, [drawId]);
   // Opt-outs are one campaign only: consume the flag so the business is back in next time.
   // EXCEPT for cancelling subscriptions: their skip came from a charged-window cancel and
   // must survive the open so the plan page keeps saying "you skipped the campaign you paid
