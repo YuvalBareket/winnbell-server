@@ -175,6 +175,38 @@ describe('date ladder - unreadable printed date on a cross-day claim (review iss
     expect(sqls.some((s) => s.includes('risk_score_delta = risk_score_delta + $2'))).toBe(true);
     expectNoOcrError();
   });
+
+  it('a SAME-DAY claim with unreadable date is NOT routed to the date_unreadable hold (different code path)', async () => {
+    // The date-hold branch only fires when ALL other claims are on OTHER days (same_day=false).
+    // When a same-day typed-only claim exists the contest-proven image displaces it via
+    // supersedeTypedOnlyDocumentClaims — the date_unreadable hold must never fire.
+    const SAME_DAY_TYPED_CLAIM = {
+      id: 78, same_day: true, verified: false, typed_only: true, amount: '20.00', receipt_doc_seq: 0,
+    };
+    // Full pass with businessNameFound + amountMatches true -> contestProven = true -> supersede.
+    setupRoutes({ claims: [SAME_DAY_TYPED_CLAIM], cleanStreak: 10 });
+    await runValidation(ocrResult({ dateMatches: null, businessNameFound: true, amountMatches: true }));
+
+    const sqls = clientSqls();
+    // Must NOT have gone to the date-hold path.
+    expect(sqls.some((s) => s.includes("'date_unreadable_review'"))).toBe(false);
+    // The supersede path ran — the typed-only squatter is evicted, not the submitter held.
+    expect(sqls.some((s) => s.includes('superseded_by_verified_image'))).toBe(true);
+    expectNoOcrError();
+  });
+
+  it('anchor AND siblings are both quarantined under date_unreadable_review on the hold path', async () => {
+    // The UPDATE uses "id = $1 OR anchor_ticket_id = $1": pin that the SQL contains both
+    // conditions so the sibling coverage is structural, not just on the anchor.
+    setupRoutes({ claims: [OTHER_DAY_CLAIM] });
+    await runValidation(ocrResult({ dateMatches: null }));
+
+    const holdSql = clientSqls().find((s) => s.includes("'date_unreadable_review'"));
+    expect(holdSql).toBeDefined();
+    // Both the anchor and its siblings must be quarantined by the single UPDATE.
+    expect(holdSql).toMatch(/id\s*=\s*\$1\s+OR\s+anchor_ticket_id\s*=\s*\$1/);
+    expectNoOcrError();
+  });
 });
 
 // ─────────────────────────────────────────────
@@ -193,6 +225,17 @@ describe('deferred OCR reward (review issue D1)', () => {
     expect(call).toBeDefined();
     expect((call as unknown[])[1]).toEqual([TICKET_ID, 0, null]); // applied delta 0, no doc_seq
     // No user-score call at all: a delta-0 call would double count a "clean entry".
+    expect(mockUpdateUserRiskScore).not.toHaveBeenCalled();
+    expectNoOcrError();
+  });
+
+  it('a streak of exactly 5 (one below the threshold) still defers the reward to 0', async () => {
+    setupRoutes({ cleanStreak: 5 });
+    await runValidation(ocrResult());
+
+    const call = passUpdateCall();
+    expect(call).toBeDefined();
+    expect((call as unknown[])[1]).toEqual([TICKET_ID, 0, null]);
     expect(mockUpdateUserRiskScore).not.toHaveBeenCalled();
     expectNoOcrError();
   });
@@ -288,6 +331,24 @@ describe('same-business velocity flag (review issue D2)', () => {
     await runValidation(ocrResult());
 
     expect(flagSqls()).toHaveLength(0);
+    expectNoOcrError();
+  });
+
+  it('the flag write is idempotent (dup-guarded) — no score change on a re-flag', async () => {
+    // The SQL already embeds a @> ARRAY[$2::text] guard so the array_append is skipped when
+    // the flag is already present. This test verifies the guard substring appears in every
+    // flag-path call and that updateUserRiskScore is called at most once (the pass reward),
+    // never an extra time for the flag.
+    setupRoutes({ cleanStreak: 10, verified24h: 3 });
+    await runValidation(ocrResult());
+
+    for (const [sql, params] of mockClientQuery.mock.calls.filter(([s]) => (s as string).includes('array_append'))) {
+      // The dup guard must be present on every flag call.
+      expect(sql).toContain('@> ARRAY[$2::text]');
+      expect((params as unknown[])[1]).toBe('same_business_receipt_velocity');
+    }
+    // Score update happens exactly once (the OCR pass reward), not additionally for the flag.
+    expect(mockUpdateUserRiskScore).toHaveBeenCalledTimes(1);
     expectNoOcrError();
   });
 });

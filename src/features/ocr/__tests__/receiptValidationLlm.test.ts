@@ -315,6 +315,20 @@ describe('applyLlmTightening', () => {
     expect(out.reasons).toEqual([]);
   });
 
+  it('a claim that equals changeGiven but is ALSO within $1 of the pre-tip total passes via the near-preTip branch (no flag)', () => {
+    // Receipt: Total 88.00, Cash 100.00, Change 88.00 — the preTip matches the claim first,
+    // so the inflation branch is never reached even though changeGiven equals the claim.
+    const sameAsChange = 'JOES DINER\nRECEIPT #12345678\nBURGER 80.00\nTAX 8.00\nTOTAL 88.00\nCASH 100.00\nCHANGE 88.00';
+    const out = applyLlmTightening(
+      baseResult({ rawText: sameAsChange }),
+      { ...expected, amount: 88 },
+      judgment({ preTipTotal: 88, actualPayableTotal: 88, cashTendered: 100, changeGiven: 88 }),
+    );
+    // near(claim, preTip) fires first -> no inflation flag despite changeGiven === claim.
+    expect(out.result.amountMatches).toBe(true);
+    expect(out.reasons).toEqual([]);
+  });
+
   it('IGNORES a tip disposition whose tip amount is not printed (ungrounded)', () => {
     const noTipPrinted = 'JOES DINER\nRECEIPT #12345678\nTOTAL 70.00\nFINAL 90.00';
     const out = applyLlmTightening(

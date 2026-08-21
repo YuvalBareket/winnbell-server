@@ -2368,6 +2368,97 @@ export const getBusinessEntriesService = async (
   return { rows: rowsRes.rows, total: countRes.rows[0].total };
 };
 
+// ── Admin Entries page: cross-business receipt-review queue + stats ──────────────
+// Powers /admin/entries: a global view of receipt entries (the only source with images to
+// approve/reject), optionally scoped to one campaign, with a stats header and a paginated,
+// status-filtered list. Admin-facing, so risk/quarantine detail IS surfaced (unlike the
+// business-facing analytics). 'review' is the actionable queue: images still pending OCR,
+// OCR errors, date-unreadable holds, and open contests - everything an admin can act on.
+export type AdminEntriesStatus = 'review' | 'all' | 'passed' | 'failed' | 'quarantined';
+
+export const getAdminEntriesService = async (
+  drawId: number | null,
+  status: AdminEntriesStatus,
+  page: number,
+  limit: number,
+) => {
+  const pool = getPool();
+  const offset = (page - 1) * limit;
+
+  // Status predicate, reused (with the right column prefix) by both the rows and count
+  // queries. All three columns are ticket-only, so a bare name is unambiguous even under
+  // the joins in the rows query; passing 't.' keeps it explicit there.
+  const statusPredicate = (p: string): string => {
+    switch (status) {
+      case 'review':
+        return `AND (${p}image_validation_status IN ('pending','ocr_error')
+                     OR ${p}quarantine_reason IN ('date_unreadable_review','contest_pending'))`;
+      case 'passed':      return `AND ${p}image_validation_status = 'passed'`;
+      // 'failed' matches the Rejected stat exactly (only genuine OCR rejections). Provider
+      // errors (ocr_error) are not rejections; they surface under Quarantined / All.
+      case 'failed':      return `AND ${p}image_validation_status = 'failed'`;
+      case 'quarantined': return `AND ${p}is_quarantined = TRUE`;
+      case 'all':
+      default:            return '';
+    }
+  };
+
+  // Stats: one aggregate pass over receipt entries in scope. FILTER keeps it to a single scan.
+  const statsParams: number[] = [];
+  const statsDrawClause = drawId ? `AND draw_id = $${statsParams.push(drawId)}` : '';
+  const statsRes = await pool.query(
+    `SELECT
+       COUNT(*)::int AS total,
+       COUNT(*) FILTER (WHERE is_quarantined = FALSE)::int AS active,
+       COUNT(*) FILTER (WHERE image_validation_status IN ('pending','ocr_error')
+                           OR quarantine_reason IN ('date_unreadable_review','contest_pending'))::int AS awaiting_review,
+       COUNT(*) FILTER (WHERE image_validation_status = 'passed')::int AS verified,
+       COUNT(*) FILTER (WHERE image_validation_status = 'failed')::int AS rejected,
+       COUNT(*) FILTER (WHERE quarantine_reason = 'date_unreadable_review')::int AS held_date,
+       COUNT(*) FILTER (WHERE is_quarantined = TRUE)::int AS quarantined,
+       COUNT(*) FILTER (WHERE receipt_image_url IS NOT NULL)::int AS with_image
+     FROM ticket
+     WHERE entry_source = 'receipt' ${statsDrawClause}`,
+    statsParams,
+  );
+
+  // Rows: newest first, joined for the display columns the page shows.
+  const rowParams: number[] = [limit, offset];
+  const rowDrawClause = drawId ? `AND t.draw_id = $${rowParams.push(drawId)}` : '';
+  const rowsRes = await pool.query(
+    `SELECT
+       t.id, t.code, t.entry_source, t.activated_at,
+       t.is_quarantined, t.quarantine_reason, t.risk_flags,
+       t.receipt_image_url, t.image_validation_status,
+       t.risk_score_delta, t.transaction_amount, t.receipt_identifier,
+       to_char(t.transaction_date, 'YYYY-MM-DD') AS transaction_date,
+       d.name AS draw_name, d.id AS draw_id,
+       u.id AS user_id, u.full_name AS user_name, u.email AS user_email, u.risk_score AS user_risk_score,
+       b.name AS business_name,
+       bl.name AS location_name
+     FROM ticket t
+     LEFT JOIN draw d ON d.id = t.draw_id
+     LEFT JOIN "user" u ON u.id = t.activated_by_user_id
+     LEFT JOIN business b ON b.id = t.business_id
+     LEFT JOIN business_location bl ON bl.id = t.location_id
+     WHERE t.entry_source = 'receipt' ${rowDrawClause} ${statusPredicate('t.')}
+     ORDER BY t.activated_at DESC NULLS LAST
+     LIMIT $1 OFFSET $2`,
+    rowParams,
+  );
+
+  // Total for pagination, honoring the same draw + status filter.
+  const countParams: number[] = [];
+  const countDrawClause = drawId ? `AND draw_id = $${countParams.push(drawId)}` : '';
+  const countRes = await pool.query(
+    `SELECT COUNT(*)::int AS total FROM ticket
+     WHERE entry_source = 'receipt' ${countDrawClause} ${statusPredicate('')}`,
+    countParams,
+  );
+
+  return { stats: statsRes.rows[0], rows: rowsRes.rows, total: countRes.rows[0].total };
+};
+
 export const adminImageDecisionService = async (
   ticketId: number,
   decision: 'approve' | 'reject',

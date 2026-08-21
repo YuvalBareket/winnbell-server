@@ -555,13 +555,16 @@ async function resolveReceiptValidation(
 
       // Same-business velocity signal. Only anchor tickets ever reach 'passed', so this
       // COUNT is a count of verified RECEIPTS (not inflated by multi-entry siblings), and
-      // it includes the row updated above.
+      // it includes the row updated above. Scoped to THIS draw: the flag exists to inform
+      // the current draw's winner review, and without the scope a regular customer with a
+      // couple of receipts on each side of a draw boundary (both inside the 24h window)
+      // would trip a farming flag that means nothing for either campaign.
       const vel = await client.query(
         `SELECT COUNT(*)::int AS cnt FROM ticket
-         WHERE activated_by_user_id = $1 AND business_id = $2
+         WHERE activated_by_user_id = $1 AND business_id = $2 AND draw_id = $3
            AND image_validation_status = 'passed'
            AND activated_at >= NOW() - INTERVAL '24 hours'`,
-        [userId, businessId],
+        [userId, businessId, drawId],
       );
       if (Number(vel.rows[0]?.cnt ?? 0) >= SAME_BUSINESS_VERIFIED_24H_FLAG_AT) {
         await client.query(
