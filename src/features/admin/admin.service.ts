@@ -2934,7 +2934,22 @@ export const getUserDetailService = async (userId: number) => {
         u.created_at,
         b.id AS business_id,
         b.name AS business_name,
-        (s3.status IN ('Active', 'Trialing')) AS business_active
+        (s3.status IN ('Active', 'Trialing')) AS business_active,
+        -- Locations this user MANAGES (branch managers own no business row; their tie to
+        -- a business runs through business_location.manager_user_id). JSON array so one
+        -- query serves zero, one, or several managed locations.
+        COALESCE((
+          SELECT json_agg(json_build_object(
+            'location_id', ml.id,
+            'location_name', ml.name,
+            'location_active', ml.is_active,
+            'business_id', mb.id,
+            'business_name', mb.name
+          ) ORDER BY mb.name, ml.name)
+          FROM business_location ml
+          JOIN business mb ON mb.id = ml.business_id
+          WHERE ml.manager_user_id = u.id
+        ), '[]'::json) AS managed_locations
       FROM "user" u
       LEFT JOIN LATERAL (SELECT id, name FROM business WHERE user_id = u.id ORDER BY id LIMIT 1) b ON true
       LEFT JOIN subscription s3 ON s3.business_id = b.id
