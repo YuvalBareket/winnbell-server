@@ -14,7 +14,9 @@ const MAX_ENTRIES_PER_RECEIPT = 3;
 // Hard per-user cap on total entries in a single draw, across ALL entry types
 // (free weekly, receipt, promo, referral). Change here only (client mirrors it
 // in its own constant). This is a legal/fairness limit and must never be exceeded.
-export const MAX_ENTRIES_PER_DRAW = 30;
+// 80 since the September 2026 3-month free-trial campaign (was 30 for monthly
+// campaigns) - the Official Rules must state the same number.
+export const MAX_ENTRIES_PER_DRAW = 80;
 import {
   evaluateUserRisk,
   updateUserRiskScore,
@@ -53,9 +55,10 @@ export const getUserTicketsService = async (userId: number, drawId: number) => {
     ORDER BY t.activated_at DESC
   `, [userId, drawId]);
 
-  // Effective count: the query has no LIMIT (a user is capped at 30 entries per draw),
-  // so it always returns the full set — the count is just the rows we already fetched.
-  // No second COUNT round-trip needed.
+  // Effective count: the query has no LIMIT (a user is capped at MAX_ENTRIES_PER_DRAW
+  // entries per draw), so it always returns the full set — the count is just the rows we
+  // already fetched. No second COUNT round-trip needed. Revisit if the cap ever grows
+  // past a size where an unbounded fetch stops being reasonable.
   const totalCount: number = result.rows.length;
 
   return { tickets: result.rows, totalCount };

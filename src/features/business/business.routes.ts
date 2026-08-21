@@ -16,6 +16,7 @@ import {
   setupBusiness,
   updateBusiness,
   updateCampaignSettingsController,
+  joinCurrentCampaignController,
   updateLocation,
   updateLogo,
 } from './business.controller.js';
@@ -39,6 +40,8 @@ router.post('/setup', requireRole('Business'), setupBusiness);
 router.get('/my-business', getMyBusiness);
 router.patch('/', requireRole('Business'), updateBusiness);
 router.patch('/campaign-settings', requireRole('Business'), updateCampaignSettingsController);
+// Free-trial-era campaign join (no payment). Retire with the DrawPreparationView button.
+router.post('/campaign/join', requireRole('Business'), joinCurrentCampaignController);
 router.get('/upload-url', requireRole('Business'), getUploadUrl);
 router.patch('/logo', requireRole('Business'), updateLogo);
 router.post('/locations', requireRole('Business'), addLocation);

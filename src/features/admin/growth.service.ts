@@ -1,4 +1,5 @@
 import { getPool } from '../../shared/db/db.js';
+import { MAX_ENTRIES_PER_DRAW } from '../tickets/tickets.service.js';
 
 // =============================================================================
 // Growth / North-Star analytics (admin dashboard, requirements §1,3,4,5,6,7,9,11,12,13).
@@ -154,7 +155,9 @@ export const getGrowthAnalyticsService = async () => {
         COUNT(*) FILTER (WHERE biz = 1)                           AS single_business_users,
         COUNT(*) FILTER (WHERE biz > 1)                           AS multi_business_users,
         COUNT(*) FILTER (WHERE entries > 20)                      AS over_20_entries,
-        COUNT(*) FILTER (WHERE entries >= 30)                     AS at_30_entries,
+        -- Derived from the enforced cap so this metric tracks cap changes (30 -> 80 for
+        -- the September 2026 trial) instead of silently mislabeling power users as capped.
+        COUNT(*) FILTER (WHERE entries >= ${MAX_ENTRIES_PER_DRAW}) AS at_cap_entries,
         COUNT(*) FILTER (WHERE purchase_entries = 0)              AS amoe_only_users
       FROM active
     `),
@@ -436,7 +439,7 @@ export const getGrowthAnalyticsService = async () => {
       single_business_pct: pct(n(eng.single_business_users), n(eng.active_users)),
       multi_business_pct: pct(n(eng.multi_business_users), n(eng.active_users)),
       over_20_pct: pct(n(eng.over_20_entries), n(eng.active_users)),
-      at_30_pct: pct(n(eng.at_30_entries), n(eng.active_users)),
+      at_cap_pct: pct(n(eng.at_cap_entries), n(eng.active_users)),
       amoe_only_pct: pct(n(eng.amoe_only_users), n(eng.active_users)),
     },
     revenue: {

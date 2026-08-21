@@ -739,6 +739,73 @@ export const updateCampaignSettings = async (
   return { isPending: hasOpenDraw && updateMin };
 };
 
+// ── Free-trial campaign join (September 2026 3-month trial) ─────────────────────
+// The trial-era door: a business joins the current campaign directly from the preparation
+// checklist, no payment. Targets the OPEN draw, or (before it opens) the earliest Upcoming
+// one as a registration. The INSERT mirrors openDrawInTx's enrollment exactly: a business
+// WITH a subscription snapshots its fee/tier; one without gets fee 0 and a NULL cap, so the
+// submit path falls back to platform_settings.global_entry_cap (the trial cap knob). The
+// paused/skip subscription flags are respected so this door can never bypass an explicit
+// opt-out, and ON CONFLICT makes a double-click a no-op. Owner-only: managers resolve no
+// business row. When paid campaigns return, retire this endpoint together with the client
+// button in DrawPreparationView.
+export const joinCurrentCampaignService = async (
+  ownerUserId: number,
+): Promise<{ drawId: number; drawName: string; drawStatus: string }> => {
+  const pool = getPool();
+
+  const bizRes = await pool.query(
+    `SELECT b.id,
+            EXISTS (SELECT 1 FROM business_location bl
+                    WHERE bl.business_id = b.id AND bl.is_active = TRUE) AS has_active_location
+     FROM business b WHERE b.user_id = $1 ORDER BY b.id LIMIT 1`,
+    [ownerUserId],
+  );
+  if (!bizRes.rows[0]) throw new Error('BUSINESS_NOT_FOUND');
+  // A campaign membership without a live location would be invisible on the map and
+  // unable to validate receipts - make the location step come first.
+  if (!bizRes.rows[0].has_active_location) throw new Error('NO_ACTIVE_LOCATION');
+  const businessId: number = bizRes.rows[0].id;
+
+  const drawRes = await pool.query(
+    `SELECT id, name, status FROM draw
+     WHERE status IN ('Open', 'Upcoming')
+     ORDER BY (status = 'Open') DESC, draw_date ASC
+     LIMIT 1`,
+  );
+  if (!drawRes.rows[0]) throw new Error('NO_CAMPAIGN');
+  const draw = drawRes.rows[0] as { id: number; name: string; status: string };
+
+  const inserted = await pool.query(
+    `INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, cap_at_entry, min_transaction_at_entry)
+     SELECT $1, b.id, COALESCE(s.fee_at_entry, 0), s.entries_per_location, b.min_transaction_amount
+     FROM business b
+     LEFT JOIN subscription s ON s.business_id = b.id
+     WHERE b.id = $2
+       AND COALESCE(s.participation_paused, FALSE) = FALSE
+       AND COALESCE(s.skip_next_campaign, FALSE) = FALSE
+     ON CONFLICT (draw_id, business_id) DO NOTHING`,
+    [draw.id, businessId],
+  );
+
+  // Zero rows has TWO distinct causes that must not both read as success: the row already
+  // exists (double-click / already joined - genuinely fine), or the paused/skip flags
+  // filtered the SELECT away (the business asked to sit out - "joined" would be a lie;
+  // their entry silently not existing would surface as a support mystery later).
+  if (inserted.rowCount === 0) {
+    const existing = await pool.query(
+      `SELECT 1 FROM draw_entry WHERE draw_id = $1 AND business_id = $2`,
+      [draw.id, businessId],
+    );
+    if (existing.rows.length === 0) throw new Error('PARTICIPATION_PAUSED');
+  }
+
+  // Joining an OPEN campaign flips the business's locations to participating on the public
+  // map/search - drop the public caches so it shows up without waiting for expiry.
+  invalidatePublicBusinessData();
+  return { drawId: draw.id, drawName: draw.name, drawStatus: draw.status };
+};
+
 export const getBusinessLocationsByUserId = async (userId: number) => {
   const pool = getPool();
   const result = await pool.query(`

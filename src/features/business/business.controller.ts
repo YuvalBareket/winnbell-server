@@ -21,6 +21,7 @@ import {
   updateBusinessLogo,
   updateBusinessProfile,
   updateCampaignSettings,
+  joinCurrentCampaignService,
 } from './business.service.js';
 import { getPresignedUploadUrl } from '../../shared/s3.js';
 import { getPool } from '../../shared/db/db.js';
@@ -377,6 +378,34 @@ export const updateCampaignSettingsController = async (req: AuthRequest, res: Re
       return;
     }
     res.status(500).json({ message: 'Failed to update campaign settings' });
+  }
+};
+
+// Free-trial-era join (see joinCurrentCampaignService). Owner-only by construction.
+export const joinCurrentCampaignController = async (req: AuthRequest, res: Response): Promise<void> => {
+  try {
+    const result = await joinCurrentCampaignService(req.user!.id);
+    res.json({ joined: true, campaign: result });
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : '';
+    if (msg === 'BUSINESS_NOT_FOUND') {
+      res.status(404).json({ message: 'Business not found' });
+      return;
+    }
+    if (msg === 'NO_ACTIVE_LOCATION') {
+      res.status(400).json({ message: 'Add at least one active location before joining the campaign.' });
+      return;
+    }
+    if (msg === 'NO_CAMPAIGN') {
+      res.status(409).json({ message: 'There is no campaign to join right now. Please check back soon.' });
+      return;
+    }
+    if (msg === 'PARTICIPATION_PAUSED') {
+      res.status(409).json({ message: 'Your participation is currently paused. Resume it from your plan settings to join the campaign.' });
+      return;
+    }
+    console.error('[business.joinCurrentCampaign]', error);
+    res.status(500).json({ message: 'Could not join the campaign. Please try again.' });
   }
 };
 

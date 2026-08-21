@@ -15,7 +15,10 @@ import { OFFICIAL_RULES_TEMPLATE } from './officialRulesTemplate.js';
 
 const SUPPORT_EMAIL = 'support@winnbell.com';
 const COMPANY_ADDRESS = 'Wilmington, Delaware';
-const MAX_ENTRIES_PER_USER = '30';
+// MUST equal MAX_ENTRIES_PER_DRAW in features/tickets/tickets.service.ts (kept as a literal
+// here to avoid a shared->features import; the client rules page derives it directly).
+// 80 since the September 2026 3-month free-trial campaign (was 30 for monthly campaigns).
+const MAX_ENTRIES_PER_USER = '80';
 const TIME_ZONE = 'Eastern Time (ET)';
 const SITE_ORIGIN = 'https://www.winnbell.com';
 
