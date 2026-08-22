@@ -1,5 +1,5 @@
-// Receipt-scan autofill: derives the submit-form fields (identifier, pre-tip amount, date)
-// from the shared receipt read (receiptRead.ts) so the user does not have to type them.
+// Receipt-scan autofill: derives the submit-form fields (identifier, qualifying amount,
+// date) from the shared receipt read (receiptRead.ts) so the user does not have to type them.
 // The read is CACHED: the model call this endpoint pays is the same one submit-time
 // validation reuses, so a scanned photo costs one Gemini read total, not two.
 //
@@ -15,7 +15,8 @@ import { readReceiptImage } from './receiptRead.js';
 export interface ReceiptScanFields {
   /** The most likely receipt/check/order number, as printed. */
   identifier: string | null;
-  /** The pre-tip total in dollars (Rules count pre-tip amounts only). */
+  /** The qualifying amount in dollars: what the customer paid the business itself,
+   *  before tax and before tip (Rules count this amount only). */
   amount: number | null;
   /** The transaction date as YYYY-MM-DD, when printed and unambiguous. */
   date: string | null;
@@ -56,8 +57,8 @@ export async function extractReceiptFields(imageUrl: string): Promise<ReceiptSca
 
     const identifier = pickIdentifierCandidate(read.candidates);
     // Same sanity bounds as the submit endpoint, and cents-rounded like the stored amount.
-    const amount = read.preTipTotal !== null && read.preTipTotal > 0 && read.preTipTotal <= 1_000_000
-      ? Math.round(read.preTipTotal * 100) / 100 : null;
+    const amount = read.qualifyingAmount !== null && read.qualifyingAmount > 0 && read.qualifyingAmount <= 1_000_000
+      ? Math.round(read.qualifyingAmount * 100) / 100 : null;
     const date = read.receiptDate;
 
     if (!identifier && amount === null && date === null) return null;

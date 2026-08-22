@@ -31,7 +31,7 @@ const geminiResponse = (transcript: string) => ({
       is_receipt: true,
       identifier_candidates: [{ label: 'Check', value: '#12' }],
       transcript,
-      pre_tip_total: 1.61,
+      qualifying_amount: 1.61,
       receipt_date: '2026-08-17',
     }) }] } }],
   }),

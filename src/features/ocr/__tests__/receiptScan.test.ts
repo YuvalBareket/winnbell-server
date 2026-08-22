@@ -64,7 +64,7 @@ describe('extractReceiptFields', () => {
       is_receipt: true,
       identifier_candidates: [{ label: 'Check', value: '#12' }],
       transcript: 'CHECK #12\nTOTAL 1.61',
-      pre_tip_total: 1.611,
+      qualifying_amount: 1.611,
       receipt_date: '2026-08-17',
     }));
     expect(await extractReceiptFields(IMAGE_URL)).toEqual({ identifier: '#12', amount: 1.61, date: '2026-08-17' });
@@ -75,19 +75,19 @@ describe('extractReceiptFields', () => {
       is_receipt: true,
       identifier_candidates: [{ label: 'Order', value: '8842' }],
       transcript: 'ORDER 8842',
-      pre_tip_total: -5,
+      qualifying_amount: -5,
       receipt_date: '8/17/26',
     }));
     expect(await extractReceiptFields(IMAGE_URL)).toEqual({ identifier: '8842', amount: null, date: null });
   });
 
   it('returns null when the model says the photo is not a receipt', async () => {
-    mockFetch(geminiResponse({ is_receipt: false, identifier_candidates: [], pre_tip_total: null, receipt_date: null }));
+    mockFetch(geminiResponse({ is_receipt: false, identifier_candidates: [], qualifying_amount: null, receipt_date: null }));
     expect(await extractReceiptFields(IMAGE_URL)).toBeNull();
   });
 
   it('returns null when nothing usable was read', async () => {
-    mockFetch(geminiResponse({ is_receipt: true, identifier_candidates: [], transcript: 'COFFEE SHOP', pre_tip_total: null, receipt_date: null }));
+    mockFetch(geminiResponse({ is_receipt: true, identifier_candidates: [], transcript: 'COFFEE SHOP', qualifying_amount: null, receipt_date: null }));
     expect(await extractReceiptFields(IMAGE_URL)).toBeNull();
   });
 
