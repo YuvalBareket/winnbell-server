@@ -16,7 +16,7 @@ const entryLimiter = rateLimit({
   legacyHeaders: false,
   keyGenerator: (req: Request) => req.user?.id?.toString() ?? getClientIpKey(req),
   store: makeRateLimitStore('entry'),
-  message: { message: 'Too many attempts, please slow down.' },
+  message: { message: 'You\'re moving fast! Give it a minute and try again.' },
 });
 
 // Receipt-scan autofill: each scan is a paid Gemini call, so cap it at 10 per user per day
