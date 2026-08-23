@@ -134,7 +134,7 @@ const ticketsLimiter = rateLimit({
   legacyHeaders: false,
   keyGenerator: (req: express.Request) => req.user?.id?.toString() ?? getClientIpKey(req),
   store: makeRateLimitStore('tickets'),
-  message: { message: 'Too many requests, please slow down.' },
+  message: { message: 'You\'re moving fast! Give it a minute and try again.' },
 });
 
 const publicLimiter = rateLimit({
@@ -144,7 +144,7 @@ const publicLimiter = rateLimit({
   legacyHeaders: false,
   keyGenerator: getClientIpKey,
   store: makeRateLimitStore('public'),
-  message: { message: 'Too many requests, please slow down.' },
+  message: { message: 'You\'re moving fast! Give it a minute and try again.' },
 });
 
 // OTP limiter — 50 per IP per hour. Handles shared networks (universities, offices)
@@ -172,7 +172,7 @@ const businessLimiter = rateLimit({
   legacyHeaders: false,
   keyGenerator: (req: express.Request) => req.user?.id?.toString() ?? getClientIpKey(req),
   store: makeRateLimitStore('business'),
-  message: { message: 'Too many requests, please slow down.' },
+  message: { message: 'You\'re moving fast! Give it a minute and try again.' },
 });
 
 // Admin-area limiter. Every /admin request already needs a valid Admin JWT (global
@@ -186,7 +186,7 @@ const adminLimiter = rateLimit({
   legacyHeaders: false,
   keyGenerator: (req: express.Request) => req.user?.id?.toString() ?? getClientIpKey(req),
   store: makeRateLimitStore('admin'),
-  message: { message: 'Too many requests, please slow down.' },
+  message: { message: 'You\'re moving fast! Give it a minute and try again.' },
 });
 
 // Push-notification subscribe/unsubscribe. Called on page load / permission grant, so a
@@ -199,7 +199,7 @@ const notificationsLimiter = rateLimit({
   legacyHeaders: false,
   keyGenerator: (req: express.Request) => req.user?.id?.toString() ?? getClientIpKey(req),
   store: makeRateLimitStore('notifications'),
-  message: { message: 'Too many requests, please slow down.' },
+  message: { message: 'You\'re moving fast! Give it a minute and try again.' },
 });
 
 // Stripe webhook must receive raw body — register BEFORE express.json()
