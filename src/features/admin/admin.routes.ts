@@ -51,6 +51,7 @@ router.post('/draws/:drawId/close', adminController.closeDraw);
 router.post('/draws/:drawId/pick-winner', adminController.pickWinner);
 router.post('/draws/:drawId/extend-order', adminController.extendDrawWinnerOrder);
 router.post('/draws/:drawId/confirm-winner', adminController.confirmWinner);
+router.post('/draws/:drawId/purge-receipt-images', adminController.purgeDrawReceiptImages);
 router.post('/draws/:drawId/reopen', adminController.reopenDraw);
 router.get('/draws/:drawId/businesses', adminController.getDrawBusinesses);
 router.post('/draws/:drawId/businesses/:businessId', adminController.addBusinessToDraw);

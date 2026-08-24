@@ -362,6 +362,11 @@ CREATE TABLE ticket (
   -- index accept the proven-distinct document without weakening dedup anywhere else.
   receipt_doc_seq         SMALLINT NOT NULL DEFAULT 0,
   receipt_image_url       VARCHAR(500) NULL,
+  -- Set by the admin post-winner purge when this ticket's receipt image was deleted from
+  -- storage (receipt_image_url goes NULL at the same moment). Distinguishes "photo removed
+  -- after the draw settled" from "never had a photo" - image_validation_status keeps the
+  -- verification verdict either way.
+  receipt_image_purged_at TIMESTAMP NULL,
   -- Risk score snapshot at submission time (user score, not a running total)
   risk_score              INTEGER NOT NULL DEFAULT 0 CHECK (risk_score >= 0),
   -- Risk points added to the user's score as a result of this specific entry

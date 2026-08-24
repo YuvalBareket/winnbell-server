@@ -1,4 +1,4 @@
-import { S3Client, PutObjectCommand, HeadObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
+import { S3Client, PutObjectCommand, HeadObjectCommand, GetObjectCommand, DeleteObjectsCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { NodeHttpHandler } from '@smithy/node-http-handler';
 
@@ -65,6 +65,42 @@ export const getObject = async (key: string): Promise<Buffer | null> => {
     if (name === 'NoSuchKey' || name === 'NotFound' || status === 404) return null;
     throw err;
   }
+};
+
+// Batch delete (receipt-image purge). S3 DeleteObjects caps at 1000 keys per call, so the
+// list is chunked. Returns the keys that are now GONE (deleted or already absent - S3 treats
+// deleting a missing key as success, which makes the purge safely re-runnable) and per-key
+// failures. Never throws on partial failure: the caller only clears DB references for keys
+// in `deleted`, so a failed key stays referenced and a re-run picks it up.
+export const deleteObjects = async (
+  keys: string[],
+): Promise<{ deleted: string[]; failed: Array<{ key: string; message: string }> }> => {
+  const { R2_BUCKET } = process.env;
+  if (!R2_BUCKET) throw new Error('R2_NOT_CONFIGURED');
+  const deleted: string[] = [];
+  const failed: Array<{ key: string; message: string }> = [];
+  for (let i = 0; i < keys.length; i += 1000) {
+    const chunk = keys.slice(i, i + 1000);
+    const res = await getClient().send(new DeleteObjectsCommand({
+      Bucket: R2_BUCKET,
+      Delete: { Objects: chunk.map((k) => ({ Key: k })), Quiet: false },
+    }));
+    // Trust ONLY the authoritative res.Deleted list (Quiet: false returns one entry per
+    // deleted key). Inferring success as "not in Errors" would silently promote a key from
+    // a malformed error entry (no Key field) to "deleted" - and the caller would then clear
+    // the DB reference to an object that still exists, unrecoverable by re-run.
+    const deletedSet = new Set<string>();
+    for (const d of res.Deleted ?? []) {
+      if (d.Key) { deletedSet.add(d.Key); deleted.push(d.Key); }
+    }
+    for (const k of chunk) {
+      if (!deletedSet.has(k)) {
+        const err = (res.Errors ?? []).find((e) => e.Key === k);
+        failed.push({ key: k, message: err?.Message ?? err?.Code ?? 'not confirmed deleted' });
+      }
+    }
+  }
+  return { deleted, failed };
 };
 
 export const objectExists = async (key: string): Promise<boolean> => {

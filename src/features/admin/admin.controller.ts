@@ -20,6 +20,7 @@ import {
   pickDrawWinnerService,
   extendDrawWinnerOrderService,
   confirmWinnerService,
+  purgeDrawReceiptImagesService,
   getAdminOverviewService,
   getAllUsersService,
   updateUserRoleService,
@@ -485,6 +486,28 @@ export const confirmWinner = async (req: Request, res: Response): Promise<void> 
       ? 'This candidate is no longer eligible (deactivated, under review, or high risk). Reject them and pick a new winner.'
       : raw;
     res.status(raw === 'WINNER_NO_LONGER_ELIGIBLE' ? 409 : 400).json({ message });
+  }
+};
+
+export const purgeDrawReceiptImages = async (req: Request, res: Response): Promise<void> => {
+  const drawId = parseInt(req.params.drawId as string, 10);
+  if (isNaN(drawId)) {
+    res.status(400).json({ message: 'Invalid drawId' });
+    return;
+  }
+  try {
+    const result = await purgeDrawReceiptImagesService(drawId, req.user!.id);
+    res.status(200).json(result);
+  } catch (error: unknown) {
+    console.error('[admin.purgeDrawReceiptImages]', error);
+    const raw = error instanceof Error ? error.message : '';
+    if (raw === 'DRAW_NOT_FOUND') {
+      res.status(404).json({ message: 'Draw not found.' });
+    } else if (raw === 'WINNER_NOT_CONFIRMED') {
+      res.status(409).json({ message: 'Receipt images can only be cleaned after the winner is confirmed.' });
+    } else {
+      res.status(500).json({ message: 'Failed to clean receipt images. Please try again.' });
+    }
   }
 };
 

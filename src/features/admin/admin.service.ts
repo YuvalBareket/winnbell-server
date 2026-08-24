@@ -5,6 +5,7 @@ import { getPlatformSettings, invalidatePlatformSettings, invalidatePublicBusine
 import { lastDayOfMonthNyMidnightUtc, nextCampaignOpensNy, drawDateFromString, drawStartDateFromString, nyMidnightFromString } from '../../shared/dates.js';
 import { sendFoundingFinalCampaignEmail } from '../../shared/email/email.service.js';
 import { snapshotOfficialRulesForDraw } from '../../shared/legal/officialRulesSnapshot.js';
+import { deleteObjects } from '../../shared/s3.js';
 import { decayAllUserRiskScores } from '../risk/risk.service.js';
 
 // Entry sources that need no receipt verification. Winner validation is expected to end at
@@ -1489,6 +1490,122 @@ export const confirmWinnerService = async (drawId: number, actorUserId: number |
   }
 };
 
+// ─── Post-winner receipt-image purge ──────────────────────────────────────────
+// Once a draw's winner is CONFIRMED the receipt photos have done their job (verification
+// evidence for the manual winner check) and become a storage + privacy liability. This
+// deletes every receipt image of the draw from R2 EXCEPT the legal keep-set: the confirmed
+// winner's receipt group and every rejected winner candidate's group (draw_rejected_winner
+// is the disqualification evidence). Images live on the ANCHOR ticket of a multi-entry
+// group, so keep/purge decisions key on COALESCE(anchor_ticket_id, id).
+//
+// Failure posture: R2 is deleted FIRST, then only the successfully-deleted keys get their
+// DB references cleared (receipt_image_url NULL + receipt_image_purged_at NOW()). A partial
+// R2 failure leaves the failed keys referenced, so re-running the purge picks them up -
+// the operation is idempotent and safely re-runnable. Deleting an already-missing key
+// counts as success in S3/R2, so double-clicks cannot error.
+export const purgeDrawReceiptImagesService = async (
+  drawId: number,
+  actorUserId: number | null,
+): Promise<{ deleted: number; kept: number; skipped: number; failed: number }> => {
+  const pool = getPool();
+
+  const drawRes = await pool.query(
+    `SELECT id, winner_confirmed FROM draw WHERE id = $1`,
+    [drawId],
+  );
+  if (drawRes.rows.length === 0) throw new Error('DRAW_NOT_FOUND');
+  if (drawRes.rows[0].winner_confirmed !== true) throw new Error('WINNER_NOT_CONFIRMED');
+
+  // Purge candidates: every image-bearing ticket of the draw whose receipt group is NOT
+  // the winner's and NOT a rejected candidate's. kept = image tickets in those groups.
+  const rowsRes = await pool.query(
+    `WITH keep_src AS (
+       SELECT winner_ticket_id AS tid FROM draw WHERE id = $1 AND winner_ticket_id IS NOT NULL
+       UNION
+       SELECT ticket_id FROM draw_rejected_winner WHERE draw_id = $1
+     ),
+     keep_anchors AS (
+       SELECT DISTINCT COALESCE(t.anchor_ticket_id, t.id) AS aid
+       FROM ticket t JOIN keep_src k ON t.id = k.tid
+     )
+     SELECT t.id, t.receipt_image_url,
+            (COALESCE(t.anchor_ticket_id, t.id) IN (SELECT aid FROM keep_anchors)) AS keep
+     FROM ticket t
+     WHERE t.draw_id = $1 AND t.receipt_image_url IS NOT NULL`,
+    [drawId],
+  );
+
+  const kept = rowsRes.rows.filter((r) => r.keep === true).length;
+  const candidates: Array<{ id: number; url: string }> = rowsRes.rows
+    .filter((r) => r.keep !== true)
+    .map((r) => ({ id: r.id, url: r.receipt_image_url as string }));
+
+  if (candidates.length === 0) {
+    return { deleted: 0, kept, skipped: 0, failed: 0 };
+  }
+
+  // Safety net: a URL also referenced by a ticket OUTSIDE the purge set (another draw, or a
+  // kept group) must survive - skip those tickets entirely. Should not happen with per-upload
+  // UUID keys, but an object must never be deleted from under a live reference.
+  const candidateIds = candidates.map((c) => c.id);
+  const candidateUrls = [...new Set(candidates.map((c) => c.url))];
+  const sharedRes = await pool.query(
+    `SELECT DISTINCT receipt_image_url FROM ticket
+     WHERE receipt_image_url = ANY($1::text[]) AND NOT (id = ANY($2::bigint[]))`,
+    [candidateUrls, candidateIds],
+  );
+  const sharedUrls = new Set<string>(sharedRes.rows.map((r) => r.receipt_image_url));
+
+  // Only purge objects that live under OUR public bucket URL - anything else (legacy or
+  // malformed value) is skipped and left untouched.
+  const r2Base = process.env.R2_PUBLIC_URL;
+  if (!r2Base) throw new Error('R2_NOT_CONFIGURED');
+  const prefix = `${r2Base.replace(/\/$/, '')}/`;
+
+  const purgeable: Array<{ id: number; url: string; key: string }> = [];
+  let skipped = 0;
+  for (const c of candidates) {
+    if (sharedUrls.has(c.url) || !c.url.startsWith(prefix)) { skipped++; continue; }
+    purgeable.push({ id: c.id, url: c.url, key: c.url.slice(prefix.length) });
+  }
+  if (purgeable.length === 0) {
+    return { deleted: 0, kept, skipped, failed: 0 };
+  }
+
+  const uniqueKeys = [...new Set(purgeable.map((p) => p.key))];
+  const { deleted: deletedKeys, failed } = await deleteObjects(uniqueKeys);
+  const deletedKeySet = new Set(deletedKeys);
+  const clearedIds = purgeable.filter((p) => deletedKeySet.has(p.key)).map((p) => p.id);
+
+  // One transaction: the reference clear and its audit record land together - a crash
+  // between them must not leave a purge with no trail.
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    if (clearedIds.length > 0) {
+      await client.query(
+        `UPDATE ticket SET receipt_image_url = NULL, receipt_image_purged_at = NOW()
+         WHERE id = ANY($1::bigint[])`,
+        [clearedIds],
+      );
+    }
+    await logDrawAudit(client, drawId, 'receipt_images_purged', actorUserId, {
+      deleted: clearedIds.length, kept, skipped, failed: failed.length,
+    });
+    await client.query('COMMIT');
+  } catch (err) {
+    await safeRollback(client);
+    throw err;
+  } finally {
+    client.release();
+  }
+  if (failed.length > 0) {
+    console.error(`[purgeDrawReceiptImages] draw ${drawId}: ${failed.length} R2 deletions failed (re-run to retry):`, failed.slice(0, 5));
+  }
+
+  return { deleted: clearedIds.length, kept, skipped, failed: failed.length };
+};
+
 export const getAdminOverviewService = async () => {
   const pool = getPool();
 
@@ -2500,7 +2617,8 @@ export const adminImageDecisionService = async (
     );
 
     const ticketRes = await client.query(
-      `SELECT id, activated_by_user_id, draw_id, image_validation_status, is_quarantined, quarantine_reason
+      `SELECT id, activated_by_user_id, draw_id, image_validation_status, is_quarantined, quarantine_reason,
+              receipt_image_purged_at
        FROM ticket WHERE id = $1 FOR UPDATE`,
       [ticketId],
     );
@@ -2511,6 +2629,11 @@ export const adminImageDecisionService = async (
       is_quarantined: isQuarantined, quarantine_reason: quarantineReason,
     } = ticketRes.rows[0];
     if (!userId) throw new Error('Ticket has no associated user');
+    // Post-winner purge deleted this ticket's photo: there is nothing left to review, and an
+    // approve/reject here would write a verification verdict with no evidence behind it.
+    if (ticketRes.rows[0].receipt_image_purged_at != null) {
+      throw new Error('This receipt image was deleted after the campaign settled and can no longer be reviewed.');
+    }
 
     const overrideable = ['passed', 'failed', 'ocr_error', 'pending'];
     if (!overrideable.includes(prevStatus)) throw new Error(`Cannot override image decision for status: ${prevStatus}`);
