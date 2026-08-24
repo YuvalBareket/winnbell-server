@@ -37,6 +37,33 @@ describe('formatJurisdictions', () => {
   it('three states with Oxford comma', () => {
     expect(formatJurisdictions(['TX', 'FL', 'GA'])).toBe('States of Florida, Georgia, and Texas, United States only');
   });
+
+  it('near-complete allowlist renders exclusion wording (state ban, e.g. Rhode Island)', () => {
+    const ALL_50 = [
+      'AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'CT', 'DE', 'FL', 'GA',
+      'HI', 'ID', 'IL', 'IN', 'IA', 'KS', 'KY', 'LA', 'ME', 'MD',
+      'MA', 'MI', 'MN', 'MS', 'MO', 'MT', 'NE', 'NV', 'NH', 'NJ',
+      'NM', 'NY', 'NC', 'ND', 'OH', 'OK', 'OR', 'PA', 'RI', 'SC',
+      'SD', 'TN', 'TX', 'UT', 'VT', 'VA', 'WA', 'WV', 'WI', 'WY',
+    ];
+    const allButRI = ALL_50.filter((c) => c !== 'RI');
+    expect(formatJurisdictions(allButRI)).toBe(
+      'United States, excluding the State of Rhode Island (and excluding where prohibited by applicable law)',
+    );
+    // Two banned states pluralize and list alphabetically.
+    const allButRIandNY = ALL_50.filter((c) => c !== 'RI' && c !== 'NY');
+    expect(formatJurisdictions(allButRIandNY)).toBe(
+      'United States, excluding the States of New York and Rhode Island (and excluding where prohibited by applicable law)',
+    );
+    // DC in the display map must NOT count as excluded (it is not a pickable state).
+    expect(formatJurisdictions(ALL_50)).not.toContain('District of Columbia');
+    // Threshold boundary: 5 excluded still uses exclusion wording; 6 falls back to
+    // enumerating the (44) eligible states.
+    const fiveBanned = ALL_50.slice(5);
+    expect(formatJurisdictions(fiveBanned)).toMatch(/^United States, excluding the States of /);
+    const sixBanned = ALL_50.slice(6);
+    expect(formatJurisdictions(sixBanned)).toMatch(/^States of .*, United States only$/);
+  });
 });
 
 describe('buildOfficialRulesText', () => {

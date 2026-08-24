@@ -37,17 +37,30 @@ const STATE_CODE_TO_NAME: Record<string, string> = {
   DC: 'District of Columbia',
 };
 
+// The pickable state universe = the client's US_STATES (50 states, no DC). The exclusion
+// wording below diffs against THIS set, not STATE_CODE_TO_NAME (whose DC entry is display
+// data only and would otherwise always read as "excluded").
+const PICKABLE_STATE_CODES = Object.keys(STATE_CODE_TO_NAME).filter((c) => c !== 'DC');
+
+// Join names into legal-list prose: "X", "X and Y", "X, Y, and Z".
+const nameList = (names: string[]): string => names.length === 1
+  ? names[0]
+  : names.length === 2
+  ? `${names[0]} and ${names[1]}`
+  : `${names.slice(0, -1).join(', ')}, and ${names[names.length - 1]}`;
+
 // Mirrors the client's formatJurisdictions: empty list = the gate is unrestricted
 // (all USA). Server reads the setting directly, so there is no error-fallback branch.
 export const formatJurisdictions = (codes: string[]): string => {
   if (codes.length === 0) return 'United States (excluding where prohibited by applicable law)';
+  // Near-complete allowlist (a state ban, e.g. Rhode Island): standard sweepstakes
+  // exclusion wording instead of enumerating the 45+ eligible states.
+  const excluded = PICKABLE_STATE_CODES.filter((c) => !codes.includes(c)).map((c) => STATE_CODE_TO_NAME[c] ?? c).sort();
+  if (excluded.length > 0 && excluded.length <= 5) {
+    return `United States, excluding the ${excluded.length === 1 ? 'State' : 'States'} of ${nameList(excluded)} (and excluding where prohibited by applicable law)`;
+  }
   const names = codes.map((code) => STATE_CODE_TO_NAME[code] ?? code).sort();
-  const list = names.length === 1
-    ? names[0]
-    : names.length === 2
-    ? `${names[0]} and ${names[1]}`
-    : `${names.slice(0, -1).join(', ')}, and ${names[names.length - 1]}`;
-  return `${names.length === 1 ? 'State' : 'States'} of ${list}, United States only`;
+  return `${names.length === 1 ? 'State' : 'States'} of ${nameList(names)}, United States only`;
 };
 
 export interface SnapshotDraw {
