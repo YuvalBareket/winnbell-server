@@ -114,7 +114,7 @@ CREATE TABLE business (
   -- public display name (name); shown to admins, never on customer-facing surfaces.
   legal_name                      TEXT NULL,
   name                            TEXT NOT NULL,
-  sector                          TEXT NOT NULL CHECK (sector IN ('Food','Coffee','Bakery','IceCream','Juice','Grocery','Liquor','Pub','Vape','Retail','Fashion','Electronics','Books','Flowers','Pets','Beauty','Health','Gym','Auto','Entertainment','Education','Service','Other','Free')),
+  sector                          TEXT NOT NULL CHECK (sector IN ('Food','Coffee','Bakery','IceCream','Juice','Kava','Grocery','Liquor','Pub','Vape','Retail','Fashion','Electronics','Books','Flowers','Pets','Beauty','Health','Gym','Auto','Entertainment','Education','Service','Other','Free')),
   description                     TEXT,
   terms_text                      TEXT,
   logo_url                        TEXT,
