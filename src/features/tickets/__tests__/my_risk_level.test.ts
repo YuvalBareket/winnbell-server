@@ -6,8 +6,9 @@
  *     - true passes through when the EXISTS finds an unrewarded referral/flyer acquisition
  *     - false for direct signups / already-rewarded users
  *     - the SQL predicate mirrors grantPendingReferralBonus eligibility EXACTLY
- *       (referral_rewarded_at IS NULL + referred_by OR flyer-with-location) - a drift
- *       here silently kills the welcome prompt for every invited signup
+ *       (referral_rewarded_at IS NULL + referred_by) - a drift here silently kills the
+ *       welcome prompt for every referred signup. Location flyer/QR signups no longer
+ *       earn a welcome entry, so the flyer branch must NOT be in the predicate.
  *   response mapping — requiresImage (score > 9), isThrottled (score >= 20 + daily >= 1)
  *
  * Mock pattern: pool.query(sql, params) → { rows, rowCount }
@@ -65,11 +66,12 @@ describe('getMyRiskLevel welcomeBonusPending', () => {
     await run(makeRow());
     const [sql, params] = mockQuery.mock.calls[0];
     expect(params).toEqual([42]);
-    // The three grant-eligibility conditions - if any of these disappears from the query,
-    // the client prompt and the server grant no longer agree.
+    // The grant-eligibility conditions - if either disappears from the query, the client
+    // prompt and the server grant no longer agree.
     expect(sql).toContain('referral_rewarded_at IS NULL');
     expect(sql).toContain('referred_by_user_id IS NOT NULL');
-    expect(sql).toMatch(/source\s*=\s*'location_flyer'\s*AND\s*ua\.location_id IS NOT NULL/);
+    // Location flyer/QR signups no longer earn a welcome entry, so the flyer branch is gone.
+    expect(sql).not.toMatch(/source\s*=\s*'location_flyer'/);
   });
 });
 
