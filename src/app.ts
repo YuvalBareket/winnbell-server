@@ -257,6 +257,7 @@ app.use('/business', publicBusinessRouter);
 const publicDrawsRouter = Router();
 publicDrawsRouter.use(publicLimiter);
 publicDrawsRouter.get('/active', drawsController.getActiveDraws);
+publicDrawsRouter.get('/current', drawsController.getCurrentDraw);
 publicDrawsRouter.get('/history', drawsController.getDrawHistory);
 publicDrawsRouter.get('/:drawId', drawsController.getDrawById);
 app.use('/draws', publicDrawsRouter);

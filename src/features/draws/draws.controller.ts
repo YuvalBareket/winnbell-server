@@ -1,5 +1,16 @@
 import { Request, Response } from 'express';
-import { getActiveDrawService, getDrawByIdService, getDrawHistoryService, getDrawResultService } from './draws.service.js';
+import { getActiveDrawService, getCurrentDrawService, getDrawByIdService, getDrawHistoryService, getDrawResultService } from './draws.service.js';
+
+// Open draw, or the next Upcoming one when nothing is open. 200 with null body
+// when neither exists - the welcome pages treat that as "no campaign to show".
+export const getCurrentDraw = async (_req: Request, res: Response) => {
+  try {
+    const result = await getCurrentDrawService();
+    res.status(200).json(result);
+  } catch (error: unknown) {
+    res.status(500).json({ message: 'Failed to fetch current campaign' });
+  }
+};
 
 export const getActiveDraws = async (req: Request, res: Response) => {
   try {

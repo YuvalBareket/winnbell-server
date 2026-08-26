@@ -17,6 +17,30 @@ export const getActiveDrawService = async () => {
   return result.rows;
 };
 
+// The campaign a visitor-facing page should talk about: the open draw, or - when
+// nothing is Open (e.g. flyers in the field before launch) - the next Upcoming one.
+// The prize teaser rule applies: an Upcoming prize stays NULL until the admin reveals it.
+export const getCurrentDrawService = async () => {
+  const CACHE_KEY = 'draws:current';
+  const cached = publicCache.get<Record<string, unknown> | null>(CACHE_KEY);
+  if (cached !== undefined) return cached;
+
+  const pool = getPool();
+  const result = await pool.query(`
+    SELECT id, name,
+      CASE WHEN status = 'Upcoming' AND prize_revealed = FALSE THEN NULL
+           ELSE prize_pool END AS prize_amount,
+      start_date, draw_date, status
+    FROM draw
+    WHERE status IN ('Open', 'Upcoming')
+    ORDER BY CASE status WHEN 'Open' THEN 0 ELSE 1 END, start_date ASC
+    LIMIT 1
+  `);
+  const value = result.rows[0] ?? null;
+  publicCache.set(CACHE_KEY, value, 60);
+  return value;
+};
+
 export const getDrawHistoryService = async () => {
   const CACHE_KEY = 'draws:history';
   const cached = publicCache.get<Record<string, unknown>[]>(CACHE_KEY);
