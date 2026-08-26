@@ -19,6 +19,7 @@ export const CLIENT_EVENT_TYPES = [
   'submit_receipt_id_entered',
   'receipt_scan_used',
   'submit_image_attached',
+  'submit_image_upload_failed',
   'submit_attempted',
   'submission_confirmed_shown',
 ] as const;
@@ -73,6 +74,8 @@ export type DeviceClass = (typeof DEVICE_CLASSES)[number];
 /** meta keys allowed on client events, per type. Anything else is dropped (PII guard). */
 export const CLIENT_META_WHITELIST: Partial<Record<ClientEventType, readonly string[]>> = {
   submit_business_selected: ['preselected'],
+  // stage: 'convert' (client-side image/PDF processing) | 'upload' (presign + R2 PUT).
+  submit_image_upload_failed: ['stage'],
 };
 
 export const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
