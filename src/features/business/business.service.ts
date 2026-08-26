@@ -742,9 +742,11 @@ export const updateCampaignSettings = async (
 // ── Free-trial campaign join (September 2026 3-month trial) ─────────────────────
 // The trial-era door: a business joins the current campaign directly from the preparation
 // checklist, no payment. Targets the OPEN draw, or (before it opens) the earliest Upcoming
-// one as a registration. The INSERT mirrors openDrawInTx's enrollment exactly: a business
-// WITH a subscription snapshots its fee/tier; one without gets fee 0 and a NULL cap, so the
-// submit path falls back to platform_settings.global_entry_cap (the trial cap knob). The
+// one as a registration. The INSERT mirrors the admin manual-add: a business WITH a
+// subscription snapshots its fee/tier; one without gets fee 0 and snapshots the CURRENT
+// global entry cap so capacity displays show a number (same display-only semantics as the
+// admin add - enforcement always reads the LIVE plan/global values at submission time,
+// via the platform_settings.global_entry_cap fallback, the trial cap knob). The
 // paused/skip subscription flags are respected so this door can never bypass an explicit
 // opt-out, and ON CONFLICT makes a double-click a no-op. Owner-only: managers resolve no
 // business row. When paid campaigns return, retire this endpoint together with the client
@@ -778,7 +780,9 @@ export const joinCurrentCampaignService = async (
 
   const inserted = await pool.query(
     `INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, cap_at_entry, min_transaction_at_entry)
-     SELECT $1, b.id, COALESCE(s.fee_at_entry, 0), s.entries_per_location, b.min_transaction_amount
+     SELECT $1, b.id, COALESCE(s.fee_at_entry, 0),
+            COALESCE(s.entries_per_location, (SELECT global_entry_cap FROM platform_settings WHERE id = 1)),
+            b.min_transaction_amount
      FROM business b
      LEFT JOIN subscription s ON s.business_id = b.id
      WHERE b.id = $2
