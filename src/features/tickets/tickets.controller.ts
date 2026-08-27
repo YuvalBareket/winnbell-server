@@ -198,8 +198,15 @@ export const submitReceiptEntry = async (req: AuthRequest, res: Response) => {
 export const getReceiptUploadUrl = async (req: AuthRequest, res: Response) => {
   try {
     const size = Number(req.query.size);
+    // The client sends the actual bytes' content-type so an already-compressed image
+    // (e.g. a WhatsApp-forwarded JPEG) can be uploaded untouched instead of re-encoded.
+    // Clamp to the R2-allowed set and default to webp for anything unexpected - the type is
+    // signed into the presigned URL, so it must match what the client will PUT.
+    const ALLOWED_UPLOAD_TYPES = ['image/jpeg', 'image/png', 'image/webp'];
+    const requested = typeof req.query.contentType === 'string' ? req.query.contentType : '';
+    const contentType = ALLOWED_UPLOAD_TYPES.includes(requested) ? requested : 'image/webp';
     const { getPresignedUploadUrl } = await import('../../shared/s3.js');
-    const { uploadUrl, key } = await getPresignedUploadUrl('image/webp', 'receipt-images', size);
+    const { uploadUrl, key } = await getPresignedUploadUrl(contentType, 'receipt-images', size);
     const publicUrl = `${process.env.R2_PUBLIC_URL}/receipt-images/${key}`;
     res.json({ uploadUrl, publicUrl });
   } catch (err: unknown) {
