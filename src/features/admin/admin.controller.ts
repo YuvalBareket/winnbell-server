@@ -39,6 +39,7 @@ import {
   addBusinessToDrawService,
   removeBusinessFromDrawService,
   pauseBusinessInDrawService,
+  updateBusinessThresholdService,
   getBusinessDetailService,
   getBusinessEntriesService,
   getAdminEntriesService,
@@ -839,6 +840,53 @@ export const patchBusinessParticipation = async (req: Request, res: Response): P
     // Unknown failure: never echo raw error text (could be a pg internal message).
     console.error('[admin.patchBusinessParticipation]', err);
     res.status(500).json({ message: 'Failed to update participation' });
+  }
+};
+
+// Admin threshold override: minTransactionAmount edits the LIVE business threshold
+// (applies to new entries immediately), drawEntryMinTransaction edits the open
+// campaign's snapshot. Either or both may be sent.
+export const updateBusinessThreshold = async (req: Request, res: Response): Promise<void> => {
+  const businessId = parseInt(req.params.businessId as string, 10);
+  if (!businessId || businessId <= 0) {
+    res.status(400).json({ message: 'Invalid businessId' });
+    return;
+  }
+  const { minTransactionAmount, drawEntryMinTransaction } = req.body as {
+    minTransactionAmount?: unknown;
+    drawEntryMinTransaction?: unknown;
+  };
+  // Round to cents like receipt submission does, so stored values never carry float noise.
+  // Bounds mirror the schema CHECK (> 0) plus a sanity ceiling well inside NUMERIC(10,2).
+  const parseAmount = (v: unknown): number | null | undefined => {
+    if (v === undefined) return undefined;
+    if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0 || v > 100000) return null;
+    return Math.round(v * 100) / 100;
+  };
+  const minTx = parseAmount(minTransactionAmount);
+  const drawMinTx = parseAmount(drawEntryMinTransaction);
+  if (minTx === null || drawMinTx === null) {
+    res.status(400).json({ message: 'Threshold must be a number between $0.01 and $100,000.' });
+    return;
+  }
+  if (minTx === undefined && drawMinTx === undefined) {
+    res.status(400).json({ message: 'Provide minTransactionAmount and/or drawEntryMinTransaction.' });
+    return;
+  }
+  try {
+    const result = await updateBusinessThresholdService(businessId, {
+      minTransactionAmount: minTx,
+      drawEntryMinTransaction: drawMinTx,
+    });
+    res.json(result);
+  } catch (err: unknown) {
+    const statusCode = (err as { statusCode?: number }).statusCode;
+    if (statusCode === 404 || statusCode === 400) {
+      res.status(statusCode).json({ message: err instanceof Error ? err.message : 'Failed to update threshold' });
+      return;
+    }
+    console.error('[admin.updateBusinessThreshold]', err);
+    res.status(500).json({ message: 'Failed to update threshold' });
   }
 };
 

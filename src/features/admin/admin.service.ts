@@ -2370,6 +2370,70 @@ export const pauseBusinessInDrawService = async (
   return { paused: state.rows[0]?.paused === true };
 };
 
+// Admin override for a business's receipt thresholds. Two independent knobs:
+//   minTransactionAmount    -> business.min_transaction_amount (LIVE - entry enforcement
+//                              reads this at submission time, so it applies immediately;
+//                              unlike owner edits, there is no pending/next-campaign dance)
+//   drawEntryMinTransaction -> draw_entry.min_transaction_at_entry on the OPEN draw's row
+//                              (the campaign snapshot per-campaign analytics display)
+// The owner's queued pending_min_transaction_amount is deliberately left untouched (it
+// still applies at close); it is returned so the admin UI can surface it.
+export const updateBusinessThresholdService = async (
+  businessId: number,
+  input: { minTransactionAmount?: number; drawEntryMinTransaction?: number },
+): Promise<{ min_transaction_amount: number; pending_min_transaction_amount: number | null; open_draw_min_transaction: number | null }> => {
+  const pool = getPool();
+
+  if (input.minTransactionAmount !== undefined) {
+    const res = await pool.query(
+      `UPDATE business SET min_transaction_amount = $1 WHERE id = $2`,
+      [input.minTransactionAmount, businessId],
+    );
+    if (res.rowCount === 0) {
+      throw Object.assign(new Error('Business not found'), { statusCode: 404 });
+    }
+    // The threshold shows on public map popups / participating-location payloads.
+    invalidatePublicBusinessData();
+  }
+
+  if (input.drawEntryMinTransaction !== undefined) {
+    const res = await pool.query(
+      `UPDATE draw_entry de
+       SET min_transaction_at_entry = $1
+       FROM draw d
+       WHERE d.id = de.draw_id AND d.status = 'Open' AND de.business_id = $2`,
+      [input.drawEntryMinTransaction, businessId],
+    );
+    if (res.rowCount === 0) {
+      throw Object.assign(
+        new Error('Business is not in an open campaign, so there is no campaign threshold to update.'),
+        { statusCode: 400 },
+      );
+    }
+  }
+
+  const state = await pool.query(
+    `SELECT
+       b.min_transaction_amount,
+       b.pending_min_transaction_amount,
+       (SELECT de.min_transaction_at_entry FROM draw_entry de
+        JOIN draw d ON d.id = de.draw_id
+        WHERE de.business_id = b.id AND d.status = 'Open'
+        LIMIT 1) AS open_draw_min_transaction
+     FROM business b WHERE b.id = $1`,
+    [businessId],
+  );
+  if (!state.rows[0]) {
+    throw Object.assign(new Error('Business not found'), { statusCode: 404 });
+  }
+  const row = state.rows[0];
+  return {
+    min_transaction_amount: parseFloat(row.min_transaction_amount),
+    pending_min_transaction_amount: row.pending_min_transaction_amount != null ? parseFloat(row.pending_min_transaction_amount) : null,
+    open_draw_min_transaction: row.open_draw_min_transaction != null ? parseFloat(row.open_draw_min_transaction) : null,
+  };
+};
+
 export const getBusinessDetailService = async (businessId: number) => {
   const pool = getPool();
 
@@ -2382,6 +2446,11 @@ export const getBusinessDetailService = async (businessId: number) => {
         b.sector,
         b.description,
         b.min_transaction_amount,
+        b.pending_min_transaction_amount,
+        (SELECT de.min_transaction_at_entry FROM draw_entry de
+         JOIN draw d ON d.id = de.draw_id
+         WHERE de.business_id = b.id AND d.status = 'Open'
+         LIMIT 1) AS open_draw_min_transaction,
         b.website_url,
         b.logo_url,
         b.receipt_example_image_url,
