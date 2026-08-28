@@ -483,3 +483,57 @@ describe('SQL safety — segment predicates are literals, not user interpolation
     expect(params.some(p => typeof p === 'string' && p.includes('DROP TABLE'))).toBe(true);
   });
 });
+
+// ─────────────────────────────────────────────
+// Joined via (acquisition) filter
+// ─────────────────────────────────────────────
+describe('getAllUsersService — acquisition (Joined via) filter', () => {
+  const setupTwoQueries = () => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [] })
+      .mockResolvedValueOnce({ rows: [{ count: '0' }] });
+  };
+
+  test('valid source adds a parameterized user_acquisition EXISTS clause', async () => {
+    setupTwoQueries();
+    await getAllUsersService({ page: 1, limit: 25, acquisitionSource: 'location_flyer' });
+    const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]];
+    expect(sql).toContain('user_acquisition');
+    expect(sql).toContain('ua.source =');
+    expect(params).toContain('location_flyer');
+  });
+
+  test('invalid source is silently ignored (whitelist), never reaches SQL', async () => {
+    setupTwoQueries();
+    await getAllUsersService({ page: 1, limit: 25, acquisitionSource: "'; DROP TABLE \"user\";--" });
+    const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]];
+    expect(sql).not.toContain('user_acquisition');
+    expect(sql).not.toContain('DROP TABLE');
+    expect(params.some(p => typeof p === 'string' && p.includes('DROP'))).toBe(false);
+  });
+
+  test('flyer source + location id filters on ua.location_id with both params', async () => {
+    setupTwoQueries();
+    await getAllUsersService({ page: 1, limit: 25, acquisitionSource: 'location_flyer', acquisitionLocationId: 896 });
+    const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]];
+    expect(sql).toContain('ua.location_id =');
+    expect(params).toContain('location_flyer');
+    expect(params).toContain(896);
+  });
+
+  test('location id is IGNORED for non-flyer sources (column is NULL there)', async () => {
+    setupTwoQueries();
+    await getAllUsersService({ page: 1, limit: 25, acquisitionSource: 'referral', acquisitionLocationId: 896 });
+    const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]];
+    expect(sql).not.toContain('ua.location_id');
+    expect(params).toContain('referral');
+    expect(params).not.toContain(896);
+  });
+
+  test('non-positive / non-integer location ids are ignored', async () => {
+    setupTwoQueries();
+    await getAllUsersService({ page: 1, limit: 25, acquisitionSource: 'location_flyer', acquisitionLocationId: -5 });
+    const [sql] = mockQuery.mock.calls[0] as [string];
+    expect(sql).not.toContain('ua.location_id');
+  });
+});

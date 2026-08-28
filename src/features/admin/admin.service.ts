@@ -1734,6 +1734,10 @@ export const getUserAnalyticsSummaryService = async (): Promise<{
   };
 };
 
+// Acquisition-source filter whitelist — mirrors acquisition_source_enum. Same
+// silently-ignore policy as segments: an unknown value never 400s or reaches SQL.
+const VALID_ACQUISITION_SOURCES = new Set(['referral', 'promo_code', 'location_flyer', 'direct']);
+
 export const getAllUsersService = async (params: {
   page: number;
   limit: number;
@@ -1741,6 +1745,8 @@ export const getAllUsersService = async (params: {
   role?: string;
   riskLevel?: 'high' | 'medium' | 'low';
   segment?: string;
+  acquisitionSource?: string;
+  acquisitionLocationId?: number;
 }) => {
   const pool = getPool();
   const { page, limit, search, role, riskLevel } = params;
@@ -1750,6 +1756,15 @@ export const getAllUsersService = async (params: {
   // so a client sending an unknown value never triggers a 400; it just gets unfiltered results.
   const segment: UserSegment | undefined = VALID_USER_SEGMENTS.has(params.segment as UserSegment)
     ? (params.segment as UserSegment)
+    : undefined;
+  const acquisitionSource = VALID_ACQUISITION_SOURCES.has(params.acquisitionSource ?? '')
+    ? params.acquisitionSource
+    : undefined;
+  // The location narrows the flyer source only — with any other source it is meaningless
+  // (the column is NULL there), so it is ignored rather than silently matching nothing.
+  const acquisitionLocationId = acquisitionSource === 'location_flyer'
+    && Number.isInteger(params.acquisitionLocationId) && (params.acquisitionLocationId as number) > 0
+    ? params.acquisitionLocationId
     : undefined;
 
   const conditions: string[] = [`u.role != 'Admin'`];
@@ -1788,6 +1803,23 @@ export const getAllUsersService = async (params: {
   // riskLevel and segment can both be present — they simply AND together (no conflict).
   if (segment) {
     conditions.push(USER_SEGMENT_PREDICATES[segment]);
+  }
+
+  // Acquisition filter: user_acquisition is 1:1 keyed on user_id, so the EXISTS is a
+  // single PK probe per candidate row (idx_user_acq_source / idx_user_acq_location also
+  // exist for planner flexibility). Note 'direct' matches only RECORDED direct signups —
+  // accounts predating acquisition tracking (no row) match no source, matching the
+  // "Unknown" wording in the user detail card.
+  if (acquisitionSource) {
+    if (acquisitionLocationId) {
+      conditions.push(`EXISTS (SELECT 1 FROM user_acquisition ua WHERE ua.user_id = u.id AND ua.source = $${idx} AND ua.location_id = $${idx + 1})`);
+      values.push(acquisitionSource, acquisitionLocationId);
+      idx += 2;
+    } else {
+      conditions.push(`EXISTS (SELECT 1 FROM user_acquisition ua WHERE ua.user_id = u.id AND ua.source = $${idx})`);
+      values.push(acquisitionSource);
+      idx++;
+    }
   }
 
   const where = `WHERE ${conditions.join(' AND ')}`;
@@ -3108,6 +3140,27 @@ export const getDrawAuditLogService = async (drawId: number) => {
   return result.rows;
 };
 
+// Locations that have at least one flyer-scan signup, with counts - feeds the Users tab
+// "Joined via" location dropdown. Rides idx_user_acq_location (partial on location_id
+// IS NOT NULL); the result set is bounded by the number of participating locations.
+// Locations deleted since signup (FK SET NULL) naturally drop out - they can no longer
+// be filtered by id.
+export const getAcquisitionLocationsService = async (): Promise<Array<{
+  location_id: number; location_name: string; business_name: string; signup_count: number;
+}>> => {
+  const pool = getPool();
+  const res = await pool.query(`
+    SELECT ua.location_id, bl.name AS location_name, b.name AS business_name, COUNT(*)::int AS signup_count
+    FROM user_acquisition ua
+    JOIN business_location bl ON bl.id = ua.location_id
+    JOIN business b ON b.id = bl.business_id
+    WHERE ua.source = 'location_flyer' AND ua.location_id IS NOT NULL
+    GROUP BY ua.location_id, bl.name, b.name
+    ORDER BY signup_count DESC, business_name ASC, location_name ASC
+  `);
+  return res.rows;
+};
+
 export const getUserDetailService = async (userId: number) => {
   const pool = getPool();
 
@@ -3141,7 +3194,29 @@ export const getUserDetailService = async (userId: number) => {
           FROM business_location ml
           JOIN business mb ON mb.id = ml.business_id
           WHERE ml.manager_user_id = u.id
-        ), '[]'::json) AS managed_locations
+        ), '[]'::json) AS managed_locations,
+        -- How the user arrived (user_acquisition, written once at signup): the channel,
+        -- the exact flyer location (location_flyer), the referrer (referral), or the promo
+        -- code. NULL for accounts predating acquisition tracking.
+        (
+          SELECT json_build_object(
+            'source', ua.source,
+            'promo_code', ua.promo_code,
+            'referral_rewarded_at', ua.referral_rewarded_at,
+            'location_id', ua.location_id,
+            'location_name', al.name,
+            'location_business_id', ab.id,
+            'location_business_name', ab.name,
+            'referrer_id', ru.id,
+            'referrer_name', ru.full_name,
+            'referrer_email', ru.email
+          )
+          FROM user_acquisition ua
+          LEFT JOIN business_location al ON al.id = ua.location_id
+          LEFT JOIN business ab ON ab.id = al.business_id
+          LEFT JOIN "user" ru ON ru.id = ua.referred_by_user_id
+          WHERE ua.user_id = u.id
+        ) AS acquisition
       FROM "user" u
       LEFT JOIN LATERAL (SELECT id, name FROM business WHERE user_id = u.id ORDER BY id LIMIT 1) b ON true
       LEFT JOIN subscription s3 ON s3.business_id = b.id

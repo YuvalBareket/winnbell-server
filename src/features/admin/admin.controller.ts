@@ -23,6 +23,7 @@ import {
   purgeDrawReceiptImagesService,
   getAdminOverviewService,
   getAllUsersService,
+  getAcquisitionLocationsService,
   updateUserRoleService,
   toggleUserActiveService,
   getPlatformSettingsService,
@@ -330,11 +331,27 @@ export const getUsers = async (req: Request, res: Response) => {
     : undefined;
   // segment is an optional triage filter; invalid values are silently ignored by the service.
   const segment = typeof req.query.segment === 'string' ? req.query.segment : undefined;
+  // Acquisition filter (Joined via): source whitelisted in the service; the location id
+  // only narrows the location_flyer source.
+  const acquisitionSource = typeof req.query.acquisitionSource === 'string' ? req.query.acquisitionSource : undefined;
+  const acqLocParsed = parseInt(req.query.acquisitionLocationId as string, 10);
+  const acquisitionLocationId = Number.isInteger(acqLocParsed) && acqLocParsed > 0 ? acqLocParsed : undefined;
   try {
-    const result = await getAllUsersService({ page, limit, search, role, riskLevel, segment });
+    const result = await getAllUsersService({ page, limit, search, role, riskLevel, segment, acquisitionSource, acquisitionLocationId });
     res.status(200).json(result);
   } catch (error) {
     res.status(500).json({ message: 'Failed to fetch users' });
+  }
+};
+
+// Flyer locations with signup counts - feeds the Users tab "Joined via" location dropdown.
+export const getAcquisitionLocations = async (_req: Request, res: Response) => {
+  try {
+    const rows = await getAcquisitionLocationsService();
+    res.status(200).json(rows);
+  } catch (error) {
+    console.error('[admin.getAcquisitionLocations]', error);
+    res.status(500).json({ message: 'Failed to fetch acquisition locations' });
   }
 };
 

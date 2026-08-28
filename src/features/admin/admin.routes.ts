@@ -28,6 +28,7 @@ router.get('/users', adminController.getUsers);
 // 'analytics-summary' is never captured as a userId param (Express 5 matches routes
 // in registration order, identical to the /businesses/health-summary guard above).
 router.get('/users/analytics-summary', adminController.getUserAnalytics);
+router.get('/acquisition-locations', adminController.getAcquisitionLocations);
 router.get('/users/:userId', adminController.getUserDetail);
 router.get('/businesses/:businessId', adminController.getBusinessDetail);
 router.get('/entries', adminController.getAdminEntries);
