@@ -11,7 +11,7 @@ import {
   getAddress,
   getAddressCoords,
   getMyBusinessData,
-  getNearbyBusinessesService,
+  getAllMapLocationsService,
   getLocationProfileByIdService,
   getParticipatingLocationByIdService,
   removeLocationManagerService,
@@ -145,7 +145,11 @@ export const getNearby = async (req: Request, res: Response) => {
       }
     }
 
-    const businesses = await getNearbyBusinessesService(
+    // TEMPORARY LAUNCH MODE: every eligible location on any viewport (~10 exist, well
+    // under the 30-row map budget). Same route/params/response shape; the service ignores
+    // the bounding box except for center-distance ordering. Revert to
+    // getNearbyBusinessesService when the location count approaches 30.
+    const businesses = await getAllMapLocationsService(
       bbox[0],
       bbox[1],
       bbox[2],

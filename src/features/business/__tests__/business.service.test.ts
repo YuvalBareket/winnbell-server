@@ -17,7 +17,7 @@ jest.mock('../../../shared/db/db.js', () => ({
   getPool: jest.fn().mockReturnValue({ query: mockQuery }),
 }));
 
-import { getNearbyBusinessesService, updateBusinessProfile } from '../business.service';
+import { getNearbyBusinessesService, getAllMapLocationsService, updateBusinessProfile } from '../business.service';
 import { publicCache } from '../../../shared/cache/cache.js';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -142,6 +142,78 @@ describe('getNearbyBusinessesService', () => {
     // Should be ~120s, well above the 30s default the shared cache uses.
     expect(secondsLeft).toBeGreaterThan(60);
     expect(secondsLeft).toBeLessThanOrEqual(120);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// getAllMapLocationsService (temporary launch mode: fetch-all, no viewport filter)
+// ─────────────────────────────────────────────────────────────────────────────
+describe('getAllMapLocationsService', () => {
+  it('keeps the eligibility rule but drops the bounding-box FILTER (bbox only orders)', async () => {
+    setupPoolQueries({ rows: [] });
+
+    await getAllMapLocationsService(25.7, 25.8, -80.3, -80.1);
+
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+    const [sql] = mockQuery.mock.calls[0] as [string, unknown[]];
+    // Same participation rule as the tiled service.
+    expect(sql).toMatch(/loc\.is_active = true/);
+    expect(sql).toMatch(/d\.status = 'Open'/);
+    expect(sql).toMatch(/de\.paused_at IS NULL/);
+    expect(sql).toMatch(/participation_paused = TRUE/);
+    // The load-bearing difference: no viewport filter, so off-screen pins still return.
+    // (\$ anchors to a real "BETWEEN $1" clause; a comment in the SQL mentions the word.)
+    expect(sql).not.toMatch(/BETWEEN \$/);
+    // The bbox still drives distance-from-center ordering (list order parity). The float8
+    // casts are load-bearing: without a BETWEEN clause typing these params, Postgres
+    // rejects "$1 + $2" as "operator is not unique: unknown + unknown".
+    expect(sql).toMatch(/ORDER BY/);
+    expect(sql).toMatch(/\(\$1::float8 \+ \$2::float8\) \/ 2\.0/);
+    expect(sql).toMatch(/\(\$3::float8 \+ \$4::float8\) \/ 2\.0/);
+  });
+
+  it('still enforces the hard 30-row map budget', async () => {
+    setupPoolQueries({ rows: [] });
+
+    await getAllMapLocationsService(25.7, 25.8, -80.3, -80.1, undefined, 5000);
+
+    const [, params] = mockQuery.mock.calls[0] as [string, unknown[]];
+    expect(params[params.length - 1]).toBe(30);
+  });
+
+  it('binds sector and name filters (search/chips behave as before)', async () => {
+    setupPoolQueries({ rows: [] });
+
+    await getAllMapLocationsService(25.7, 25.8, -80.3, -80.1, 'Food', undefined, 'pizza');
+
+    const [sql, params] = mockQuery.mock.calls[0] as [string, unknown[]];
+    expect(sql).toMatch(/b\.sector = \$5/);
+    expect(params[4]).toBe('Food');
+    expect(params[5]).toBe('%pizza%');
+  });
+
+  it('serves repeated calls for the same center from cache without a second query', async () => {
+    setupPoolQueries({ rows: [] });
+
+    const first = await getAllMapLocationsService(25.7, 25.8, -80.3, -80.1);
+    const second = await getAllMapLocationsService(25.7, 25.8, -80.3, -80.1);
+
+    expect(first).toEqual(second);
+    expect(mockQuery).toHaveBeenCalledTimes(1);
+    // Distinct key space from the tiled service so a revert never serves mixed payloads.
+    const key = publicCache.keys().find(k => k.startsWith('business:nearby-all:'));
+    expect(key).toBeDefined();
+  });
+
+  it('never serves a small-limit cache entry to a larger-limit caller (receipt form vs map)', async () => {
+    setupPoolQueries({ rows: [] });
+
+    // Same center, different limits: the receipt form asks for 2, the map for 30.
+    await getAllMapLocationsService(25.7, 25.8, -80.3, -80.1, undefined, 2);
+    await getAllMapLocationsService(25.7, 25.8, -80.3, -80.1, undefined, 30);
+
+    // Without the limit in the cache key the second call would be a (wrong) cache hit.
+    expect(mockQuery).toHaveBeenCalledTimes(2);
   });
 });
 

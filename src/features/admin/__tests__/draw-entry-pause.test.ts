@@ -53,7 +53,7 @@ jest.mock('../../ocr/ocr.service.js', () => ({
 }));
 
 import { pauseBusinessInDrawService, getDrawBusinessesService } from '../admin.service';
-import { getNearbyBusinessesService, searchParticipatingLocationsService } from '../../business/business.service';
+import { getNearbyBusinessesService, getAllMapLocationsService, searchParticipatingLocationsService } from '../../business/business.service';
 import { publicCache } from '../../../shared/cache/cache.js';
 
 const setupPoolQueries = (...responses: Array<{ rows: unknown[]; rowCount?: number | null }>) => {
@@ -210,6 +210,21 @@ describe('getNearbyBusinessesService — paused_at IS NULL gate', () => {
     setupPoolQueries({ rows: [] });
 
     await getNearbyBusinessesService(25.7, 25.8, -80.3, -80.1);
+
+    const [sql] = mockQuery.mock.calls[0] as [string, unknown[]];
+    expect(sql).toMatch(/d\.status = 'Open'/);
+    expect(sql).toMatch(/de\.paused_at IS NULL/);
+  });
+});
+
+// ─────────────────────────────────────────────
+// Gate: getAllMapLocationsService (launch-mode map) — paused_at IS NULL in EXISTS
+// ─────────────────────────────────────────────
+describe('getAllMapLocationsService — paused_at IS NULL gate', () => {
+  test('the participating EXISTS subquery requires de.paused_at IS NULL', async () => {
+    setupPoolQueries({ rows: [] });
+
+    await getAllMapLocationsService(25.7, 25.8, -80.3, -80.1);
 
     const [sql] = mockQuery.mock.calls[0] as [string, unknown[]];
     expect(sql).toMatch(/d\.status = 'Open'/);

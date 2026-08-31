@@ -93,6 +93,87 @@ export const getNearbyBusinessesService = async (
   return result.rows;
 };
 
+// TEMPORARY LAUNCH MODE (2026-08-31): with only ~10 participating locations, viewport
+// tiling costs more than it saves - a pan past a tile edge hides pins that are barely
+// off-screen and burns a request. Until the location count approaches the 30-row map
+// budget, /business/nearby serves EVERY eligible location on any viewport. The bounding
+// box still drives ORDER BY (distance from viewport center) so list ordering matches the
+// tiled service. REVERT: point getNearby in business.controller.ts back at
+// getNearbyBusinessesService above; route, params, and client are identical either way.
+export const getAllMapLocationsService = async (
+  minLat: number,
+  maxLat: number,
+  minLng: number,
+  maxLng: number,
+  sector?: string,
+  limit = 30,
+  name?: string,
+): Promise<NearbyBusiness[]> => {
+  const safeSector = sector ? String(sector).slice(0, 32) : undefined;
+  const safeName = name ? String(name).trim().slice(0, 40) : undefined;
+
+  // Hard project rule: map responses never exceed 30 rows. If locations outgrow the
+  // budget before the revert happens, the response stays capped instead of growing.
+  const cappedLimit = Math.min(limit, 30);
+
+  // The center only affects ordering, but ordering differs per center, so it must be in
+  // the key. Same rounding granularity as the tiled service keeps key cardinality bounded.
+  // cappedLimit MUST be in the key too: unlike the tiled service (whose bbox in the key
+  // separated callers), the receipt form (limit=2) and the map (limit=30) could share a
+  // rounded center here, and a 2-row cache hit must never be served to the map.
+  const centerLatKey = Math.round(((minLat + maxLat) / 2) * 100);
+  const centerLngKey = Math.round(((minLng + maxLng) / 2) * 100);
+  const CACHE_KEY = `business:nearby-all:${centerLatKey}:${centerLngKey}:${safeSector || 'all'}:${safeName || ''}:${cappedLimit}`;
+  const cached = publicCache.get<NearbyBusiness[]>(CACHE_KEY);
+  if (cached !== undefined) return cached;
+
+  const pool = getPool();
+  const params: (number | string)[] = [minLat, maxLat, minLng, maxLng];
+  const sectorClause = safeSector ? `AND b.sector = $${params.push(safeSector)}` : '';
+  const nameClause = safeName ? `AND b.name ILIKE $${params.push(`%${safeName}%`)}` : '';
+  const limitPlaceholder = `$${params.push(cappedLimit)}`;
+
+  const query = `
+    SELECT
+      loc.id AS location_id,
+      loc.address,
+      loc.latitude,
+      loc.longitude,
+      b.id,
+      b.name,
+      b.sector,
+      b.logo_url
+    FROM business_location loc
+    INNER JOIN business b ON loc.business_id = b.id
+    -- Same eligibility rule as getNearbyBusinessesService (participation = membership in
+    -- the Open campaign, voluntary pause overrides it) with the bounding-box filter removed.
+    WHERE loc.is_active = true
+      AND EXISTS (
+        SELECT 1 FROM draw_entry de
+        JOIN draw d ON d.id = de.draw_id
+        WHERE de.business_id = b.id AND d.status = 'Open'
+          AND de.paused_at IS NULL
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM subscription sp
+        WHERE sp.business_id = b.id AND sp.participation_paused = TRUE
+      )
+      ${sectorClause}
+      ${nameClause}
+    ORDER BY
+      -- ::float8 casts are REQUIRED here: the tiled service's BETWEEN clause gave these
+      -- params a numeric type, but with no filter referencing them Postgres sees
+      -- "unknown + unknown" and rejects the query ("operator is not unique").
+      (loc.latitude  - ($1::float8 + $2::float8) / 2.0) * (loc.latitude  - ($1::float8 + $2::float8) / 2.0) +
+      (loc.longitude - ($3::float8 + $4::float8) / 2.0) * (loc.longitude - ($3::float8 + $4::float8) / 2.0)
+    LIMIT ${limitPlaceholder}
+  `;
+
+  const result = await pool.query(query, params);
+  publicCache.set(CACHE_KEY, result.rows, 120);
+  return result.rows;
+};
+
 // Returns label + placeId only — coordinates are fetched separately on selection
 export const getAddress = async (text: string): Promise<{ label: string; placeId: string }[]> => {
   const q = (text || '').trim();
