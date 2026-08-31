@@ -537,6 +537,11 @@ export const submitReceiptEntryService = async (
       // the 1st of the draw month) - NOT opened_at, which is just when the admin clicked "open".
       // Anchoring on opened_at wrongly rejects in-period receipts whenever a draw is opened late.
       const campaignStart = new Date(draw_start_date);
+      // start_date holds campaign-LOCAL midnight as a timestamp (e.g. 04:00/05:00 UTC for
+      // US Eastern), while transactionDate is a date-only string that parses to 00:00 UTC.
+      // Compare at DATE granularity, or a receipt dated exactly on the start day loses to
+      // the baked-in clock offset and is rejected as pre-campaign.
+      campaignStart.setUTCHours(0, 0, 0, 0);
       const now = new Date();
       const sevenDaysAgo = new Date(now);
       sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
