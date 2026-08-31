@@ -10,6 +10,12 @@ const funnelSessionId = (req: Request): string | null => {
   return typeof v === 'string' ? v : null;
 };
 
+// Consumer funnel only: phone verification is a consumer flow (Business/Manager accounts
+// are exempt), but the routes are only authenticateToken-gated - a staff account calling
+// them must not pollute the OTP funnel. The Twilio delivery webhook has no req.user; the
+// dashboard's role filter covers that path.
+const isConsumer = (req: Request): boolean => req.user?.role === 'User';
+
 export const sendOtp = async (req: Request, res: Response): Promise<void> => {
   const userId = req.user?.id;
   if (!userId) { res.status(401).json({ message: 'Unauthorized' }); return; }
@@ -25,7 +31,7 @@ export const sendOtp = async (req: Request, res: Response): Promise<void> => {
   try {
     await phoneService.sendPhoneOtp(userId, phoneNumber);
     res.json({ success: true });
-    recordFunnelEvent({ eventType: 'otp_requested', userId, sessionId: funnelSessionId(req) });
+    if (isConsumer(req)) recordFunnelEvent({ eventType: 'otp_requested', userId, sessionId: funnelSessionId(req) });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : '';
     if (msg === 'PHONE_VERIFY_DISABLED') {
@@ -56,9 +62,11 @@ export const sendOtp = async (req: Request, res: Response): Promise<void> => {
       res.status(502).json({ message: 'We could not send the code right now. Please try again in a moment.' });
       // Funnel: only a real send failure counts as otp_send_failed (business gates like
       // ALREADY_VERIFIED / RESEND_TOO_SOON are not delivery-funnel signal). After the response.
-      recordFunnelEvent({
-        eventType: 'otp_send_failed', userId, sessionId: funnelSessionId(req), reasonCode: 'send_error',
-      });
+      if (isConsumer(req)) {
+        recordFunnelEvent({
+          eventType: 'otp_send_failed', userId, sessionId: funnelSessionId(req), reasonCode: 'send_error',
+        });
+      }
       return;
     }
     console.error('[phone] sendOtp error:', err);
@@ -80,18 +88,19 @@ export const verifyOtp = async (req: Request, res: Response): Promise<void> => {
 
   // Funnel: attempted + outcome, both emitted strictly AFTER the response so the
   // analytics write never competes with the verify path for a pool connection.
-  const attempted = () =>
-    recordFunnelEvent({ eventType: 'otp_verify_attempted', userId, sessionId: funnelSessionId(req) });
+  const attempted = () => {
+    if (isConsumer(req)) recordFunnelEvent({ eventType: 'otp_verify_attempted', userId, sessionId: funnelSessionId(req) });
+  };
   try {
     const { referralBonusGranted } = await phoneService.verifyPhoneOtp(userId, code);
     res.json({ success: true, referralBonusGranted });
     attempted();
-    recordFunnelEvent({ eventType: 'otp_verified', userId, sessionId: funnelSessionId(req) });
+    if (isConsumer(req)) recordFunnelEvent({ eventType: 'otp_verified', userId, sessionId: funnelSessionId(req) });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : '';
     const verifyFailed = (reason: 'wrong_code' | 'expired' | 'too_many_attempts') => {
       attempted();
-      recordFunnelEvent({ eventType: 'otp_verify_failed', userId, sessionId: funnelSessionId(req), reasonCode: reason });
+      if (isConsumer(req)) recordFunnelEvent({ eventType: 'otp_verify_failed', userId, sessionId: funnelSessionId(req), reasonCode: reason });
     };
     if (msg === 'NO_OTP') { res.status(400).json({ message: 'No verification code found. Please request a new one.' }); attempted(); return; }
     if (msg === 'OTP_EXPIRED') { res.status(400).json({ message: 'Verification code expired. Please request a new one.' }); verifyFailed('expired'); return; }

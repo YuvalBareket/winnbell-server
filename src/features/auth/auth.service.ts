@@ -773,14 +773,18 @@ export const syncExternalUser = async (
     // Funnel: authoritative signup/login events, fire-and-forget after commit.
     // account_created doubles as the first login (external-auth signup and first
     // sign-in are the same moment), so first_login is intentionally never emitted.
-    recordFunnelEvent(
-      wasCreated
-        ? {
-            eventType: 'account_created', userId: dbUser.id, sessionId: metadata?.funnelSessionId ?? null,
-            locationId: acquiredViaLocationId, meta: { source: acquisitionSource },
-          }
-        : { eventType: 'returning_login', userId: dbUser.id, sessionId: metadata?.funnelSessionId ?? null },
-    );
+    // CONSUMERS ONLY: the funnel measures the consumer journey - business owners,
+    // location managers, and admins must never appear in its accounts/logins.
+    if (dbUser.role === 'User') {
+      recordFunnelEvent(
+        wasCreated
+          ? {
+              eventType: 'account_created', userId: dbUser.id, sessionId: metadata?.funnelSessionId ?? null,
+              locationId: acquiredViaLocationId, meta: { source: acquisitionSource },
+            }
+          : { eventType: 'returning_login', userId: dbUser.id, sessionId: metadata?.funnelSessionId ?? null },
+      );
+    }
 
     return {
       message: 'Sync successful',

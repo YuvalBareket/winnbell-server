@@ -2084,7 +2084,7 @@ export const getAdminAnalyticsService = async (businessId?: number, drawId?: num
          SUM(CASE WHEN u.created_at >= DATE_TRUNC('month', NOW()) THEN 1 ELSE 0 END) AS new_this_month,
          COUNT(*) AS total
        FROM "user" u
-       WHERE u.role != 'Admin'
+       WHERE u.role = 'User'
          AND ($1::int IS NULL OR EXISTS (
            SELECT 1 FROM ticket t WHERE t.activated_by_user_id = u.id AND t.business_id = $1
          ))

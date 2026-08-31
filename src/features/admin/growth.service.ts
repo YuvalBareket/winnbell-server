@@ -197,7 +197,7 @@ export const getGrowthAnalyticsService = async () => {
       SELECT
         (SELECT COUNT(*) FROM ticket WHERE is_quarantined = TRUE)                                  AS quarantined_entries,
         (SELECT COUNT(*) FROM draw_rejected_winner)                                                AS rejected_winners,
-        (SELECT COUNT(*) FROM "user" WHERE role != 'Admin' AND is_active = FALSE)                  AS suspended_users,
+        (SELECT COUNT(*) FROM "user" WHERE role = 'User' AND is_active = FALSE)                    AS suspended_users,
         (SELECT COUNT(*) FROM "user" WHERE role = 'User' AND risk_score >= 20)                     AS high_risk_users,
         (SELECT COUNT(*) FROM receipt_threshold_attempt)                                           AS threshold_probes,
         (SELECT COUNT(*) FROM phone_otp WHERE created_at >= DATE_TRUNC('month', NOW()))            AS verifications_this_month,

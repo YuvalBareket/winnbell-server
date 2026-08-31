@@ -14,16 +14,33 @@ import { getPool } from '../../shared/db/db.js';
 //    aggregated with an n-weighted average - approximate but plenty for a dashboard.
 const ALLOWED_DAYS = [7, 30, 90];
 
+// The funnel is the CONSUMER journey. Emission is role-gated at the source (auth sync,
+// profile setup, phone OTP, register page), but events recorded before that gate - and
+// any future authed staff event - are excluded here too. Anonymous pre-auth events
+// (user_id NULL) stay: they cannot be attributed to a role and are overwhelmingly
+// consumer traffic. Deleted accounts also land here (FK ON DELETE SET NULL nulls their
+// user_id), so their history keeps counting as anonymous - accepted, and why
+// people['account_created'] can sit slightly above journey.accounts.
+const CONSUMER_EVENTS_ONLY = `(user_id IS NULL OR EXISTS (
+  SELECT 1 FROM "user" u WHERE u.id = funnel_event.user_id AND u.role = 'User'
+))`;
+
 export const getFunnelAnalytics = async (req: Request, res: Response): Promise<void> => {
   try {
     const days = ALLOWED_DAYS.includes(Number(req.query.days)) ? Number(req.query.days) : 30;
     const pool = getPool();
 
     const [totals, reasons, daily, transitions, journey] = await Promise.all([
+      // n = raw events (volume); people = distinct persons. The person key prefers
+      // user_id (dedups one user across sessions and days), falls back to session_id
+      // for anonymous pre-auth events (one journey = one person), and finally the
+      // event itself for server events carrying neither (counts 1, never drops to 0).
       pool.query(
-        `SELECT event_type, COUNT(*)::int AS n
+        `SELECT event_type, COUNT(*)::int AS n,
+                COUNT(DISTINCT COALESCE(user_id::text, session_id::text, event_id::text))::int AS people
          FROM funnel_event
          WHERE occurred_at >= CURRENT_DATE - $1::int
+           AND ${CONSUMER_EVENTS_ONLY}
          GROUP BY 1`,
         [days],
       ),
@@ -31,6 +48,7 @@ export const getFunnelAnalytics = async (req: Request, res: Response): Promise<v
         `SELECT COALESCE(reason_code, 'unknown_error') AS reason, COUNT(*)::int AS n
          FROM funnel_event
          WHERE event_type = 'submission_rejected' AND occurred_at >= CURRENT_DATE - $1::int
+           AND ${CONSUMER_EVENTS_ONLY}
          GROUP BY 1 ORDER BY 2 DESC`,
         [days],
       ),
@@ -40,6 +58,7 @@ export const getFunnelAnalytics = async (req: Request, res: Response): Promise<v
                 COUNT(*) FILTER (WHERE event_type = 'submission_accepted')::int AS submissions
          FROM funnel_event
          WHERE occurred_at >= CURRENT_DATE - $1::int
+           AND ${CONSUMER_EVENTS_ONLY}
          GROUP BY 1 ORDER BY 1`,
         [days],
       ),
@@ -61,6 +80,7 @@ export const getFunnelAnalytics = async (req: Request, res: Response): Promise<v
            SELECT DISTINCT user_id FROM funnel_event
            WHERE event_type = 'account_created' AND user_id IS NOT NULL
              AND occurred_at >= CURRENT_DATE - $1::int
+             AND ${CONSUMER_EVENTS_ONLY}
          )
          SELECT
            COUNT(*)::int AS accounts,
@@ -80,13 +100,16 @@ export const getFunnelAnalytics = async (req: Request, res: Response): Promise<v
     ]);
 
     const totalsMap: Record<string, number> = {};
-    for (const row of totals.rows as Array<{ event_type: string; n: number }>) {
+    const peopleMap: Record<string, number> = {};
+    for (const row of totals.rows as Array<{ event_type: string; n: number; people: number }>) {
       totalsMap[row.event_type] = row.n;
+      peopleMap[row.event_type] = row.people;
     }
 
     res.json({
       days,
       totals: totalsMap,
+      people: peopleMap,
       rejectionReasons: reasons.rows,
       daily: daily.rows,
       transitions: transitions.rows,
