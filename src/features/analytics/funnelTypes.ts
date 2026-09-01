@@ -22,6 +22,12 @@ export const CLIENT_EVENT_TYPES = [
   'submit_image_upload_failed',
   'submit_attempted',
   'submission_confirmed_shown',
+  // First-run tour (intro slides after profile setup + weekly-entry spotlight on /scan).
+  'tour_viewed',
+  'tour_completed',
+  'tour_skipped',
+  'spotlight_weekly_shown',
+  'spotlight_weekly_clicked',
 ] as const;
 
 /** Server-authoritative events. The ingest endpoint REJECTS these from clients -

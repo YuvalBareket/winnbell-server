@@ -909,6 +909,7 @@ CREATE TABLE IF NOT EXISTS funnel_event (
     'email_verification_pending','profile_setup_viewed','submit_page_viewed','submit_business_selected',
     'submit_amount_entered','submit_receipt_id_entered','receipt_scan_used','submit_image_attached',
     'submit_image_upload_failed','submit_attempted','submission_confirmed_shown',
+    'tour_viewed','tour_completed','tour_skipped','spotlight_weekly_shown','spotlight_weekly_clicked',
     'account_created','first_login','returning_login','profile_setup_completed','profile_setup_failed',
     'otp_requested','otp_send_failed','otp_delivered','otp_undelivered','otp_verify_attempted',
     'otp_verified','otp_verify_failed','submission_accepted','submission_rejected',
