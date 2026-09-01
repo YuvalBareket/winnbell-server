@@ -3164,7 +3164,7 @@ export const getAcquisitionLocationsService = async (): Promise<Array<{
 export const getUserDetailService = async (userId: number) => {
   const pool = getPool();
 
-  const [userRes, entriesRes] = await Promise.all([
+  const [userRes, entriesRes, journeyRes] = await Promise.all([
     pool.query(`
       SELECT
         u.id,
@@ -3244,6 +3244,21 @@ export const getUserDetailService = async (userId: number) => {
       ORDER BY t.activated_at DESC
       LIMIT 50
     `, [userId]),
+    // The user's journey through the app, from the funnel event stream. account_created
+    // stitches the anonymous pre-signup session to the user, so pulling every session the
+    // user ever appeared in also recovers the pre-signup steps (landing viewed, sign-up
+    // started...) that were recorded before a user_id existed.
+    pool.query(`
+      WITH user_sessions AS (
+        SELECT DISTINCT session_id FROM funnel_event
+        WHERE user_id = $1 AND session_id IS NOT NULL
+      )
+      SELECT event_type, reason_code, device_class, session_id, occurred_at, meta
+      FROM funnel_event
+      WHERE user_id = $1 OR session_id IN (SELECT session_id FROM user_sessions)
+      ORDER BY occurred_at ASC, id ASC
+      LIMIT 400
+    `, [userId]),
   ]);
 
   if (!userRes.rows[0]) return null;
@@ -3251,5 +3266,6 @@ export const getUserDetailService = async (userId: number) => {
   return {
     user: userRes.rows[0],
     entries: entriesRes.rows,
+    journey: journeyRes.rows,
   };
 };
