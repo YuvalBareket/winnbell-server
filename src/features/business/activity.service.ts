@@ -315,7 +315,15 @@ export const getCampaignEntriesForScope = async (
   if (!resolvedDrawId) return { items: [], next_cursor: null };
 
   const params: unknown[] = [businessId, resolvedDrawId];
-  const conditions: string[] = ['t.business_id = $1', 't.draw_id = $2'];
+  const conditions: string[] = [
+    't.business_id = $1',
+    't.draw_id = $2',
+    // Quarantined entries show as "under review" for 12 hours only. Past that, no manual
+    // release happened, so the business stops seeing them; an admin release (quarantined_at
+    // reset to NULL) returns the entry as active. quarantined_at is set on every quarantine
+    // path; created_at is a defensive fallback for legacy rows quarantined without it.
+    `(t.is_quarantined = FALSE OR COALESCE(t.quarantined_at, t.created_at) >= NOW() - INTERVAL '12 hours')`,
+  ];
   if (scopedLocationId) { params.push(scopedLocationId); conditions.push(`t.location_id = $${params.length}`); }
   if (range) conditions.push(periodPredicate(range));
   // Keyset on (created_at, id): the feed is ordered by date, and id only breaks ties, so paging
