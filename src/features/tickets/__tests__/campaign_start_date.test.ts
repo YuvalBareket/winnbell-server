@@ -48,9 +48,13 @@ import { submitReceiptEntryService } from '../tickets.service';
 // ─────────────────────────────────────────────
 
 const utcDateString = (d: Date): string => d.toISOString().split('T')[0];
+const daysAgo = (n: number): string => utcDateString(new Date(Date.now() - n * 24 * 60 * 60 * 1000));
 
 const startDay = utcDateString(new Date()); // e.g. "2026-08-31"
-const dayBefore = utcDateString(new Date(Date.now() - 24 * 60 * 60 * 1000));
+const dayBefore = daysAgo(1);
+// For window tests the campaign must start well before the dates under test, so only
+// the 7-day check can reject - campaign-local midnight offset kept for realism.
+const drawStartLongAgo = new Date(`${daysAgo(30)}T04:00:00Z`);
 
 // What pf.draw_start_date is on Render for an admin-entered start of `startDay`:
 // campaign-local midnight (US Eastern) parsed on a UTC server.
@@ -65,39 +69,49 @@ const BASE_INPUT = {
 };
 
 /** Full happy-path client.query response chain (see multi_entry.test.ts for the map). */
-const buildResponses = () => [
-  { rows: [] }, // BEGIN
-  { rows: [] }, // user-level advisory lock
-  { rows: [] }, // shared per-user cap lock
-  {
-    rows: [{
-      is_email_verified: true,
-      is_phone_verified: true,
-      risk_score: 0,
-      risk_last_flagged_at: null,
-      risk_last_decayed_at: null,
-      business_id: 5,
-      business_name: 'Acme',
-      business_sector: null,
-      date_of_birth: null,
-      min_transaction_amount: null,
-      draw_id: 42,
-      draw_start_date: drawStartWithOffset,
-      settings_exists: true,
-      global_entry_cap: null,
-      entries_per_location: null,
-      has_conflict: false,
-      daily_count: 0,
-      draw_count: 0,
-    }],
-  }, // preflight CTE
-  { rows: [] }, // receipt-level advisory lock
-  { rows: [{}] }, // claim map — no claims
-  { rows: [] }, // duplicate-document fingerprint check
-  { rows: [] }, // code conflict check
-  { rows: [{ id: 100 }] }, // INSERT RETURNING id
-  { rows: [] }, // COMMIT
-];
+const buildResponses = (opts: {
+  drawStart?: Date;
+  minTransactionAmount?: string | null; // NUMERIC arrives as a string from pg
+  batchSize?: number;
+} = {}) => {
+  const { drawStart = drawStartWithOffset, minTransactionAmount = null, batchSize = 1 } = opts;
+  const responses: Array<{ rows: unknown[] }> = [
+    { rows: [] }, // BEGIN
+    { rows: [] }, // user-level advisory lock
+    { rows: [] }, // shared per-user cap lock
+    {
+      rows: [{
+        is_email_verified: true,
+        is_phone_verified: true,
+        risk_score: 0,
+        risk_last_flagged_at: null,
+        risk_last_decayed_at: null,
+        business_id: 5,
+        business_name: 'Acme',
+        business_sector: null,
+        date_of_birth: null,
+        min_transaction_amount: minTransactionAmount,
+        draw_id: 42,
+        draw_start_date: drawStart,
+        settings_exists: true,
+        global_entry_cap: null,
+        entries_per_location: null,
+        has_conflict: false,
+        daily_count: 0,
+        draw_count: 0,
+      }],
+    }, // preflight CTE
+    { rows: [] }, // receipt-level advisory lock
+    { rows: [{}] }, // claim map — no claims
+    { rows: [] }, // duplicate-document fingerprint check
+    { rows: [] }, // code conflict check
+  ];
+  for (let i = 0; i < batchSize; i++) {
+    responses.push({ rows: [{ id: 100 + i }] }); // INSERT RETURNING id
+  }
+  responses.push({ rows: [] }); // COMMIT
+  return responses;
+};
 
 const setupClientQueries = (responses: Array<{ rows: unknown[] }>) => {
   let i = 0;
@@ -135,5 +149,42 @@ describe('campaign start-date boundary', () => {
       ([sql]: [string]) => typeof sql === 'string' && sql.includes('INSERT INTO ticket'),
     );
     expect(insertCall).toBeUndefined();
+  });
+});
+
+describe('7-day receipt window boundary', () => {
+  test('accepts a receipt dated exactly 7 days ago at any time of day', async () => {
+    setupClientQueries(buildResponses({ drawStart: drawStartLongAgo }));
+
+    const result = await submitReceiptEntryService(1, { ...BASE_INPUT, transactionDate: daysAgo(7) });
+
+    expect(result.entryCount).toBe(1);
+  });
+
+  test('still rejects a receipt dated 8 days ago', async () => {
+    setupClientQueries(buildResponses({ drawStart: drawStartLongAgo }));
+
+    await expect(
+      submitReceiptEntryService(1, { ...BASE_INPUT, transactionDate: daysAgo(8) }),
+    ).rejects.toThrow('Receipt is older than 7 days and cannot be accepted.');
+  });
+});
+
+describe('entry multiplier cents math', () => {
+  test('an exact multiple with cent amounts earns the full entry count (36.90 / 12.30 = 3, not 2)', async () => {
+    // Float division gives 2.9999999999999996 - integer-cents math must yield 3.
+    setupClientQueries(buildResponses({
+      drawStart: drawStartLongAgo,
+      minTransactionAmount: '12.30',
+      batchSize: 3,
+    }));
+
+    const result = await submitReceiptEntryService(1, {
+      ...BASE_INPUT,
+      transactionAmount: 36.90,
+    });
+
+    expect(result.entryCount).toBe(3);
+    expect(result.tickets).toHaveLength(3);
   });
 });

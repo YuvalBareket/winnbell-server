@@ -464,12 +464,24 @@ export const submitReceiptEntryService = async (
     drawId = pf.draw_id;
     const draw_start_date: Date = pf.draw_start_date;
     // Use subscription's per-location cap; fall back to global cap; fall back to 500 if no settings row
+    // global_entry_cap is NUMERIC - pg returns it as a string, so it must be wrapped like
+    // entries_per_location is; NULL still means "unlimited" and must survive as null.
     const entry_cap: number | null = pf.entries_per_location != null
       ? Number(pf.entries_per_location)
-      : pf.settings_exists ? pf.global_entry_cap : 500;
+      : pf.settings_exists
+        ? (pf.global_entry_cap != null ? Number(pf.global_entry_cap) : null)
+        : 500;
 
-    const entryCount = minTransactionAmount && minTransactionAmount > 0
-      ? Math.min(Math.floor(input.transactionAmount / minTransactionAmount), MAX_ENTRIES_PER_RECEIPT)
+    // Integer-cents division: IEEE floats make exact multiples come out just under
+    // (36.90 / 12.30 = 2.9999...), and Math.floor then under-awards by one entry.
+    // A minimum that rounds to 0 cents (sub-cent admin typo) must not divide by zero
+    // and award max entries for pennies - treat it like "no minimum" (1 entry).
+    const minCents = minTransactionAmount != null ? Math.round(minTransactionAmount * 100) : 0;
+    const entryCount = minCents > 0
+      ? Math.min(
+          Math.floor(Math.round(input.transactionAmount * 100) / minCents),
+          MAX_ENTRIES_PER_RECEIPT,
+        )
       : 1;
 
     const currentDrawCount = Number(pf.draw_count);
@@ -543,8 +555,12 @@ export const submitReceiptEntryService = async (
       // the baked-in clock offset and is rejected as pre-campaign.
       campaignStart.setUTCHours(0, 0, 0, 0);
       const now = new Date();
+      // Same date-granularity rule as campaignStart above: txDate is a date-only value at
+      // 00:00 UTC, so this boundary must be a UTC midnight too - with the clock time left
+      // in, a receipt dated exactly 7 days ago was rejected at any submit time after 00:00.
       const sevenDaysAgo = new Date(now);
-      sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+      sevenDaysAgo.setUTCHours(0, 0, 0, 0);
+      sevenDaysAgo.setUTCDate(sevenDaysAgo.getUTCDate() - 7);
 
       if (txDate > now) {
         throw new Error('Purchase date cannot be in the future.');

@@ -19,6 +19,20 @@ for (const key of REQUIRED_ENV) {
   }
 }
 
+// PHONE_VERIFY_ENABLED gates real OTP SMS AND the phone requirement on every entry path.
+// It is deliberately absent everywhere except real production - but if it ever vanished
+// FROM production (config edit, service rebuild), every phone gate would silently fail
+// open. Loud warning, not fatal. Staging also runs NODE_ENV=production, so it is excluded
+// via its DEMO_USER_ENABLED marker (the established staging discriminator) - otherwise the
+// warning would fire on every staging boot and train everyone to ignore it.
+if (
+  process.env.NODE_ENV === 'production'
+  && process.env.DEMO_USER_ENABLED !== 'true'
+  && process.env.PHONE_VERIFY_ENABLED !== 'true'
+) {
+  console.warn('[startup] PHONE_VERIFY_ENABLED is not "true" on a PRODUCTION instance: phone verification gates are OPEN. Restore the env var immediately.');
+}
+
 const startServer = async () => {
   try {
     // Error monitoring first, so any startup failure is captured (no-op without SENTRY_DSN)
