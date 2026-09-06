@@ -21,7 +21,9 @@ const ALLOWED_DAYS = [7, 30, 90];
 // consumer traffic. Deleted accounts also land here (FK ON DELETE SET NULL nulls their
 // user_id), so their history keeps counting as anonymous - accepted, and why
 // people['account_created'] can sit slightly above journey.accounts.
-const CONSUMER_EVENTS_ONLY = `(user_id IS NULL OR EXISTS (
+// user_id is table-qualified: the flyer-scans query joins business (which has its own
+// user_id column) and an unqualified reference would be ambiguous there.
+const CONSUMER_EVENTS_ONLY = `(funnel_event.user_id IS NULL OR EXISTS (
   SELECT 1 FROM "user" u WHERE u.id = funnel_event.user_id AND u.role = 'User'
 ))`;
 
@@ -30,7 +32,7 @@ export const getFunnelAnalytics = async (req: Request, res: Response): Promise<v
     const days = ALLOWED_DAYS.includes(Number(req.query.days)) ? Number(req.query.days) : 30;
     const pool = getPool();
 
-    const [totals, reasons, daily, transitions, journey] = await Promise.all([
+    const [totals, reasons, daily, transitions, journey, flyerScans] = await Promise.all([
       // n = raw events (volume); people = distinct persons. The person key prefers
       // user_id (dedups one user across sessions and days), falls back to session_id
       // for anonymous pre-auth events (one journey = one person), and finally the
@@ -97,6 +99,34 @@ export const getFunnelAnalytics = async (req: Request, res: Response): Promise<v
          FROM cohort c`,
         [days],
       ),
+      // Per-location flyer performance: every flyer QR lands on /scan?l=<id>, which fires
+      // scan_landing_viewed with that location_id. Visitors counts PEOPLE, not raw scans -
+      // dedup by user, falling back to journey session for anonymous scanners (the common
+      // case - most people scan before they have an account). Signups come from
+      // user_acquisition (written once at signup), range-matched on its own created_at;
+      // deleted locations drop out via the inner join, same as the Users-tab "Joined via"
+      // dropdown. Bounded: one row per location that had a scan in range, capped at 100
+      // as a payload guard.
+      pool.query(
+        `SELECT funnel_event.location_id,
+                bl.name AS location_name,
+                b.name AS business_name,
+                COUNT(DISTINCT COALESCE(funnel_event.user_id::text, funnel_event.session_id::text, funnel_event.event_id::text))::int AS visitors,
+                (SELECT COUNT(*) FROM user_acquisition ua
+                 WHERE ua.location_id = funnel_event.location_id
+                   AND ua.source = 'location_flyer'
+                   AND ua.created_at >= CURRENT_DATE - $1::int)::int AS signups
+         FROM funnel_event
+         JOIN business_location bl ON bl.id = funnel_event.location_id
+         JOIN business b ON b.id = bl.business_id
+         WHERE funnel_event.event_type = 'scan_landing_viewed'
+           AND funnel_event.occurred_at >= CURRENT_DATE - $1::int
+           AND ${CONSUMER_EVENTS_ONLY}
+         GROUP BY funnel_event.location_id, bl.name, b.name
+         ORDER BY visitors DESC
+         LIMIT 100`,
+        [days],
+      ),
     ]);
 
     const totalsMap: Record<string, number> = {};
@@ -114,6 +144,7 @@ export const getFunnelAnalytics = async (req: Request, res: Response): Promise<v
       daily: daily.rows,
       transitions: transitions.rows,
       journey: journey.rows[0],
+      flyerScans: flyerScans.rows,
     });
   } catch (err) {
     console.error('[admin] funnel analytics failed:', err instanceof Error ? err.message : err);
