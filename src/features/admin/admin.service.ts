@@ -2663,12 +2663,14 @@ export const getBusinessEntriesService = async (
   return { rows: rowsRes.rows, total: countRes.rows[0].total };
 };
 
-// ── Admin Entries page: cross-business receipt-review queue + stats ──────────────
-// Powers /admin/entries: a global view of receipt entries (the only source with images to
-// approve/reject), optionally scoped to one campaign, with a stats header and a paginated,
-// status-filtered list. Admin-facing, so risk/quarantine detail IS surfaced (unlike the
-// business-facing analytics). 'review' is the actionable queue: images still pending OCR,
-// OCR errors, date-unreadable holds, and open contests - everything an admin can act on.
+// ── Admin Entries page: cross-business entry list + receipt-review queue + stats ─────
+// Powers /admin/entries: a global view of ALL entries (receipt, weekly/free, promo,
+// referral), optionally scoped to one campaign, with a stats header and a paginated,
+// status-filtered list ordered by submission time. Only receipt entries carry images to
+// approve/reject; the image-status filters naturally match receipt entries only.
+// Admin-facing, so risk/quarantine detail IS surfaced (unlike the business-facing
+// analytics). 'review' is the actionable queue: images still pending OCR, OCR errors,
+// date-unreadable holds, and open contests - everything an admin can act on.
 export type AdminEntriesStatus = 'review' | 'all' | 'passed' | 'failed' | 'quarantined';
 
 export const getAdminEntriesService = async (
@@ -2698,7 +2700,8 @@ export const getAdminEntriesService = async (
     }
   };
 
-  // Stats: one aggregate pass over receipt entries in scope. FILTER keeps it to a single scan.
+  // Stats: one aggregate pass over all entries in scope. FILTER keeps it to a single scan.
+  // Image-status counts only ever match receipt entries (the only source with images).
   const statsParams: number[] = [];
   const statsDrawClause = drawId ? `AND draw_id = $${statsParams.push(drawId)}` : '';
   const statsRes = await pool.query(
@@ -2713,16 +2716,18 @@ export const getAdminEntriesService = async (
        COUNT(*) FILTER (WHERE is_quarantined = TRUE)::int AS quarantined,
        COUNT(*) FILTER (WHERE receipt_image_url IS NOT NULL)::int AS with_image
      FROM ticket
-     WHERE entry_source = 'receipt' ${statsDrawClause}`,
+     WHERE activated_by_user_id IS NOT NULL ${statsDrawClause}`,
     statsParams,
   );
 
-  // Rows: newest first, joined for the display columns the page shows.
+  // Rows: newest submission first, joined for the display columns the page shows.
+  // created_at is the submission moment for every source (receipt tickets are inserted at
+  // submit time; weekly/promo/referral rows are created when the entry is granted).
   const rowParams: number[] = [limit, offset];
   const rowDrawClause = drawId ? `AND t.draw_id = $${rowParams.push(drawId)}` : '';
   const rowsRes = await pool.query(
     `SELECT
-       t.id, t.code, t.entry_source, t.activated_at,
+       t.id, t.code, t.entry_source, t.activated_at, t.created_at,
        t.is_quarantined, t.quarantine_reason, t.risk_flags,
        t.receipt_image_url, t.image_validation_status,
        t.risk_score_delta, t.transaction_amount, t.receipt_identifier,
@@ -2736,8 +2741,8 @@ export const getAdminEntriesService = async (
      LEFT JOIN "user" u ON u.id = t.activated_by_user_id
      LEFT JOIN business b ON b.id = t.business_id
      LEFT JOIN business_location bl ON bl.id = t.location_id
-     WHERE t.entry_source = 'receipt' ${rowDrawClause} ${statusPredicate('t.')}
-     ORDER BY t.activated_at DESC NULLS LAST
+     WHERE t.activated_by_user_id IS NOT NULL ${rowDrawClause} ${statusPredicate('t.')}
+     ORDER BY t.created_at DESC
      LIMIT $1 OFFSET $2`,
     rowParams,
   );
@@ -2747,7 +2752,7 @@ export const getAdminEntriesService = async (
   const countDrawClause = drawId ? `AND draw_id = $${countParams.push(drawId)}` : '';
   const countRes = await pool.query(
     `SELECT COUNT(*)::int AS total FROM ticket
-     WHERE entry_source = 'receipt' ${countDrawClause} ${statusPredicate('')}`,
+     WHERE activated_by_user_id IS NOT NULL ${countDrawClause} ${statusPredicate('')}`,
     countParams,
   );
 
