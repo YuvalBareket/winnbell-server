@@ -52,7 +52,7 @@ jest.mock('../../notifications/notifications.service.js', () => ({
   getNotificationHistory: jest.fn().mockResolvedValue([]),
 }));
 
-import { createDrawService, openDrawService, closeDrawService, pickDrawWinnerService, extendDrawWinnerOrderService, confirmWinnerService, getDrawWinnerOrderService, removeBusinessFromDrawService, duplicateDrawService, adminImageDecisionService } from '../admin.service';
+import { createDrawService, openDrawService, closeDrawService, pickDrawWinnerService, extendDrawWinnerOrderService, confirmWinnerService, getDrawWinnerOrderService, removeBusinessFromDrawService, duplicateDrawService, adminImageDecisionService, getAdminEntriesService } from '../admin.service';
 
 // ─────────────────────────────────────────────
 // Helpers
@@ -1224,5 +1224,76 @@ describe('adminImageDecisionService — contest_not_won holds', () => {
     expect(rejectCall).toBeDefined();
     // +2: no reward was ever granted; reversing -3 then adding +2 would give +5, which is wrong.
     expect((rejectCall as unknown[])[1]).toEqual([9, 2]);
+  });
+});
+
+// ─────────────────────────────────────────────
+// getAdminEntriesService — the /admin/entries list (2026-09-07 rework)
+// The page shows ALL entry sources (not just receipts), newest submission first,
+// collapsed to one row per receipt: sibling tickets of a multi-entry receipt
+// (anchor_ticket_id set) are folded into their anchor, which carries entry_count.
+// Stats intentionally still count every ticket (true entry totals for the draw).
+// ─────────────────────────────────────────────
+describe('getAdminEntriesService — all-sources list, receipt collapsing', () => {
+  const runWith = (stats: object, rows: unknown[], total: number) => {
+    mockQuery
+      .mockResolvedValueOnce({ rows: [stats] })          // stats aggregate
+      .mockResolvedValueOnce({ rows })                   // page rows
+      .mockResolvedValueOnce({ rows: [{ total }] });     // pagination count
+  };
+
+  test('rows/count collapse to anchors only; stats count every ticket; no receipt-only filter', async () => {
+    runWith({ total: 5 }, [{ id: 1, entry_count: 3 }], 3);
+
+    const result = await getAdminEntriesService(null, 'all', 1, 25);
+
+    const [statsSql] = mockQuery.mock.calls[0];
+    const [rowsSql] = mockQuery.mock.calls[1];
+    const [countSql] = mockQuery.mock.calls[2];
+
+    // Every source appears: the old entry_source = 'receipt' restriction is gone everywhere.
+    for (const sql of [statsSql, rowsSql, countSql]) {
+      expect(sql).not.toContain("entry_source = 'receipt'");
+      expect(sql).toContain('activated_by_user_id IS NOT NULL');
+    }
+    // List + pagination are per-receipt (anchors only); stats deliberately are NOT.
+    expect(rowsSql).toContain('anchor_ticket_id IS NULL');
+    expect(countSql).toContain('anchor_ticket_id IS NULL');
+    expect(statsSql).not.toContain('anchor_ticket_id IS NULL');
+    // Collapsed rows carry how many entries the receipt earned.
+    expect(rowsSql).toContain('AS entry_count');
+    // Newest submission first (created_at, the submit moment for every source).
+    expect(rowsSql).toContain('ORDER BY t.created_at DESC');
+
+    expect(result).toEqual({ stats: { total: 5 }, rows: [{ id: 1, entry_count: 3 }], total: 3 });
+  });
+
+  test('draw filter binds after limit/offset in rows ($3) and first in count ($1)', async () => {
+    runWith({ total: 0 }, [], 0);
+
+    await getAdminEntriesService(7, 'failed', 2, 25);
+
+    const [rowsSql, rowsParams] = mockQuery.mock.calls[1];
+    const [countSql, countParams] = mockQuery.mock.calls[2];
+    expect(rowsSql).toContain('t.draw_id = $3');
+    expect(rowsParams).toEqual([25, 25, 7]); // limit, offset (page 2), drawId
+    expect(countSql).toContain('draw_id = $1');
+    expect(countParams).toEqual([7]);
+    // The failed view matches genuine OCR rejections only.
+    expect(rowsSql).toContain("image_validation_status = 'failed'");
+  });
+
+  test('quarantined view filters on is_quarantined; all view adds no status predicate', async () => {
+    runWith({ total: 0 }, [], 0);
+    await getAdminEntriesService(null, 'quarantined', 1, 25);
+    expect(mockQuery.mock.calls[1][0]).toContain('is_quarantined = TRUE');
+
+    jest.clearAllMocks();
+    mockQuery.mockResolvedValue({ rows: [{ total: 0 }] });
+    runWith({ total: 0 }, [], 0);
+    await getAdminEntriesService(null, 'all', 1, 25);
+    const allRowsSql = mockQuery.mock.calls[1][0];
+    expect(allRowsSql).not.toContain('image_validation_status =');
+    expect(allRowsSql).not.toContain('is_quarantined = TRUE');
   });
 });

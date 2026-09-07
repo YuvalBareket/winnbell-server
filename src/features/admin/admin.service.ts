@@ -2723,6 +2723,11 @@ export const getAdminEntriesService = async (
   // Rows: newest submission first, joined for the display columns the page shows.
   // created_at is the submission moment for every source (receipt tickets are inserted at
   // submit time; weekly/promo/referral rows are created when the entry is granted).
+  // One row PER RECEIPT, not per ticket: sibling tickets of a multi-entry receipt (the
+  // amount multiplier) point at their anchor via anchor_ticket_id and are collapsed into
+  // it - entry_count carries how many entries the document earned. Non-receipt entries are
+  // their own anchor (anchor_ticket_id NULL, entry_count 1). The partial index on
+  // anchor_ticket_id keeps the sibling count cheap.
   const rowParams: number[] = [limit, offset];
   const rowDrawClause = drawId ? `AND t.draw_id = $${rowParams.push(drawId)}` : '';
   const rowsRes = await pool.query(
@@ -2732,6 +2737,7 @@ export const getAdminEntriesService = async (
        t.receipt_image_url, t.image_validation_status,
        t.risk_score_delta, t.transaction_amount, t.receipt_identifier,
        to_char(t.transaction_date, 'YYYY-MM-DD') AS transaction_date,
+       (1 + (SELECT COUNT(*) FROM ticket s WHERE s.anchor_ticket_id = t.id))::int AS entry_count,
        d.name AS draw_name, d.id AS draw_id,
        u.id AS user_id, u.full_name AS user_name, u.email AS user_email, u.risk_score AS user_risk_score,
        b.name AS business_name,
@@ -2741,18 +2747,20 @@ export const getAdminEntriesService = async (
      LEFT JOIN "user" u ON u.id = t.activated_by_user_id
      LEFT JOIN business b ON b.id = t.business_id
      LEFT JOIN business_location bl ON bl.id = t.location_id
-     WHERE t.activated_by_user_id IS NOT NULL ${rowDrawClause} ${statusPredicate('t.')}
+     WHERE t.activated_by_user_id IS NOT NULL AND t.anchor_ticket_id IS NULL
+       ${rowDrawClause} ${statusPredicate('t.')}
      ORDER BY t.created_at DESC
      LIMIT $1 OFFSET $2`,
     rowParams,
   );
 
-  // Total for pagination, honoring the same draw + status filter.
+  // Total for pagination: counts collapsed rows (receipts, not tickets) to match the list.
   const countParams: number[] = [];
   const countDrawClause = drawId ? `AND draw_id = $${countParams.push(drawId)}` : '';
   const countRes = await pool.query(
     `SELECT COUNT(*)::int AS total FROM ticket
-     WHERE activated_by_user_id IS NOT NULL ${countDrawClause} ${statusPredicate('')}`,
+     WHERE activated_by_user_id IS NOT NULL AND anchor_ticket_id IS NULL
+       ${countDrawClause} ${statusPredicate('')}`,
     countParams,
   );
 

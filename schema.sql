@@ -683,6 +683,14 @@ CREATE INDEX IF NOT EXISTS idx_ticket_anchor
   ON ticket (anchor_ticket_id)
   WHERE anchor_ticket_id IS NOT NULL;
 
+-- Admin /admin/entries list: newest-first page over ALL entries (quarantined included, so
+-- idx_ticket_created_at's is_quarantined=FALSE partial cannot serve it), collapsed to one
+-- row per receipt (anchor_ticket_id IS NULL). Lets the planner walk created_at DESC and
+-- stop at the page size instead of sorting the whole ticket table.
+CREATE INDEX IF NOT EXISTS idx_ticket_admin_entries
+  ON ticket (created_at DESC)
+  WHERE activated_by_user_id IS NOT NULL AND anchor_ticket_id IS NULL;
+
 -- ── business ──────────────────────────────────────────────────────────────────
 
 -- Owner lookup (find a user's business) is served by the UNIQUE(user_id) constraint's index;
