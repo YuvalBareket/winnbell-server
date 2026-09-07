@@ -126,6 +126,14 @@ CREATE TABLE business (
   min_transaction_amount          NUMERIC(10, 2) NOT NULL DEFAULT 20 CHECK (min_transaction_amount > 0),
   pending_min_transaction_amount  NUMERIC(10, 2) NULL CHECK (pending_min_transaction_amount IS NULL OR pending_min_transaction_amount > 0),
   website_url                     TEXT,
+  -- Admin review gate. Self-serve signups start as 'under_review' and become 'approved'
+  -- once an admin clears them. 'blocked' removes the business from all consumer surfaces
+  -- immediately. Admin-created businesses insert 'approved' directly (trusted path).
+  -- Legal: the word "blocked" is NEVER surfaced to business owners - owner endpoints
+  -- expose only a boolean is_under_review = (review_status <> 'approved').
+  review_status                   TEXT NOT NULL DEFAULT 'under_review' CHECK (review_status IN ('under_review','approved','blocked')),
+  review_status_changed_at        TIMESTAMP NULL,
+  review_status_changed_by_user_id INT NULL REFERENCES "user"(id) ON DELETE SET NULL,
   created_at                      TIMESTAMP NOT NULL DEFAULT NOW(),
   updated_at                      TIMESTAMP NOT NULL DEFAULT NOW()
 );

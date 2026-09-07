@@ -65,6 +65,7 @@ export const getNearbyBusinessesService = async (
     -- Exception: participation_paused is a VOLUNTARY opt-out (founding cancel) - the
     -- owner asked to leave the map immediately, so it overrides the draw_entry rule.
     WHERE loc.is_active = true
+      AND b.review_status = 'approved'
       AND EXISTS (
         SELECT 1 FROM draw_entry de
         JOIN draw d ON d.id = de.draw_id
@@ -148,6 +149,7 @@ export const getAllMapLocationsService = async (
     -- Same eligibility rule as getNearbyBusinessesService (participation = membership in
     -- the Open campaign, voluntary pause overrides it) with the bounding-box filter removed.
     WHERE loc.is_active = true
+      AND b.review_status = 'approved'
       AND EXISTS (
         SELECT 1 FROM draw_entry de
         JOIN draw d ON d.id = de.draw_id
@@ -314,6 +316,10 @@ export const getMyBusinessData = async (userId: number, managedLocationId?: numb
           SELECT 1 FROM draw_entry de JOIN draw d ON d.id = de.draw_id
           WHERE de.business_id = b.id AND d.status = 'Open'
         ) AND COALESCE(s.participation_paused, FALSE) = FALSE) AS is_participating,
+        -- Legal: never expose the raw review_status string to the business owner.
+        -- 'blocked' must never cross the wire to a business client endpoint. Expose
+        -- only a boolean so the owner sees neutral "under review" copy in the UI.
+        (b.review_status <> 'approved') AS is_under_review,
         (
           SELECT COALESCE(json_agg(json_build_object(
             'id', bl.id,
@@ -640,6 +646,7 @@ export const searchParticipatingLocationsService = async (query: string): Promis
     JOIN business b ON bl.business_id = b.id
     LEFT JOIN subscription s ON s.business_id = b.id
     WHERE bl.is_active = true
+      AND b.review_status = 'approved'
       AND EXISTS (
         SELECT 1 FROM draw_entry de
         JOIN draw d ON d.id = de.draw_id
@@ -685,10 +692,13 @@ const fetchLocationProfile = async (
   if (cached !== undefined) return cached;
 
   const gate = participatingOnly
-    ? `AND bl.is_active
+    ? `AND b.review_status = 'approved'
+       AND bl.is_active
        AND EXISTS (SELECT 1 FROM draw_entry de JOIN draw d ON d.id = de.draw_id WHERE de.business_id = b.id AND d.status = 'Open' AND de.paused_at IS NULL)
        AND NOT EXISTS (SELECT 1 FROM subscription sp WHERE sp.business_id = b.id AND sp.participation_paused = TRUE)`
-    : '';
+    // Non-participatingOnly (unconditional) fetch: treat non-approved businesses as
+    // not-found so blocked/under-review businesses have no reachable public profile.
+    : `AND b.review_status = 'approved'`;
 
   const pool = getPool();
   const result = await pool.query(
@@ -729,13 +739,14 @@ const fetchLocationProfile = async (
           ) AS cap_reached,
       (SELECT prize_pool FROM open_draw) AS draw_prize_amount,
       (SELECT draw_date FROM open_draw) AS draw_date,
-      -- active location + enrolled in the open draw (draw_entry = the paid-participation
-      -- record; subscription status is NOT consulted, since a subscription that ended on
-      -- the 24th still owns the campaign it paid for). participation_paused IS consulted:
-      -- it is a voluntary opt-out (founding cancel), not a billing lapse. On the
-      -- unconditional fetch this tells the client whether to show "Submit a Receipt".
+      -- active location + approved + enrolled in the open draw (draw_entry = the
+      -- paid-participation record; subscription status is NOT consulted). participation_paused
+      -- IS consulted: it is a voluntary opt-out (founding cancel), not a billing lapse.
+      -- review_status = 'approved' is required: a non-approved business must not appear as
+      -- participating to any client surface.
       (
-        bl.is_active
+        b.review_status = 'approved'
+        AND bl.is_active
         AND EXISTS (SELECT 1 FROM draw_entry de JOIN draw d ON d.id = de.draw_id WHERE de.business_id = b.id AND d.status = 'Open' AND de.paused_at IS NULL)
         AND NOT EXISTS (SELECT 1 FROM subscription sp WHERE sp.business_id = b.id AND sp.participation_paused = TRUE)
       ) AS is_participating
@@ -859,6 +870,10 @@ export const joinCurrentCampaignService = async (
   if (!drawRes.rows[0]) throw new Error('NO_CAMPAIGN');
   const draw = drawRes.rows[0] as { id: number; name: string; status: string };
 
+  // review_status: only 'blocked' is refused here. An 'under_review' business MAY
+  // pre-enroll - the draw_entry stays invisible (every consumer surface gates on
+  // review_status = 'approved'), so admin approval flips it live mid-campaign with
+  // no further action. Blocking later does not delete the row; the same gates hide it.
   const inserted = await pool.query(
     `INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, cap_at_entry, min_transaction_at_entry)
      SELECT $1, b.id, COALESCE(s.fee_at_entry, 0),
@@ -867,22 +882,32 @@ export const joinCurrentCampaignService = async (
      FROM business b
      LEFT JOIN subscription s ON s.business_id = b.id
      WHERE b.id = $2
+       AND b.review_status <> 'blocked'
        AND COALESCE(s.participation_paused, FALSE) = FALSE
        AND COALESCE(s.skip_next_campaign, FALSE) = FALSE
      ON CONFLICT (draw_id, business_id) DO NOTHING`,
     [draw.id, businessId],
   );
 
-  // Zero rows has TWO distinct causes that must not both read as success: the row already
-  // exists (double-click / already joined - genuinely fine), or the paused/skip flags
-  // filtered the SELECT away (the business asked to sit out - "joined" would be a lie;
-  // their entry silently not existing would surface as a support mystery later).
+  // Zero rows has THREE distinct causes: the row already exists (double-click / already
+  // joined - fine), the business is blocked (must surface as an error), or the paused/skip
+  // flags filtered the SELECT away (the business asked to sit out).
   if (inserted.rowCount === 0) {
     const existing = await pool.query(
       `SELECT 1 FROM draw_entry WHERE draw_id = $1 AND business_id = $2`,
       [draw.id, businessId],
     );
-    if (existing.rows.length === 0) throw new Error('PARTICIPATION_PAUSED');
+    if (existing.rows.length === 0) {
+      // Distinguish blocked from paused: query review_status to tell them apart.
+      const statusRes = await pool.query(
+        `SELECT review_status FROM business WHERE id = $1 LIMIT 1`,
+        [businessId],
+      );
+      if (statusRes.rows[0]?.review_status === 'blocked') {
+        throw new Error('BUSINESS_NOT_APPROVED');
+      }
+      throw new Error('PARTICIPATION_PAUSED');
+    }
   }
 
   // Joining an OPEN campaign flips the business's locations to participating on the public

@@ -49,6 +49,14 @@ jest.mock('../../../shared/email/email.service.js', () => ({
 jest.mock('../../ocr/ocr.service.js', () => ({
   validateReceiptAsync: jest.fn(),
 }));
+// notifications.service imports web-push which calls setVapidDetails at module load
+// and throws without VAPID keys in the test environment — stub the whole module.
+jest.mock('../../notifications/notifications.service.js', () => ({
+  sendToUser: jest.fn().mockResolvedValue(undefined),
+  sendToAudience: jest.fn().mockResolvedValue(0),
+  logNotification: jest.fn().mockResolvedValue(undefined),
+  getNotificationHistory: jest.fn().mockResolvedValue([]),
+}));
 
 import { updateBusinessThresholdService } from '../admin.service';
 import { publicCache } from '../../../shared/cache/cache.js';

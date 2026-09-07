@@ -7,6 +7,7 @@ import { sendFoundingFinalCampaignEmail } from '../../shared/email/email.service
 import { snapshotOfficialRulesForDraw } from '../../shared/legal/officialRulesSnapshot.js';
 import { deleteObjects } from '../../shared/s3.js';
 import { decayAllUserRiskScores } from '../risk/risk.service.js';
+import { sendToUser } from '../notifications/notifications.service.js';
 
 // Entry sources that need no receipt verification. Winner validation is expected to end at
 // the first one it reaches, so the stored selection order stops at the first auto-valid
@@ -172,7 +173,12 @@ const logDrawAudit = async (
 const ENROLLMENT_ELIGIBLE_SQL = `s.status IN ('Active', 'Trialing')
       AND s.current_period_end >= NOW()
       AND s.skip_next_campaign = FALSE
-      AND s.participation_paused = FALSE`;
+      AND s.participation_paused = FALSE
+      AND b.review_status <> 'blocked'`;
+
+// Exported only for test assertions - verifies both enrollment INSERT and the
+// "next campaign ready" preview CTE use the exact same predicate.
+export const ENROLLMENT_ELIGIBLE_SQL_FOR_TEST = ENROLLMENT_ELIGIBLE_SQL;
 
 const BIZ_HEALTH_CTE = `
   -- open_draw: resolve the single open draw once; NULL when none is open.
@@ -330,8 +336,8 @@ const BIZ_HEALTH_CTE = `
 `;
 
 // Allowed filter values for the businesses list endpoint.
-type BusinessHealthFilter = 'attention' | 'no_recent_entries' | 'low_engagement' | 'billing' | 'setup' | 'next_ready';
-const VALID_HEALTH_FILTERS = new Set<BusinessHealthFilter>(['attention', 'no_recent_entries', 'low_engagement', 'billing', 'setup', 'next_ready']);
+type BusinessHealthFilter = 'attention' | 'no_recent_entries' | 'low_engagement' | 'billing' | 'setup' | 'next_ready' | 'review';
+const VALID_HEALTH_FILTERS = new Set<BusinessHealthFilter>(['attention', 'no_recent_entries', 'low_engagement', 'billing', 'setup', 'next_ready', 'review']);
 
 export const getBusinessesWithStats = async (params: {
   page: number;
@@ -384,6 +390,8 @@ export const getBusinessesWithStats = async (params: {
         ? `h.billing_issue`
         : filter === 'next_ready'
         ? `h.next_campaign_ready`
+        : filter === 'review'
+        ? `b.review_status = 'under_review'`
         : `h.setup_gap`, // 'setup'
     );
   }
@@ -410,6 +418,7 @@ export const getBusinessesWithStats = async (params: {
         b.id,
         b.name,
         b.sector,
+        b.review_status,
         s.entries_per_location,
         (s.status IN ('Active', 'Trialing')) AS is_subscribed,
         u.full_name AS owner_name,
@@ -480,6 +489,7 @@ export const getBusinessHealthSummaryService = async (): Promise<{
   billing: number;
   setup: number;
   next_ready: number;
+  pending_review: number;
 }> => {
   const pool = getPool();
   const result = await pool.query(`
@@ -493,7 +503,8 @@ export const getBusinessHealthSummaryService = async (): Promise<{
       COUNT(*) FILTER (WHERE h.low_engagement)::int                             AS low_engagement,
       COUNT(*) FILTER (WHERE h.billing_issue)::int                              AS billing,
       COUNT(*) FILTER (WHERE h.setup_gap)::int                                  AS setup,
-      COUNT(*) FILTER (WHERE h.next_campaign_ready)::int                        AS next_ready
+      COUNT(*) FILTER (WHERE h.next_campaign_ready)::int                        AS next_ready,
+      COUNT(*) FILTER (WHERE b.review_status = 'under_review')::int             AS pending_review
     FROM business b
     JOIN biz_health h ON h.business_id = b.id
   `);
@@ -506,6 +517,7 @@ export const getBusinessHealthSummaryService = async (): Promise<{
     billing:           Number(row?.billing           ?? 0),
     setup:             Number(row?.setup             ?? 0),
     next_ready:        Number(row?.next_ready        ?? 0),
+    pending_review:    Number(row?.pending_review    ?? 0),
   };
 };
 
@@ -541,7 +553,7 @@ export const createBusinessService = async (data: {
       throw new Error('BUSINESS_ALREADY_EXISTS');
     }
     const bizResult = await client.query(
-      `INSERT INTO business (user_id, name, sector) VALUES ($1, $2, $3) RETURNING *`,
+      `INSERT INTO business (user_id, name, sector, review_status) VALUES ($1, $2, $3, 'approved') RETURNING *`,
       [data.owner_user_id, data.name, data.sector],
     );
     const business = bizResult.rows[0];
@@ -849,10 +861,12 @@ const openDrawInTx = async (client: import('pg').PoolClient, drawId: number, act
     INSERT INTO draw_entry (draw_id, business_id, fee_at_entry, cap_at_entry, min_transaction_at_entry)
     SELECT d.id, b.id, COALESCE(s.fee_at_entry, 0), s.entries_per_location, b.min_transaction_amount
     FROM draw d
+    -- business is joined first so b.review_status is in scope when ENROLLMENT_ELIGIBLE_SQL
+    -- is evaluated; the ON TRUE lets the subscription join carry all eligibility conditions.
+    JOIN business b ON TRUE
     -- Eligibility lives in the shared ENROLLMENT_ELIGIBLE_SQL constant so the admin
     -- "next campaign ready" preview uses the IDENTICAL rule and can never drift.
-    JOIN subscription s ON ${ENROLLMENT_ELIGIBLE_SQL}
-    JOIN business b ON b.id = s.business_id
+    JOIN subscription s ON s.business_id = b.id AND ${ENROLLMENT_ELIGIBLE_SQL}
     WHERE d.id = $1
     ON CONFLICT (draw_id, business_id) DO NOTHING
   `, [drawId]);
@@ -2466,6 +2480,55 @@ export const updateBusinessThresholdService = async (
   };
 };
 
+const VALID_REVIEW_STATUSES = new Set(['under_review', 'approved', 'blocked']);
+
+export const updateBusinessReviewStatusService = async (
+  businessId: number,
+  status: string,
+  adminUserId: number,
+): Promise<void> => {
+  if (!VALID_REVIEW_STATUSES.has(status)) {
+    throw Object.assign(new Error('Invalid review status'), { statusCode: 400 });
+  }
+
+  const pool = getPool();
+
+  // Fetch current status so we can detect a transition into 'approved' and notify the owner.
+  const before = await pool.query(
+    `SELECT review_status, user_id FROM business WHERE id = $1 LIMIT 1`,
+    [businessId],
+  );
+  if (!before.rows[0]) {
+    throw Object.assign(new Error('Business not found'), { statusCode: 404 });
+  }
+  const previousStatus: string = before.rows[0].review_status;
+  const ownerUserId: number = before.rows[0].user_id;
+
+  const res = await pool.query(
+    `UPDATE business
+     SET review_status = $1,
+         review_status_changed_at = NOW(),
+         review_status_changed_by_user_id = $2
+     WHERE id = $3`,
+    [status, adminUserId, businessId],
+  );
+  if ((res.rowCount ?? 0) === 0) {
+    throw Object.assign(new Error('Business not found'), { statusCode: 404 });
+  }
+
+  invalidatePublicBusinessData();
+
+  // Fire-and-forget push notification when a business transitions INTO 'approved'.
+  // Silent on block (legal: never expose "blocked" to the owner).
+  if (status === 'approved' && previousStatus !== 'approved') {
+    sendToUser(ownerUserId, {
+      title: 'Your business is live on Winnbell',
+      body: 'Your business passed review and is now visible to customers.',
+      url: '/business',
+    }).catch(() => { /* non-fatal */ });
+  }
+};
+
 export const getBusinessDetailService = async (businessId: number) => {
   const pool = getPool();
 
@@ -2493,6 +2556,8 @@ export const getBusinessDetailService = async (businessId: number) => {
         u.risk_score AS owner_risk_score,
         u.risk_flags AS owner_risk_flags,
         u.is_active AS owner_is_active,
+        b.review_status,
+        b.review_status_changed_at,
         s.status AS subscription_status,
         s.fee_at_entry,
         s.entries_per_location,
@@ -2904,6 +2969,7 @@ export const getAdminMapLocationsService = async (
       b.name AS business_name,
       b.sector,
       b.logo_url,
+      b.review_status,
       s.status AS subscription_status,
       EXISTS (
         SELECT 1 FROM draw_entry de JOIN draw d ON d.id = de.draw_id

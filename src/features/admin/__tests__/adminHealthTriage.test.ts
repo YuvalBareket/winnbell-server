@@ -95,7 +95,7 @@ beforeEach(() => {
 // getBusinessHealthSummaryService — shape
 // ─────────────────────────────────────────────
 describe('getBusinessHealthSummaryService — response shape', () => {
-  test('returns all seven numeric fields when the DB returns a row', async () => {
+  test('returns all eight numeric fields when the DB returns a row', async () => {
     mockQuery.mockResolvedValueOnce({
       rows: [{
         total:             10,
@@ -105,6 +105,7 @@ describe('getBusinessHealthSummaryService — response shape', () => {
         billing:            1,
         setup:              0,
         next_ready:         6,
+        pending_review:     2,
       }],
     });
 
@@ -118,6 +119,7 @@ describe('getBusinessHealthSummaryService — response shape', () => {
       billing:            1,
       setup:              0,
       next_ready:         6,
+      pending_review:     2,
     });
   });
 
@@ -133,6 +135,7 @@ describe('getBusinessHealthSummaryService — response shape', () => {
     expect(result.billing).toBe(0);
     expect(result.setup).toBe(0);
     expect(result.next_ready).toBe(0);
+    expect(result.pending_review).toBe(0);
   });
 
   test('the SQL query embeds the biz_health CTE (not a plain SELECT)', async () => {

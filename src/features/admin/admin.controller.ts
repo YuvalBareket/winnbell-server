@@ -41,6 +41,7 @@ import {
   removeBusinessFromDrawService,
   pauseBusinessInDrawService,
   updateBusinessThresholdService,
+  updateBusinessReviewStatusService,
   getBusinessDetailService,
   getBusinessEntriesService,
   getAdminEntriesService,
@@ -904,6 +905,35 @@ export const updateBusinessThreshold = async (req: Request, res: Response): Prom
     }
     console.error('[admin.updateBusinessThreshold]', err);
     res.status(500).json({ message: 'Failed to update threshold' });
+  }
+};
+
+export const updateBusinessReviewStatus = async (req: Request, res: Response): Promise<void> => {
+  const businessId = parseInt(req.params.businessId as string, 10);
+  if (!businessId || businessId <= 0) {
+    res.status(400).json({ message: 'Invalid businessId' });
+    return;
+  }
+  const { status } = req.body as { status?: unknown };
+  if (typeof status !== 'string' || !['under_review', 'approved', 'blocked'].includes(status)) {
+    res.status(400).json({ message: 'status must be one of: under_review, approved, blocked' });
+    return;
+  }
+  try {
+    await updateBusinessReviewStatusService(businessId, status, req.user!.id);
+    res.json({ businessId, review_status: status });
+  } catch (err: unknown) {
+    const statusCode = (err as { statusCode?: number }).statusCode;
+    if (statusCode === 404) {
+      res.status(404).json({ message: 'Business not found' });
+      return;
+    }
+    if (statusCode === 400) {
+      res.status(400).json({ message: err instanceof Error ? err.message : 'Invalid status' });
+      return;
+    }
+    console.error('[admin.updateBusinessReviewStatus]', err);
+    res.status(500).json({ message: 'Failed to update review status' });
   }
 };
 

@@ -43,6 +43,15 @@ jest.mock('../../../shared/email/email.service.js', () => ({
   sendFoundingFinalCampaignEmail: (...args: unknown[]) => mockSendFoundingFinalCampaignEmail(...args),
 }));
 
+// notifications.service imports web-push which calls setVapidDetails at module load
+// and throws without VAPID keys in the test environment — stub the whole module.
+jest.mock('../../notifications/notifications.service.js', () => ({
+  sendToUser: jest.fn().mockResolvedValue(undefined),
+  sendToAudience: jest.fn().mockResolvedValue(0),
+  logNotification: jest.fn().mockResolvedValue(undefined),
+  getNotificationHistory: jest.fn().mockResolvedValue([]),
+}));
+
 import { createDrawService, openDrawService, closeDrawService, pickDrawWinnerService, extendDrawWinnerOrderService, confirmWinnerService, getDrawWinnerOrderService, removeBusinessFromDrawService, duplicateDrawService, adminImageDecisionService } from '../admin.service';
 
 // ─────────────────────────────────────────────

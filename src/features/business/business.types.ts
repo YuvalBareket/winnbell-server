@@ -55,6 +55,9 @@ export interface MyBusinessData {
   // Enrolled in the currently Open campaign - gates the pre-save "campaign is live"
   // warning while editing the receipt minimum (audit P2-10).
   is_participating: boolean;
+  // True when review_status != 'approved'. Legal: raw review_status is never exposed
+  // to owner endpoints - 'blocked' must never cross the wire to a business client.
+  is_under_review: boolean;
   locations: MyBusinessLocation[];
   website_url?: string | null;
 }

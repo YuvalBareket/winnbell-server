@@ -373,6 +373,7 @@ export const submitReceiptEntryService = async (
           FROM business_location bl
           JOIN business b ON bl.business_id = b.id
           WHERE bl.id = $2 AND bl.is_active = true
+            AND b.review_status = 'approved'
             AND EXISTS (
               SELECT 1 FROM draw_entry de
               JOIN draw d ON d.id = de.draw_id

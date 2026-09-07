@@ -39,6 +39,7 @@ router.get('/businesses/:businessId/campaign/kpis', adminGetCampaignKpis);
 router.get('/businesses/:businessId/campaign/entries', adminGetCampaignEntries);
 router.get('/businesses/:businessId/analytics/:category', adminGetBusinessAnalytics);
 router.patch('/businesses/:businessId/threshold', adminController.updateBusinessThreshold);
+router.patch('/businesses/:businessId/review-status', adminController.updateBusinessReviewStatus);
 router.patch('/users/:userId/role', adminController.updateUserRole);
 router.patch('/users/:userId/active', adminController.toggleUserActive);
 router.patch('/users/:userId/risk', adminController.setUserRisk);

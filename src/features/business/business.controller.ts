@@ -404,6 +404,11 @@ export const joinCurrentCampaignController = async (req: AuthRequest, res: Respo
       res.status(409).json({ message: 'There is no campaign to join right now. Please check back soon.' });
       return;
     }
+    if (msg === 'BUSINESS_NOT_APPROVED') {
+      // Legal: never say "blocked" to a business owner - neutral wording only.
+      res.status(403).json({ message: 'Your business is still under review.' });
+      return;
+    }
     if (msg === 'PARTICIPATION_PAUSED') {
       res.status(409).json({ message: 'Your participation is currently paused. Resume it from your plan settings to join the campaign.' });
       return;

@@ -110,8 +110,8 @@ export const testSetup = async (req: Request, res: Response): Promise<void> => {
         );
         if (bizCheck.rows.length === 0) {
           const ins = await client.query(
-            `INSERT INTO business (user_id, name, sector, description)
-             VALUES ($1, $2, $3, $4) RETURNING id`,
+            `INSERT INTO business (user_id, name, sector, description, review_status)
+             VALUES ($1, $2, $3, $4, 'approved') RETURNING id`,
             [userId, config.businessName, config.businessSector ?? 'Food',
               persona === 'david'
                 ? 'A neighborhood bakery offering fresh bread and pastries baked daily.'

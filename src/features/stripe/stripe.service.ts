@@ -772,6 +772,7 @@ async function recoverBusinessAfterPayment(pool: Pool, businessId: number): Prom
       JOIN subscription s ON s.business_id = $1
       JOIN business b ON b.id = s.business_id
       WHERE d.status = 'Open'
+        AND b.review_status <> 'blocked'
         AND s.current_period_end >= NOW()
         AND s.skip_next_campaign = FALSE
         AND s.participation_paused = FALSE
